@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -4053,6 +4054,87 @@ func TestWindowsNoStartInstallSucceedsWithNotStartedWarning(t *testing.T) {
 	}
 }
 
+// GAP-1749: Setup /install without CONFIG= (a deferred-config install) as
+// LocalSystem exited 1603 with the guardian issues of a deployment whose
+// services stay stopped and disabled until the repair that brings its
+// configuration. The install now succeeds in the waiting state with one
+// deferred_config_pending warning and a pending activation record, so that
+// repair records the activation; any other error still fails, and so do the
+// same issues when the installer did not record the waiting state or the run
+// was a normal install.
+func TestWindowsDeferredConfigInstallWaitsForConfigurationGAP1749(t *testing.T) {
+	metadata := filepath.Join(t.TempDir(), "deployment.json")
+	if err := os.WriteFile(metadata, []byte(`{"installed":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousMetadata := windowsEnterpriseActivationMetadata
+	t.Cleanup(func() { windowsEnterpriseActivationMetadata = previousMetadata })
+	windowsEnterpriseActivationMetadata = func() (string, bool) { return metadata, true }
+	guardian := []string{
+		"guardian status: hook guardian has not completed a reconcile",
+		"guardian status: protected hook guardian authorization is missing",
+		"guardian status: protected hook guardian activation is missing",
+	}
+	run := func(opts *windowsEnterpriseLifecycleOptions, waiting bool, errs ...string) *enterprisestatus.Result {
+		t.Helper()
+		document, err := json.Marshal(map[string]any{
+			"schema_version": 1, "ok": true, "action": "install", "installed": true, "transaction_pending": false,
+			"deferred_config_pending": waiting, "errors": errs,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		report, err := parseWindowsEnterpriseInstallerReport(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := enterprisestatus.New("install", "standalone", "windows", "1.0.42")
+		applyWindowsEnterpriseInstallerReport(result, opts, report, windowsEnterpriseStandaloneRun{})
+		applyWindowsEnterpriseAgentSessions(result, opts)
+		result.Finish("windows", windowsEnterpriseFailureCodeFor(result))
+		return result
+	}
+	deferred := &windowsEnterpriseLifecycleOptions{deferredConfig: true, activationStartedAt: time.Now().UTC()}
+	result := run(deferred, true, guardian...)
+	waitingWarnings, notStarted := 0, 0
+	for _, warning := range result.Warnings {
+		switch warning.Code {
+		case "deferred_config_pending":
+			waitingWarnings++
+			// The completing repair is named in the forms that run on a
+			// managed computer, where Setup is not installed.
+			for _, want := range []string{
+				"`" + managed.WindowsSetupCommand("/repair") + " CONFIG=<config.yaml> MANIFEST=<targets.yaml>`",
+				windowsEnterpriseAdminCommand("repair", "--config", "<config.yaml>", "--manifest", "<targets.yaml>"),
+				managed.WindowsSetupSource,
+				"elevated PowerShell prompt",
+			} {
+				if !strings.Contains(warning.Message, want) {
+					t.Errorf("deferred_config_pending warning %q does not name %q", warning.Message, want)
+				}
+			}
+		case "not_started":
+			notStarted++
+		}
+	}
+	if !result.OK || result.ExitCode != 0 || len(result.Errors) != 0 || waitingWarnings != 1 || notStarted != 0 {
+		t.Fatalf("deferred-config install: ok=%v exit=%d errors=%+v warnings=%+v", result.OK, result.ExitCode, result.Errors, result.Warnings)
+	}
+	record := filepath.Join(filepath.Dir(metadata), windowsEnterpriseActivationFileName)
+	if data, err := os.ReadFile(record); err != nil || !strings.Contains(string(data), `"pending":true`) || strings.Contains(string(data), `"activated_at"`) {
+		t.Fatalf("deferred-config activation record = %q, err = %v (want pending, not activated)", data, err)
+	}
+	if result := run(deferred, true, append(guardian, "gateway config check failed")...); result.OK || len(result.Errors) != 1 {
+		t.Fatalf("deferred-config install with another error: %+v", result.Errors)
+	}
+	if result := run(deferred, false, guardian...); result.OK || len(result.Errors) != len(guardian) {
+		t.Fatalf("deferred-config install the installer did not record as waiting: %+v", result.Errors)
+	}
+	if result := run(&windowsEnterpriseLifecycleOptions{}, true, guardian...); result.OK || len(result.Errors) != len(guardian) {
+		t.Fatalf("install without --deferred-config: %+v", result.Errors)
+	}
+}
+
 // #1105, GAP-0211: the upgrade from 1.0.2 went on without a signed-out
 // account whose DefenseClaw folder is untrusted. The result names the
 // account and the folder once, as the informational
@@ -4233,7 +4315,7 @@ func TestWindowsCursorRepairPlannerRefusesALinkedRecord(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		symlinkOrSkip(t, target, config.MigrationRecordPath(path))
+		testenv.Symlink(t, target, config.MigrationRecordPath(path))
 		windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) {
 			return managed.StandaloneLayout{ConfigPath: path}, nil
 		}

@@ -99,14 +99,19 @@ type ToolInspectRequest struct {
 	// unknown tier of the policy, any other tool is blocked as an oversize call
 	// is (rel-1-0-10:GAP-0356). It can only make a verdict stricter.
 	ArgsPartial bool `json:"args_partial,omitempty"`
+	// aliasPending is held by the HTTP route until all final policy steps
+	// have decided whether the tool will run. Never from the wire.
+	aliasPending *effectAliasPending
 	// toolUseID is set by a connector adapter, never from the wire (see
 	// contentScope below).
 	toolUseID string
-	// codeGuardPartial marks the CodeGuard view of a shell here-document
-	// patch the shell expands (codeGuardShellPatchArgs): its findings are
-	// shown and never enforced, as for any scan that did not read the
-	// whole content. Never from the wire.
-	codeGuardPartial bool
+	// codeGuardShownArgs is the partial CodeGuard view of a shell call
+	// (codeGuardShellPatchArgs): the here-document patches and file writes
+	// the shell expands before they land. Its findings are shown and never
+	// enforced, as for any scan that did not read the whole content; Args
+	// keeps the complete content of the same call, which is enforced. Never
+	// from the wire.
+	codeGuardShownArgs json.RawMessage
 	// toolArgsAreHookEnvelope marks args the connector did not project from a
 	// tool payload: the whole hook envelope, session and event keys included.
 	toolArgsAreHookEnvelope bool
@@ -140,8 +145,14 @@ type ToolInspectRequest struct {
 	// tool text of its own, only the name of a file the agent itself keeps
 	// (Claude Code FileChanged on ~/.claude.json, GAP-2623). The rule and AID
 	// lanes still scan it and the event is still recorded. Set only by a
-	// connector adapter, never from the public inspect wire.
+	// connector adapter, or with skipAID by the substrate MCP verdict for a
+	// reading the call's own reading already sends to the judge (a bounded
+	// projection, substrateMCPReading), never from the public inspect wire.
 	skipJudge bool
+	// skipAID keeps the Cisco AI Defense lane off such a reading: the rule
+	// lanes read it, AID reads the call once (RV-0841b F6). Never from the
+	// public inspect wire.
+	skipAID bool
 	// judgeContent is the part of a long message the judge is sent, when the
 	// rules read more than the judge takes (messageJudgeText). Set only by the
 	// message lane, never from the wire.
@@ -220,10 +231,18 @@ type ToolInspectVerdict struct {
 	// verdict. Never serialized.
 	laneVerdict bool
 	// decisionConfirm reports that the confirm action came from the
-	// decision model answering without the LLM judge (cascade 2). Where the
-	// agent cannot ask, such a confirm is the HIGH alert the judge mapping
-	// gives, not a block (decisionConfirmWithoutAsk). Never serialized.
+	// decision model answering without the LLM judge (cascade 2), or only
+	// from a tier-table confirm floor (decide.Output.FloorConfirm: the
+	// default tier's ask on a ticket request, GAP-0067). Where the agent
+	// cannot ask, such a confirm is an alert, not a block
+	// (decisionConfirmWithoutAsk). Never serialized.
 	decisionConfirm bool
+	// floorConfirm marks a tool-route verdict whose confirm came from a
+	// tier-table confirm floor; with decisionConfirm still set (no other
+	// lane confirmed or changed the action) the /inspect/tool route answers
+	// it with an alert where the caller cannot ask
+	// (resolveOpenClawInspectConfirm). Never serialized.
+	floorConfirm bool
 	// uninspectedRaised marks an action the uninspected marker raised
 	// (markOversizeUninspected, markContentCut), not one the content that was
 	// read proved: the cascade policy may lower it, but never below the
@@ -698,7 +717,9 @@ func (a *APIServer) hookAIDInspectToolWithSubmission(
 ) (*ScanVerdict, bool) {
 	// hookAIDInspect and hookAIDInspectToolCall return nil without a wired
 	// hook surface too; checking first skips parsing the arguments.
-	if !a.aidHookSurfaceWired(ctx) {
+	// skipAID: AID reads this call once on its own reading (RV-0841b F6),
+	// so this reading is never submitted.
+	if req.skipAID || !a.aidHookSurfaceWired(ctx) {
 		return nil, false
 	}
 	if reason := toolCallNotCarriedReason(req); reason != "" {
@@ -978,6 +999,7 @@ func inspectToolTrustedShellCWD(dir string) string {
 // short-circuits there exactly as the message lane does; native hook
 // callers reach this through inspectToolPolicy with context.Background().
 func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRequest) *ToolInspectVerdict {
+	ctx = withCallTargetMemo(ctx)
 	actionTool := req.Tool
 	if strings.EqualFold(strings.TrimSpace(req.Connector), "opencode") {
 		actionTool = agentHookTrustedActionTool(req.Connector, req.Tool, "")
@@ -994,6 +1016,7 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		EnforcementCapable: true,
 		sessionID:          req.SessionID,
 		sendDestination:    req.sendDestination,
+		aliasPending:       req.aliasPending,
 	}
 	dialectHint := a.agentHookWindowsDialectHint(ctx)
 	if args, dir, ok := connector.TrustedShellArgs(req.Connector, req.Tool, req.Args); ok {
@@ -1176,8 +1199,24 @@ func (a *APIServer) toolBlockListVerdict(ctx context.Context, req *ToolInspectRe
 // gets one set of findings whichever route carries it (rel-1-0-10:GAP-0782:
 // the proxy ran the rule packs alone). secureClient is a Secure Client
 // install, which keeps its own tool policy (GAP-0048 adds no finding there).
-func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, mcpServer string, secureClient bool) []RuleFinding {
-	findings := trustedToolCallFindingsOf(ctx, action, mcpServer, secureClient)
+//
+// Its readings past the dispatch (the lanes, the nested Windows readings, the
+// link and cmd twins) run outside dispatchTrustedAction's recovery, so a panic
+// in one is contained here with the same answer: the evaluation-fault finding,
+// a block in every pack (evaluation_fault.go). It never reaches the hook's
+// fail-mode answer, an allow in a fail-open profile (GAP-1914).
+func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, mcpServer string, secureClient bool) (findings []RuleFinding) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logEvaluatorFault("tool call readings connector="+action.Connector, recovered)
+			findings = evaluationFaultFindings(evaluatorFaultTitle, action.EnforcementCapable)
+		}
+	}()
+	findings = trustedToolCallFindingsOf(ctx, action, mcpServer, secureClient)
+	// An MCP or app tool call whose arguments pass the shared reading's
+	// bounds is also judged on bounded projections and gets the unknown tier,
+	// never a silent allow (substrate-1:GAP-1096).
+	findings = overBoundToolArgsFindings(ctx, action, findings, mcpServer, secureClient)
 	for _, nested := range windowsNestedReadings(action) {
 		// A statement the call runs inside a subexpression, an operand, a
 		// loop body or a powershell -c or cmd /c script is judged by the
@@ -1189,7 +1228,8 @@ func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, m
 			findings = withHostTwinFindings(findings, trustedToolCallFindingsOf(ctx, nested.request, mcpServer, secureClient))
 			continue
 		}
-		findings = trustedToolCallLaneFindings(ctx, nested.request, findings, mcpServer, secureClient)
+		from := len(findings)
+		findings = withFloorRaiseOnlyMark(nested.request, trustedToolCallLaneFindings(ctx, nested.request, findings, mcpServer, secureClient), from)
 	}
 	if twin, ok := localCommandLinkTwinRequest(action); ok {
 		// The shell call as it runs once its links are followed (command
@@ -1205,11 +1245,52 @@ func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, m
 		// (rel-1-0-10:GAP-0999), and it only adds findings.
 		findings = withOverLimitTwinFindings(findings, trustedToolCallFindingsOf(ctx, twin, mcpServer, secureClient))
 	}
-	return findings
+	claims := substrateGuestClaimsFrom(ctx)
+	twins, twinsCut := substrateGuestCommandTwinRequests(action, claims)
+	for _, twin := range twins {
+		// A Substrate actor's shell call as it reads once the actor's file
+		// system has followed its links (cd -P a/b/ssh, eval "cat key-link",
+		// echo x > claude-dir/settings.json, cd sub && echo x >> dc-link):
+		// every reading of the call, the hook config guard included, judges
+		// it too, and it only adds findings (substrate-1 GAP-0546, GAP-0547,
+		// GAP-0623).
+		findings = withOverLimitTwinFindings(findings, trustedToolCallFindingsOf(ctx, twin, mcpServer, secureClient))
+	}
+	if twin, ok := wrapperExactTwinRequest(action); ok {
+		// A program run through a chain of static prefix wrappers that hands
+		// it its argv unchanged (taskset 1 sudo env LD_PRELOAD=x curl URL,
+		// chrt -i 0 pkill -f defenseclaw) keeps the cell its plain call gets
+		// for the rules that judge the program by its own words
+		// (wrappedProgramRules; GAP-1461, GAP-1494; DET111 ruling
+		// 2026-11-24T21:35Z). The plain call is judged by every reading,
+		// after every reading of the wrapped call, and it only raises the
+		// call (withRaiseOnlyTwinFindings; DET111 ruling 2026-11-25T01:30Z).
+		// A wrapper read only with words that may expand, a shell STRING, a
+		// moved folder and the writer sink grammar keep the call readings.
+		findings = withRaiseOnlyTwinFindings(findings, slices.DeleteFunc(trustedToolCallFindingsOf(ctx, twin, mcpServer, secureClient), func(f RuleFinding) bool {
+			return !wrappedProgramRule(f.RuleID)
+		}))
+	}
+	if claims != nil && (claims.cut || twinsCut) {
+		// Its kit claims were cut: a word or argument past the cut may
+		// write through a link the laptop follows and blocks, so the call
+		// gets the unknown tier of the pack, never a clean allow
+		// (substrate-1 GAP-0622).
+		findings = withUnknownFinding(findings, boundedTruncatedFinding(bounded.Of(bounded.Paths), action.EnforcementCapable))
+	}
+	return withEffectsFoldedIntoCall(findings)
 }
 
 func trustedToolCallFindingsOf(ctx context.Context, action trustedActionRequest, mcpServer string, secureClient bool) []RuleFinding {
-	return trustedToolCallLaneFindings(ctx, action, inspectDispatchTrustedAction(ctx, action), mcpServer, secureClient)
+	if action.guestMemo == nil {
+		// The rule dispatch and the lanes below (the sandbox hook-config
+		// guard) share the guest placement of one input (guestReadingMemo).
+		action.guestMemo = &guestReadingMemo{}
+	}
+	// Dispatch finishes the effect lane before the legacy hook reader runs.
+	// The request copies share only this call's proven target set.
+	action.preservedHookConfigTargets = &effectKnownHookConfigTargets{}
+	return withFloorRaiseOnlyMark(action, trustedToolCallLaneFindings(ctx, action, inspectDispatchTrustedAction(ctx, action), mcpServer, secureClient), 0)
 }
 
 // trustedToolCallLaneFindings adds to findings every reading of the call but
@@ -1217,6 +1298,9 @@ func trustedToolCallFindingsOf(ctx context.Context, action trustedActionRequest,
 // hook configuration targets, the MCP/app and shell tool effects and the
 // DefenseClaw control guard.
 func trustedToolCallLaneFindings(ctx context.Context, action trustedActionRequest, findings []RuleFinding, mcpServer string, secureClient bool) []RuleFinding {
+	if trustedToolLaneFaultHook != nil {
+		trustedToolLaneFaultHook(action)
+	}
 	findings = provedHighWriteFindings(ctx, action, findings)
 	findings = outboundPIIFindings(action, findings)
 	if !secureClient {
@@ -1237,12 +1321,17 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	action trustedActionRequest,
 ) *ToolInspectVerdict {
 	action.StrictPolicy = a.strictPolicyTierForHook(ctx, action.Connector)
+	action.PolicyTier, action.Tiers = configTierTable(a.decisionConfig(ctx), action.Connector)
 	action.ManagedInstall = a.managedInstallForHook(ctx)
 	// managed_enterprise: Cisco AI Defense is the sole decision-maker.
 	// Skip static block/allow + MCP-server block, connector regex packs,
 	// CodeGuard, and the judge lane; AID inspects the tool call directly
 	// and a nil AID verdict fails open. See inspectManagedAIDOnly.
 	if a.managedAIDOnly() {
+		if req.skipAID {
+			// AID reads this call on its own reading (skipAID).
+			return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
+		}
 		if reason := toolCallNotCarriedReason(req); reason != "" {
 			a.logAIDToolCallTextOnly(ctx, req.Connector, req.hookEvent, req.Tool, req.toolNameIsLabel, reason)
 			return a.inspectManagedAIDOnly(ctx, req.Tool, string(req.Args))
@@ -1289,6 +1378,15 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			(len(provedHighWriteFindings(ctx, twin, nil)) != 0 || len(agentHookConfigFindings(ctx, twin, nil)) != 0) {
 			allowed = false
 		}
+		// Nor is a Substrate actor's shell call that writes one through a
+		// link (substrate-1 GAP-0547).
+		twins, _ := substrateGuestCommandTwinRequests(action, substrateGuestClaimsFrom(ctx))
+		for _, twin := range twins {
+			if allowed && (cfg == nil || !cfg.SecureClientIntegration()) &&
+				(len(provedHighWriteFindings(ctx, twin, nil)) != 0 || len(agentHookConfigFindings(ctx, twin, nil)) != 0) {
+				allowed = false
+			}
+		}
 		// An allowed tool name does not authorize turning DefenseClaw off.
 		if len(defenseClawControlFindings(ctx, action, nil)) != 0 {
 			allowed = false
@@ -1299,7 +1397,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		if !isWrite {
 			return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{"STATIC-ALLOW"}}
 		}
-		if cg := a.runCodeGuardOnArgsWithProvenance(ctx, cgReq); len(cg.findings) > 0 {
+		if cg := a.runCodeGuardOnArgsWithProvenance(ctx, cgReq); len(cg.findings)+len(cg.shown) > 0 {
 			return a.codeGuardOnlyVerdict(ctx, req, cg, true, action.EnforcementCapable)
 		}
 		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{"STATIC-ALLOW"}}
@@ -1341,6 +1439,12 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		waitCodeGuard = a.startCodeGuardOnArgs(ctx, cgReq)
 	}
 	cfg := a.decisionConfig(ctx)
+	aliasPending := action.aliasPending
+	ownAliasPending := aliasPending == nil && deferEffectAlias(action)
+	if ownAliasPending {
+		aliasPending = &effectAliasPending{}
+	}
+	action.aliasPending = aliasPending
 	ruleFindings := trustedToolCallFindings(ctx, action, req.MCPServerName, cfg != nil && cfg.SecureClientIntegration())
 	var cgScan codeGuardArgsScan
 	if waitCodeGuard != nil {
@@ -1363,16 +1467,14 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			}
 		}
 	} else {
-		severity := HighestSeverity(ruleFindings)
-		enforceableSeverity := HighestSeverity(enforceableRuleFindings(ruleFindings))
-		severity, enforceableSeverity = aggregateCodeGuardSeverity(
-			cgFindings,
-			severity,
-			enforceableSeverity,
-		)
+		// The verdict's severity counts every finding. The action below takes
+		// only the enforceable ones: profileMeetActionForFindings filters them
+		// (guardrailActionForFindings), and CodeGuard's part is the enforceable
+		// severity aggregateCodeGuardSeverity returns.
+		severity, _ := aggregateCodeGuardSeverity(cgFindings, HighestSeverity(ruleFindings), "NONE")
 		confidence := highestInspectConfidence(ruleFindings, cgFindings, severity)
 
-		runtimeAction := profileMeetActionForFindings(
+		runtimeAction, floorConfirm := profileMeetDecisionForFindings(
 			ctx, a.decisionConfig(ctx), req.Connector, ruleFindings, true, false,
 		)
 		// CodeGuard's findings carry no member and apply to every member.
@@ -1384,6 +1486,8 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 				ctx, a.decisionConfig(ctx), req.Connector, codeGuardSeverity, true, false,
 			)
 			runtimeAction = strongerGuardrailAction(runtimeAction, codeGuardAction)
+			// A CodeGuard confirm or block is the levels' own.
+			floorConfirm = floorConfirm && codeGuardAction != guardrailActionConfirm && runtimeAction == guardrailActionConfirm
 		}
 
 		reasons := make([]string, 0, minInt(len(ruleFindings), 5))
@@ -1414,10 +1518,12 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			Reason:           fmt.Sprintf("matched: %s", strings.Join(reasons, ", ")),
 			Findings:         findingStrs,
 			DetailedFindings: append(ruleFindings, cgFindings...),
+			decisionConfirm:  floorConfirm,
+			floorConfirm:     floorConfirm,
 		}
 		detectionOnly := len(ruleFindings) > 0 && len(cgFindings) == 0
 		for _, finding := range ruleFindings {
-			if finding.enforcement != findingEnforcementDetectionOnly {
+			if !finding.Proof.Recorded() {
 				detectionOnly = false
 				break
 			}
@@ -1460,7 +1566,11 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	} else if jv := a.runHookJudge(ctx, "tool_call", "prompt", req.Connector, argsStr, toolName, verdict); jv != nil {
 		verdict = mergeWithJudgeVerdict(verdict, jv)
 	}
-	return a.applyHookScopeFloor(ctx, req.Connector, scope, toolName, argsStr, verdict)
+	verdict = a.applyHookScopeFloor(ctx, req.Connector, scope, toolName, argsStr, verdict)
+	if ownAliasPending && aliasVerdictCanRun(verdict) {
+		aliasPending.commit()
+	}
+	return verdict
 }
 
 // highestInspectConfidence keeps verdict confidence aligned with the visible
@@ -1517,6 +1627,10 @@ func isWriteToolName(tool string) bool {
 type codeGuardArgsScan struct {
 	findings []scanner.Finding
 	complete bool
+	// shown is the findings of a partial view of the same call (content
+	// the shell expands first): shown, never enforced, whatever complete
+	// says of findings.
+	shown []scanner.Finding
 }
 
 // codeGuardWriteRequest is the request CodeGuard scans for a file-write
@@ -1536,9 +1650,9 @@ func codeGuardWriteRequest(req *ToolInspectRequest, action trustedActionRequest)
 	if isWriteToolName(strings.ToLower(req.Tool)) {
 		return req, true
 	}
-	if args, partial, ok := codeGuardShellPatchArgs(action.Input); ok {
+	if args, shown, ok := codeGuardShellPatchArgs(action.Input); ok {
 		view := *req
-		view.Tool, view.Args, view.codeGuardPartial = "apply_patch", args, partial
+		view.Tool, view.Args, view.codeGuardShownArgs = "apply_patch", args, shown
 		return &view, true
 	}
 	return req, false
@@ -1551,21 +1665,105 @@ func codeGuardWriteRequest(req *ToolInspectRequest, action trustedActionRequest)
 // tool's envelope, so the same patch raised CG-* findings as apply_patch and
 // none as the shell call (rel-1-0-10:GAP-1635). Only a call whose command
 // text or arguments (the hook routes give the command in the shell tool's
-// arguments) hold an envelope is parsed. partial is true for a document the
-// shell expands.
-func codeGuardShellPatchArgs(input actionfacts.Input) (args json.RawMessage, partial, ok bool) {
-	if len(input.Argv) != 0 || !codeGuardMayHoldShellPatch(input.Command) && !codeGuardMayHoldShellPatch(string(input.Args)) {
-		return nil, false, false
+// arguments) hold an envelope is parsed. A file the call writes with text
+// the reading knows (cat > x.py <<'EOF', tee x.py <<'EOF', echo TEXT > x.py;
+// actionfacts.ShellDocumentFileWrites) is one more added file, so its
+// content gets the CodeGuard verdict of a Write of the same content
+// (rel-1-0-10:GAP-1640).
+//
+// complete is the view CodeGuard enforces: the envelopes of literal
+// documents and the files written with literal text. shown is the partial
+// view, the envelopes and file writes the shell expands before they land:
+// its findings are shown, never enforced. Each entry is partial on its own;
+// an expanded write never demotes the complete content of the same call
+// (rel-1-0-10:GAP-1640). ok is false when the call has neither.
+func codeGuardShellPatchArgs(input actionfacts.Input) (complete, shown json.RawMessage, ok bool) {
+	if len(input.Argv) != 0 {
+		return nil, nil, false
 	}
-	envelopes, shellView := actionfacts.CommandPatchEnvelopes(actionfacts.Analyze(input))
+	var literal, expanded []string
+	if codeGuardMayHoldShellPatch(input.Command) || codeGuardMayHoldShellPatch(string(input.Args)) {
+		envelopes, partial := actionfacts.CommandPatchEnvelopes(actionfacts.Analyze(input))
+		if partial {
+			expanded = append(expanded, envelopes...)
+		} else {
+			literal = append(literal, envelopes...)
+		}
+	}
+	var literalWrites, expandedWrites []actionfacts.ShellFileWrite
+	for _, write := range actionfacts.ShellDocumentFileWrites(codeGuardShellCommand(input)) {
+		if write.Expanded {
+			expandedWrites = append(expandedWrites, write)
+		} else {
+			literalWrites = append(literalWrites, write)
+		}
+	}
+	if patch, ok := codeGuardFileWritePatch(literalWrites); ok {
+		literal = append(literal, patch)
+	}
+	if patch, ok := codeGuardFileWritePatch(expandedWrites); ok {
+		expanded = append(expanded, patch)
+	}
+	complete, shown = codeGuardPatchArgsOf(literal), codeGuardPatchArgsOf(expanded)
+	return complete, shown, complete != nil || shown != nil
+}
+
+// codeGuardFileWritePatch is the apply_patch envelope that adds each written
+// file with its text.
+func codeGuardFileWritePatch(writes []actionfacts.ShellFileWrite) (string, bool) {
+	if len(writes) == 0 {
+		return "", false
+	}
+	var patch strings.Builder
+	patch.WriteString("*** Begin Patch\n")
+	for _, write := range writes {
+		patch.WriteString("*** Add File: " + write.Path + "\n")
+		for _, line := range strings.SplitAfter(strings.TrimSuffix(write.Text, "\n"), "\n") {
+			patch.WriteString("+" + strings.TrimSuffix(line, "\n") + "\n")
+		}
+	}
+	patch.WriteString("*** End Patch")
+	return patch.String(), true
+}
+
+// codeGuardPatchArgsOf is the apply_patch argument object of envelopes, nil
+// for none.
+func codeGuardPatchArgsOf(envelopes []string) json.RawMessage {
 	if len(envelopes) == 0 {
-		return nil, false, false
+		return nil
 	}
 	args, err := json.Marshal(map[string]string{"command": strings.Join(envelopes, "\n")})
 	if err != nil {
-		return nil, false, false
+		return nil
 	}
-	return args, shellView, true
+	return args
+}
+
+// codeGuardScanShellView scans the complete view of a call (args, enforced
+// as its own scan reads it) and its partial view (shown, whose findings are
+// shown and never enforced; codeGuardShellPatchArgs).
+func codeGuardScanShellView(rulesDir, tool string, args, shown json.RawMessage) codeGuardArgsScan {
+	var scan codeGuardArgsScan
+	if len(args) != 0 {
+		scan = codeGuardScanWriteArgs(rulesDir, tool, args)
+	}
+	if len(shown) != 0 {
+		partial := codeGuardScanWriteArgs(rulesDir, tool, shown)
+		scan.shown = append(append(scan.shown, partial.findings...), partial.shown...)
+	}
+	return scan
+}
+
+// codeGuardShellCommand is the POSIX command text of a shell tool call
+// (trustedBashCommandInput); a PowerShell or cmd call, or any other tool
+// (a message whose attachment is megabytes of text), has none.
+func codeGuardShellCommand(input actionfacts.Input) string {
+	if !trustedBashExecutionTool(input.Tool) ||
+		input.DialectHint == actionfacts.DialectPowerShell || input.DialectHint == actionfacts.DialectCMD {
+		return ""
+	}
+	command, _ := trustedBashCommandInput(input)
+	return command
 }
 
 func codeGuardMayHoldShellPatch(text string) bool {
@@ -1595,9 +1793,7 @@ func (a *APIServer) runCodeGuardOnArgsWithProvenance(ctx context.Context, req *T
 	if cfg := a.decisionConfig(ctx); cfg != nil {
 		rulesDir = cfg.Scanners.CodeGuard
 	}
-	scan := codeGuardScanWriteArgs(rulesDir, req.Tool, req.Args)
-	scan.complete = scan.complete && !req.codeGuardPartial
-	return scan
+	return codeGuardScanShellView(rulesDir, req.Tool, req.Args, req.codeGuardShownArgs)
 }
 
 // codeGuardPatchTools are the tools whose arguments carry an apply_patch
@@ -1916,13 +2112,22 @@ func codeGuardRuleFindings(
 	trustedBoundary bool,
 	enforcementCapable bool,
 ) []RuleFinding {
-	if len(scan.findings) == 0 {
+	if len(scan.findings)+len(scan.shown) == 0 {
 		return nil
 	}
-	result := make([]RuleFinding, 0, len(scan.findings))
-	for _, finding := range scan.findings {
+	result := make([]RuleFinding, 0, len(scan.findings)+len(scan.shown))
+	enforced := make(map[string]bool, len(scan.findings))
+	for index, finding := range append(scan.findings[:len(scan.findings):len(scan.findings)], scan.shown...) {
 		ruleID := firstNonEmpty(finding.RuleID, finding.ID)
 		if ruleID == "" {
+			continue
+		}
+		// A finding of the partial view is shown, never enforced; one the
+		// complete view raised already is not repeated.
+		complete := index < len(scan.findings) && scan.complete
+		if index < len(scan.findings) {
+			enforced[ruleID] = true
+		} else if enforced[ruleID] {
 			continue
 		}
 		title := strings.TrimSpace(finding.Title)
@@ -1938,7 +2143,7 @@ func codeGuardRuleFindings(
 		}.withTrustedActionProof(newExactCodeGuardFindingProof(
 			ruleID,
 			trustedBoundary,
-			scan.complete,
+			complete,
 			builtinMatch,
 		))
 		result = append(result, converted)
@@ -2151,7 +2356,7 @@ func clampSourceScopeVerdict(verdict *ToolInspectVerdict) {
 	}
 	for i := range verdict.DetailedFindings {
 		verdict.DetailedFindings[i].Severity = "LOW"
-		verdict.DetailedFindings[i].enforcement = findingEnforcementDetectionOnly
+		verdict.DetailedFindings[i].Proof = verdict.DetailedFindings[i].Proof.Record()
 	}
 }
 
@@ -2966,7 +3171,21 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Connector = serverConnector
-	r = r.WithContext(openClawInspectIdentity(r.Context(), serverConnector))
+	// The scanner may finish before the HTTP route applies cascade, mode,
+	// approval and install-window policy. Only session-scoped calls need a
+	// recorder: a needless one bypasses the trusted dispatch memo.
+	var aliasPending *effectAliasPending
+	if req.SessionID != "" && deferEffectAlias(trustedActionRequest{
+		Connector: serverConnector, sessionID: req.SessionID,
+		Input: actionfacts.Input{ActiveHome: hookActiveHome(r.Context())},
+	}) {
+		aliasPending = &effectAliasPending{}
+		req.aliasPending = aliasPending
+	}
+	// The judge keeps the session's task and calls under the connector the
+	// call is scoped to (judgeSessionKeyFor), the one the OpenClaw event
+	// router names for its own turns (GAP-0152).
+	r = r.WithContext(withJudgeSessionConnector(openClawInspectIdentity(r.Context(), serverConnector), serverConnector))
 	r = r.WithContext(withCascadeTrace(r.Context(), a.decisionConfig(r.Context()), serverConnector))
 
 	ctx, cancel := context.WithTimeout(r.Context(), a.inspectScanBudget())
@@ -3082,6 +3301,10 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)
 		// A lock that appeared during the scan still decides this request.
 		a.strictInstallWindowInspect(r.Context(), serverConnector, &req, verdict)
+	}
+
+	if aliasVerdictCanRun(verdict) {
+		aliasPending.commit()
 	}
 
 	// Count the check against the authenticated connector so /health (and the
@@ -3379,6 +3602,16 @@ func (a *APIServer) resolveOpenClawInspectConfirm(ctx context.Context, req *Tool
 	}
 	verdict.ApprovalTimeoutMS = int(timeout / time.Millisecond)
 
+	// A confirm that only the tier table's confirm floor gave (the default
+	// tier's ask on a ticket request, rel-1-0-10:GAP-0067) is an alert
+	// where the caller cannot ask, never the fail-closed block below: the
+	// call alerted in 1.0.10 and the ask adds a person, not a refusal.
+	canAsk := strings.EqualFold(a.connectorName(), "openclaw") &&
+		strings.EqualFold(strings.TrimSpace(req.ApprovalSurface), "native")
+	if !canAsk && verdict.floorConfirm && verdict.decisionConfirm {
+		verdict.Action = guardrailActionAlert
+		return
+	}
 	// a HIGH-severity tool call that policy escalated
 	// to `confirm` MUST NOT be downgraded to `alert` when the caller
 	// cannot deliver a human-in-the-loop approval. The previous

@@ -152,6 +152,16 @@ func boundingSet() (uint64, error) {
 	return 0, fmt.Errorf("no CapBnd line")
 }
 
+// withAgentFS runs fn with the agent's file-system identity (the relay's own
+// when it is not separated); false when it could not be taken.
+func (sp *separation) withAgentFS(fn func()) bool {
+	if sp == nil {
+		fn()
+		return true
+	}
+	return withFSCred(sp.cred, fn)
+}
+
 // withFSCred runs fn on a locked thread whose file-system uid and gid are
 // cred's (setfsuid needs CAP_SETUID), and puts them back. If they cannot be
 // put back the thread stays locked and ends with the goroutine, so no other

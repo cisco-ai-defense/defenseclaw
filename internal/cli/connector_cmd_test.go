@@ -345,6 +345,8 @@ func withConnectorState(t *testing.T, dataDir string, conn string) func() {
 	origDir := connectorFlagDataDir
 	origConfigHome := connectorFlagConfigHome
 	origRollbackBackupsDir := connectorRollbackBackupsDir
+	origRollbackToVersion := connectorRollbackToVersion
+	origRollbackRestore := connectorRollbackRestore
 	origExit := connectorExit
 	origCheckPlatformSupport := connectorCheckPlatformSupportOnHost
 
@@ -360,6 +362,8 @@ func withConnectorState(t *testing.T, dataDir string, conn string) func() {
 	connectorFlagDataDir = dataDir
 	connectorFlagConfigHome = ""
 	connectorRollbackBackupsDir = ""
+	connectorRollbackToVersion = ""
+	connectorRollbackRestore = false
 
 	return func() {
 		cfg = origCfg
@@ -368,6 +372,8 @@ func withConnectorState(t *testing.T, dataDir string, conn string) func() {
 		connectorFlagDataDir = origDir
 		connectorFlagConfigHome = origConfigHome
 		connectorRollbackBackupsDir = origRollbackBackupsDir
+		connectorRollbackToVersion = origRollbackToVersion
+		connectorRollbackRestore = origRollbackRestore
 		connectorExit = origExit
 		connectorCheckPlatformSupportOnHost = origCheckPlatformSupport
 	}
@@ -390,7 +396,7 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 	sub := args[0]
 	tail := args[1:]
 
-	for _, candidate := range []string{"--connector", "--data-dir", "--config-home", "--rollback-backups-dir"} {
+	for _, candidate := range []string{"--connector", "--data-dir", "--config-home", "--rollback-backups-dir", "--to-version"} {
 		for i, a := range tail {
 			if a == candidate && i+1 < len(tail) {
 				switch candidate {
@@ -402,6 +408,8 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 					connectorFlagConfigHome = tail[i+1]
 				case "--rollback-backups-dir":
 					connectorRollbackBackupsDir = tail[i+1]
+				case "--to-version":
+					connectorRollbackToVersion = tail[i+1]
 				}
 			}
 		}
@@ -428,6 +436,10 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 		err = runConnectorVerify(cmd, nil)
 	case "prune-orphans":
 		err = runConnectorPruneOrphans(cmd, nil)
+	case "prepare-rollback":
+		err = runConnectorPrepareRollback(cmd, nil)
+	case "route-restore":
+		err = runConnectorRouteRestore(cmd, nil)
 	case "recover-config":
 		err = runConnectorRecoverConfig(cmd, nil)
 	case "reconcile":
@@ -1509,11 +1521,15 @@ func TestConnectorTeardownMarksConnectorInactiveBeforeRemoval(t *testing.T) {
 // GAP-1979: when Codex rewrites config.toml after Setup, teardown takes the
 // surgical path, which removes otel.environment only if it knows the value.
 func TestConnectorTeardownRemovesCodexOtelEnvironmentAfterDrift(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses the POSIX hook layout")
-	}
 	dir := testenv.PrivateTempDir(t)
 	defer withConnectorState(t, dir, "codex")()
+	if runtime.GOOS == "windows" {
+		// A Windows account registers the native launcher, not a hook script.
+		pinWindowsHookLauncherForTest(t, dir)
+		// An unmanaged Windows Codex Setup reads the effective Codex policy
+		// from the selected codex.exe app-server; this test is about teardown.
+		t.Cleanup(connector.PinCodexPolicyInspectorForTest("codex otel drift test"))
+	}
 	cfg.Environment = "windows"
 
 	codexPath := filepath.Join(testenv.PrivateTempDir(t), "config.toml")

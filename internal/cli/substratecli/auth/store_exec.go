@@ -19,27 +19,12 @@
 package auth
 
 import (
-	"bytes"
 	"context"
-	"errors"
-	"fmt"
-	"os/exec"
-	"path/filepath"
+
+	"github.com/defenseclaw/defenseclaw/internal/keystore"
 )
 
-// execRunner runs a keychain helper for real.
+// execRunner runs a keychain helper for real (internal/keystore).
 func execRunner(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, string, int, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Stdin = bytes.NewReader(stdin)
-	var o, e bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &o, &e
-	err := cmd.Run()
-	var ee *exec.ExitError
-	if errors.As(err, &ee) {
-		return o.Bytes(), e.String(), ee.ExitCode(), nil
-	}
-	if err != nil {
-		return nil, "", -1, fmt.Errorf("run %s: %w", filepath.Base(name), err)
-	}
-	return o.Bytes(), e.String(), 0, nil
+	return keystore.ExecRunner(ctx, stdin, name, args...)
 }

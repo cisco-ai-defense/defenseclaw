@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"golang.org/x/sys/windows/registry"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // windowsEnterpriseClaudeRegistryPolicyPath names the Claude Code registry
@@ -41,8 +43,12 @@ var windowsEnterpriseClaudeRegistryPolicyValue = func() (string, error) {
 // windowsEnterpriseStandaloneClaudeRegistryPolicyPreflight refuses, before
 // the lifecycle changes anything, a standalone install, ensure, upgrade or
 // repair that enrols Claude Code while the Claude Code registry policy holds
-// a value (rel-1-0-6:GAP-0409). Claude Code then reads that value instead of
-// DefenseClaw's file-based managed drop-in, so the guardian can never publish
+// a value that hides DefenseClaw's drop-in (rel-1-0-6:GAP-0409). A value that
+// sets managedSourcesBehavior: merge, carries only source-control keys, or
+// carries a hooks table that names a DefenseClaw hook or has its hook
+// arguments (checked at enrolment) is admitted (GAP-1731, GAP-1801, GAP-2175).
+// A hiding value makes Claude Code read it instead of DefenseClaw's
+// file-based managed drop-in, so the guardian can never publish
 // Claude Code coverage: the lifecycle used to stop after about seven minutes
 // with 1603, a pending transaction and the gateway and enumerator stopped,
 // and its rollback failed the same way, so every enrolled account failed
@@ -68,9 +74,14 @@ func windowsEnterpriseStandaloneClaudeRegistryPolicyPreflight(configPath string)
 	if err != nil || value == "" {
 		return nil
 	}
+	verdict := connector.ClaudeCodeOSAdminPolicyPreflight(value, windowsEnterpriseClaudeRegistryPolicyPath)
+	if verdict == nil {
+		return nil
+	}
 	return errors.New("claude_registry_policy: the Claude Code registry policy " + windowsEnterpriseClaudeRegistryPolicyPath +
-		" holds a value. Claude Code reads that value instead of DefenseClaw's managed settings drop-in, so DefenseClaw cannot guard " +
-		"Claude Code on this computer, and nothing was changed. Delete that registry value (or set it empty) and run the same command again; " +
+		" holds a value that Claude Code reads instead of DefenseClaw's managed settings drop-in (" + verdict.Error() + "), so DefenseClaw cannot guard " +
+		"Claude Code on this computer, and nothing was changed. Add \"managedSourcesBehavior\": \"merge\" to that value (Claude Code 2.1.242 or later), " +
+		"or Delete that registry value (or set it empty), and run the same command again; " +
 		"or, if the registry policy must stay, set guardrail.connectors.claudecode.enabled: false in the config you supplied and run the same command again " +
 		"(DefenseClaw then does not guard Claude Code)")
 }

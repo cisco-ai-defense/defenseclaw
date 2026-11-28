@@ -122,7 +122,7 @@ func TestLifecycleClosesAsksOfACrashedActor(t *testing.T) {
 		chainCalls++
 		return chainstate.LifecycleResult{}, nil
 	}
-	h := substrateLifecycleClosesAsks(next, store)
+	h := substrateLifecycleClosesAsks(next, store, nil, nil)
 	ev := func(kind string) chainstate.LifecycleEvent {
 		return chainstate.LifecycleEvent{Actor: chainstate.Actor{Atespace: "eng-web", UID: wireUID1}, Event: kind}
 	}
@@ -144,7 +144,7 @@ func TestLifecycleKeepsAsksWhenTheLeaderIgnoredTheEvent(t *testing.T) {
 	next := func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
 		return chainstate.LifecycleResult{Ignored: ignored}, nil
 	}
-	h := substrateLifecycleClosesAsks(next, store)
+	h := substrateLifecycleClosesAsks(next, store, nil, nil)
 	ev := chainstate.LifecycleEvent{Actor: chainstate.Actor{Atespace: "eng-web", UID: wireUID1}, Event: chainstate.LifecycleDeleted}
 	if _, err := h(ctx, ev); err != nil || len(store.Pending()) != 1 {
 		t.Fatalf("an ignored delete closed the ask: %v %v", err, store.Pending())

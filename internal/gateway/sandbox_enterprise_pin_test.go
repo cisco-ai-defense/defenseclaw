@@ -33,8 +33,8 @@ func TestGAP0608SandboxEnterpriseVersionFloor(t *testing.T) {
 	for _, tc := range []struct{ install, pin, want string }{
 		{"setup", "0.1.3", openshell.InstallerVersion},
 		{"setup", openshell.InstallerVersion, openshell.InstallerVersion},
-		{"prerequisite", "0.1.3", openshell.InstallerVersion},
-		{"prerequisite", "0.1.5", openshell.InstallerVersion},
+		{"prerequisite", "0.1.3", openshell.SupportedMin},
+		{"prerequisite", "0.1.5", openshell.SupportedMin},
 		{"prerequisite", "0.1.6", "0.1.6"},
 		{"prerequisite", "0.1.7", "0.1.7"},
 		{"", ">=0.1.1 <0.2.0", ">=0.1.6 <0.2.0"},

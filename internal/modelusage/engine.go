@@ -368,6 +368,7 @@ type call struct {
 
 	mu        sync.Mutex
 	status    int
+	answered  bool
 	ttfb      time.Duration
 	hdrUsage  Usage
 	bodyUse   Usage
@@ -390,7 +391,10 @@ func (c *call) UpstreamHeader(status int, h http.Header) {
 	if c.track != 0 && c.requestID == "" {
 		c.requestID = providerRequestID(h)
 	}
-	if c.ttfb == 0 {
+	// The upstream answered: a flag, never ttfb > 0. Go's monotonic clock on
+	// Windows is coarse, so an answer within one clock tick has a ttfb of 0.
+	if !c.answered {
+		c.answered = true
 		c.ttfb = time.Since(c.start)
 	}
 	if c.f.APIFamily == FamilyInvoke {
@@ -462,12 +466,14 @@ func (c *call) settle(rec Record) bool {
 
 func (c *call) build(err error) Record {
 	end := time.Now()
-	rec := Record{Facts: c.f, Status: c.status, Outcome: "completed", TTFB: c.ttfb, Total: end.Sub(c.start), EndedAt: end}
+	rec := Record{Facts: c.f, Status: c.status, Outcome: "completed", TTFB: c.ttfb, Total: end.Sub(c.start), EndedAt: end, answered: c.answered}
 	switch {
 	case c.status >= 400:
 		// The upstream answered with a failure: it stays failed even when
 		// the client then went away while the body was written.
 		rec.Outcome, rec.ErrorType = "failed", "http_"+itoa(c.status)
+	case errors.Is(err, ErrStreamBlocked):
+		rec.Outcome, rec.ErrorType = "cancelled", "blocked"
 	case errors.Is(err, context.Canceled), errors.Is(err, ErrClientGone):
 		rec.Outcome, rec.ErrorType = "cancelled", "cancelled"
 	case err != nil:
@@ -478,6 +484,7 @@ func (c *call) build(err error) Record {
 	}
 	u := c.pickUsage()
 	rec.Usage = u
+	rec.openingUsage = (c.given == nil || c.given.Has == 0) && c.parser.Opening()
 	rec.Cost = c.s.price(c.f, c.status, u, nil)
 	rec.Cost.BaselineUSD = c.s.baseline(c.f, u, rec.Cost)
 	c.s.bound(&rec)

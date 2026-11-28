@@ -33,6 +33,15 @@ func policyFileStillBase(path string, base policyFileBase) error {
 	if err != nil {
 		return err
 	}
+	if base.link != "" {
+		if info.Mode()&os.ModeSymlink == 0 {
+			return policyFileChanged(path)
+		}
+		if target, err := os.Readlink(path); err != nil || target != base.link {
+			return policyFileChanged(path)
+		}
+		return nil
+	}
 	if !base.exists || !info.Mode().IsRegular() {
 		return policyFileChanged(path)
 	}

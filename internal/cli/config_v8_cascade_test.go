@@ -33,7 +33,9 @@ func TestConfigV8ValidateRefusesInvalidCascade(t *testing.T) {
 		"lock violation (profile block_at)":  "guardrail:\n  cascade:\n    admin:\n      locked: [block_at]\n  profiles:\n    p:\n      block_at: CRITICAL\n",
 		"lock violation (connector unknown)": "guardrail:\n  cascade:\n    admin:\n      locked: [unknown]\n  connectors:\n    codex:\n      cascade:\n        unknown: block\n",
 		"unknown allow":                      "guardrail:\n  cascade:\n    unknown: allow\n",
-		"no such lane":                       "guardrail:\n  cascade:\n    lanes:\n      effects: on\n",
+		// A lane name no release defines. "effects" was used here until the
+		// engine train made it a real lane (GAP-2097).
+		"no such lane": "guardrail:\n  cascade:\n    lanes:\n      no-such-lane-in-any-release: on\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()

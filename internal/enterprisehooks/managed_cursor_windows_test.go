@@ -1053,6 +1053,7 @@ func installWindowsCursorStandaloneGuardForTest(t *testing.T, hook string, enrol
 // both are damaged, from the machine-owned record, and validates the complete
 // guard before it returns. Enrollment, the receipt and unrelated hooks stay.
 func TestWindowsCursorMachineGuardRebuildsEveryOwnedArtifact(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	const hook = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
 	operatorHooks := []byte(`{"version":1,"hooks":{"operatorEvent":[{"type":"command","command":"operator-hook"}]}}`)
 	hooksDamage := []struct {
@@ -1175,6 +1176,7 @@ func TestWindowsCursorMachineGuardRebuildsEveryOwnedArtifact(t *testing.T) {
 // A rebuild writes nothing unless the record authenticates, and a failed
 // rebuild puts back every file it wrote, so no repair leaves a half guard.
 func TestWindowsCursorMachineGuardRebuildRefusesOrRollsBack(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	const hook = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
 	type files struct{ hooks, adapter, state, receipt []byte }
 	read := func(t *testing.T, paths windowsCursorPaths) files {

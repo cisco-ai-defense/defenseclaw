@@ -28,6 +28,32 @@ type Engine struct {
 	// keepPersonalIdentifiers turns off the strict removal of the personal
 	// identifiers, so every profile keeps every identifier-class field.
 	keepPersonalIdentifiers bool
+	// secretSpans is the guardrail's secret classifier (GAP-0426): a
+	// profile that runs the secrets group also replaces every span it flags.
+	secretSpans SecretSpanClassifier
+}
+
+// SecretSpanClassifier returns the half-open byte ranges of input that a
+// secret classifier outside this package (the guardrail secret rules) flags.
+// It must be safe for concurrent use and must not retain input.
+type SecretSpanClassifier func(input string) [][2]int
+
+// classifierDetectorID names a classifier span in its replacement token.
+const classifierDetectorID DetectorID = "secrets.assignment"
+
+// WithSecretSpans returns an engine whose detecting profiles also replace
+// every span classify flags, so the audit store and every destination never
+// keep a value the hook itself reports as a secret (GAP-0426). Profiles that
+// do not run the secrets group (none) are unchanged. The new engine has its
+// own origin, as WithPersonalIdentifiersKept.
+func (engine *Engine) WithSecretSpans(classify SecretSpanClassifier) *Engine {
+	if engine == nil {
+		return nil
+	}
+	with := *engine
+	with.origin = &engineOrigin{identity: 1}
+	with.secretSpans = classify
+	return &with
 }
 
 // NewEngine accepts either no key or exactly 32 bytes and always snapshots it.
@@ -342,7 +368,9 @@ func (state *projectionWalkState) transformString(
 	case ModePreserve:
 		return strings.Clone(input), false, nil
 	case ModeDetect:
-		result, err := DetectAndRedact(input, class, state.profile.DetectorGroups(), state.engine.keyBytes(), state.budget)
+		result, err := detectAndRedact(
+			input, class, state.profile.DetectorGroups(), state.engine.keyBytes(), state.budget, state.engine.secretSpans,
+		)
 		if err != nil {
 			code := string(result.Failure)
 			if code == "" {

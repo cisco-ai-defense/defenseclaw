@@ -19,9 +19,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentpaths"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
 // The run-time path: a skill or an MCP server that the agent adds while it
@@ -217,6 +219,16 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 			}
 		}
 		res, err = r.Skill.Scan(ctx, dir)
+		if ctx.Err() != nil {
+			// B5.4: a scan cut by its deadline or cancelled is not a verdict
+			// (and is never cached); the caller's fail mode decides.
+			return nil, ctx.Err()
+		}
+		if errors.Is(err, scanner.ErrScanTimeout) {
+			// The sidecar's own timeout: the same, and the caller names it
+			// skill_scan_timeout, not a scanner outage (GAP-0934).
+			return nil, err
+		}
 		unavailable = err != nil && scanner.Unavailable(err)
 		if err != nil || res == nil {
 			res = failedScan(r.Skill.Name(), a.Name, err)
@@ -377,7 +389,11 @@ func writeAttached(dir string, files []AttachedFile) error {
 	return nil
 }
 
-var skillRootRE = regexp.MustCompile(`(?:^|/)(?:(?:\.claude|\.codex|\.agents|\.config/[a-z]+)/skills|\.claude/plugins/.+?/skills|\.codex/plugins/.+?/skills)/([^/]+)(?:/(.*))?$`)
+// skillRootRE and skillPathInCommand are built from the one connector table
+// (agentpaths, GAP-0788). They replace two hand lists of .claude, .codex and
+// .agents that drifted from the kit's roots and the laptop's; the 1.0.10
+// forms (.config/<name>/skills, <plugins>/.../skills) still match.
+var skillRootRE = regexp.MustCompile(`(?:^|/)(?:` + agentpaths.SkillRootPattern() + `)/([^/]+)(?:/(.*))?$`)
 
 // skillRelative returns the path of a skill file relative to its skill folder
 // ("SKILL.md", "scripts/run.sh").
@@ -393,7 +409,7 @@ func skillRelative(p string) string {
 }
 
 var (
-	skillPathInCommand = regexp.MustCompile(`(\S*(?:\.claude|\.codex|\.agents)/skills/[A-Za-z0-9._\-]+)(?:/(\S*))?`)
+	skillPathInCommand = regexp.MustCompile(`(\S*(?:` + agentpaths.SkillCommandPattern() + `)/[A-Za-z0-9._\-]+)(?:/(\S*))?`)
 	// The vendor CLIs' "mcp add" under any name (GAP-0185): the CLI run
 	// through node, npx, a quoted or split name. The literal vendor form
 	// (vendorMCPRE) also turns a command it cannot read into a refusal under
@@ -551,7 +567,7 @@ func HookAssets(payload json.RawMessage, attached []AttachedFile) []RuntimeAsset
 		case wholeFile && perr == nil:
 			for _, s := range servers {
 				s := s
-				out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: s.Name, Path: target, Server: &s, Files: serverFiles(attached), Project: agentProject(ev.CWD)})
+				out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: s.Name, Path: target, Server: &s, Files: serverFiles(attached), Project: agentProject(mcpConfigProject(target, ev.CWD))})
 			}
 		case mentions || perr != nil || (!wholeFile && mcpOnlyFile[path.Base(target)]):
 			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: path.Base(target), Path: target, Files: serverFiles(attached)})
@@ -616,6 +632,19 @@ func HookAssets(payload json.RawMessage, attached []AttachedFile) []RuntimeAsset
 		}
 	}
 	return out
+}
+
+// mcpConfigProject is the folder the servers of the MCP config written at
+// target run in: the folder the kit checked for what a fetcher resolves
+// (kit.MCPConfigProject), with a relative target read from cwd.
+func mcpConfigProject(target, cwd string) string {
+	if cwd == "" {
+		return cwd
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(cwd, target)
+	}
+	return kit.MCPConfigProject(target, cwd)
 }
 
 // agentProject is the project of a server the agent adds in this call: the
@@ -777,9 +806,19 @@ func runsNothingOfFolder(s MCPServer, project string, files []AttachedFile) bool
 		// Where the kit found a bare command on the actor's PATH: a
 		// program of the folder (./node_modules/.bin, a venv) is the
 		// folder's, whatever its name (GAP-0575).
-		resolved = commandPath(s.Command, files)
+		resolved = commandPath(RoleCommandPath, s.Command, files)
 		if resolved != "" && inFolder(resolved) {
 			return false
+		}
+		// A link of the folder (a folder PATH entry) is the folder's,
+		// whatever installed program it points at (GAP-0632).
+		if hit := commandPath(RoleCommandPathHit, s.Command, files); hit != "" && inFolder(hit) {
+			return false
+		}
+		// What runs is the link's target: a runner reached under another
+		// name is read as that runner (GAP-0632).
+		if rb := strings.TrimSuffix(path.Base(resolved), ".exe"); resolved != "" && !runtimeFetchers[base] && !runnerName(base) && runnerName(rb) {
+			base = rb
 		}
 	}
 	switch {
@@ -852,7 +891,7 @@ func serverFiles(all []AttachedFile) []AttachedFile {
 	var out []AttachedFile
 	for _, f := range all {
 		switch f.Role {
-		case RoleMCPServer, RoleMCPConfig, RoleMCPModuleAbsent, RoleFetchChecked, RoleFetchLocal, RoleFetchConfig, RoleFetchNames, RoleCommandPath:
+		case RoleMCPServer, RoleMCPConfig, RoleMCPModuleAbsent, RoleFetchChecked, RoleFetchLocal, RoleFetchConfig, RoleFetchNames, RoleFetchBins, RoleCommandPath, RoleCommandPathHit:
 			out = append(out, f)
 		}
 	}

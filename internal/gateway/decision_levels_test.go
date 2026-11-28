@@ -29,10 +29,22 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
-const (
-	levelsStrictPack     = "/tmp/policies/guardrail/strict"
-	levelsPermissivePack = "/tmp/policies/guardrail/permissive"
+// The shipped strict and permissive packs: a pack's tier is its own tier
+// field, never its folder name (rel-1-0-10:GAP-1562), so the level tests
+// read real packs, not folder names.
+var (
+	levelsStrictPack     = levelsShippedPack("strict")
+	levelsPermissivePack = levelsShippedPack("permissive")
 )
+
+// levelsShippedPack is the source tree's built-in pack name.
+func levelsShippedPack(name string) string {
+	dir, err := filepath.Abs(filepath.Join("..", "..", "policies", "guardrail", name))
+	if err != nil {
+		panic(err)
+	}
+	return dir
+}
 
 // TestGuardrailLevelThresholds pins the block/alert ranks hook tool-call
 // decisions use (guardrailToolCallThresholdsForConfigConnector): the

@@ -34,6 +34,7 @@ import (
 // while a VS Code in the plugin store window is installed, removal keeping
 // the administrator's keys).
 func TestCopilotVSCodeLocalAndManagedSettings(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	home := t.TempDir()
 	ensure := func(hookFile, plugin bool) CopilotVSCodeUserResult {
 		t.Helper()
@@ -502,6 +503,7 @@ func TestCopilotVSCodeUserFilesLeftSeesTheWindowsRender(t *testing.T) {
 // record DefenseClaw cannot know it created the folder, so the folder stays
 // (GAP-0091).
 func TestCopilotManagedSettingsRemovesARecordlessPluginKey(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := withPolicy(testOptions(t), copilotConnector, func(p *config.EnterpriseConnectorPolicy) {
 		p.ManagedHooksOnly = config.ManagedHooksOnlyEnforce
 	})

@@ -22,14 +22,24 @@ import (
 
 const sandboxHookReceiptWindow = 15 * time.Second
 
-// The relay buffers each request and response, so its hook acknowledges an
-// offered tool answer with a second call on the same authenticated route.
-// Older images ignore the additive receipt ID and remain unconfirmed.
+// The OpenShell relay buffers each request and response, so its hook
+// acknowledges an offered tool answer with a second call on the same
+// authenticated route. Older images ignore the additive receipt ID and remain
+// unconfirmed.
+//
+// A verified Agent Substrate actor carries a sandbox binding too, but its
+// kit (internal/substrate/kit, defenseclaw-actor-hook) posts each event once
+// on a connection of its own and answers its agent with the reply: it has no
+// relay and sends no receipt. Asked for one, every allow, alert and
+// confirmation of an actor waited out the receipt window and was audited as
+// the no-receipt fallback (unconfirmed, enterprise_managed_gateway_no_answer),
+// 15 s later, although the agent had shown the answer (GAP-0550). An actor's
+// call is audited as the shell bridge's is (unreceiptedHookDecision).
 func (a *APIServer) wantsSandboxHookReceipt(ctx context.Context, connectorName, event string, resp agentHookResponse) bool {
 	if a == nil || a.scannerCfg == nil || !a.scannerCfg.StandaloneEnterprise() ||
 		(resp.Action != "allow" && resp.Action != "alert" && resp.Action != "confirm") ||
 		(connectorName != "claudecode" && connectorName != "codex") ||
-		!hookexec.DeliveryReceiptEvent(connectorName, event) {
+		!hookexec.DeliveryReceiptEvent(connectorName, event) || isSubstrateActorRequest(ctx) {
 		return false
 	}
 	_, ok := sandboxauth.FromContext(ctx)

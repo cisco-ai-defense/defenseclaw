@@ -31,10 +31,6 @@ import (
 	"strings"
 	"time"
 
-	// The audit store's driver; every binary that links this package links
-	// it already.
-	_ "modernc.org/sqlite"
-
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 

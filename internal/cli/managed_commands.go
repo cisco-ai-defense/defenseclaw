@@ -138,7 +138,7 @@ var managedCommands = []managedCommand{
 			{words: []string{"substrate", "checkpoint"}}, {words: []string{"substrate", "undo"}}, {words: []string{"substrate", "delete"}},
 			{words: []string{"substrate", "migrate"}}, {words: []string{"substrate", "approvals"}}, {words: []string{"substrate", "approve"}},
 			{words: []string{"substrate", "reject"}}, {words: []string{"substrate", "usage"}}, {words: []string{"substrate", "secrets"}},
-			{words: []string{"substrate", "policy"}}, {words: []string{"substrate", "doctor"}},
+			{words: []string{"substrate", "policy"}}, {words: []string{"substrate", "doctor"}}, {words: []string{"substrate", "port"}},
 		},
 		Windows: managedOffered,
 		Probes: [][]string{
@@ -146,6 +146,7 @@ var managedCommands = []managedCommand{
 			{"substrate", "list"}, {"substrate", "status"}, {"substrate", "logs"}, {"substrate", "pull"}, {"substrate", "checkpoint"},
 			{"substrate", "undo"}, {"substrate", "delete"}, {"substrate", "migrate"}, {"substrate", "approvals"}, {"substrate", "approve"},
 			{"substrate", "reject"}, {"substrate", "usage"}, {"substrate", "secrets"}, {"substrate", "policy"}, {"substrate", "doctor"},
+			{"substrate", "port"},
 		},
 		PerUser: perUserEverywhere, PerUserPath: []string{"substrate"},
 		Note: "Runs your coding agents in your organization's Agent Substrate cluster, for the account that signed in to it. It talks only to that cluster, so it needs no managed install, daemon or sandbox on this computer.",

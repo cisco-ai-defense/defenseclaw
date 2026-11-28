@@ -54,6 +54,10 @@ var newSandboxApp = func(cmd *cobra.Command) *sandboxcli.App {
 			settings, ok := sandboxOpenShellDaemonSettings(ctx)
 			return settings.Operational.TrustedCAs, settings.Operational.TrustedCAError, ok
 		},
+		ManagedOrganizationOff: func(ctx context.Context) bool {
+			settings, ok := sandboxOpenShellDaemonSettings(ctx)
+			return ok && !settings.Enabled
+		},
 		ManagedAccountHome: sandboxAccountHome,
 		ManagedAccountPolicy: func(ctx context.Context, harness string) (*sandboxapi.ManagedExplain, error) {
 			return launcherAccountPolicy(ctx, harness)
@@ -544,6 +548,7 @@ deletes its sandbox when it ends and nothing is left in it to bring back or undo
 	f.StringArrayVar(&o.Unmask, "unmask", nil, "share a masked secret file or glob with the sandbox (repeatable)")
 	f.IntSliceVar(&o.HostPorts, "host-port", nil, "open this localhost port on your machine to the sandbox (repeatable)")
 	f.StringArrayVar(&o.Credentials, "credential", nil, "NAME=host[:port]: give the sandbox a placeholder for $NAME that works only against that host (repeatable)")
+	f.StringArrayVar(&o.Vault, "vault", nil, "NAME: give the sandbox a placeholder for $NAME from your vault; it works only against the host the vault binds it to (repeatable; see sandbox vault)")
 	f.BoolVar(&o.GitHubWrite, "github-write", false, "bind your GitHub token (GH_TOKEN or GITHUB_TOKEN) to api.github.com so gh can call the GitHub API (for example to open pull requests) with everything the token may do; git push over HTTPS is not covered")
 	f.BoolVar(&o.NoMCP, "no-mcp", false, "leave the harness's MCP servers behind")
 	f.BoolVar(&o.ProcessTree, "process-tree", false, "sample the sandbox's processes every 5 seconds (sandbox ps), even where the pack leaves it off")
@@ -1240,7 +1245,7 @@ func init() {
 		newSandboxConnectCmd(), newSandboxExecCmd(), newSandboxStopCmd(), newSandboxStartCmd(), newSandboxDeleteCmd(),
 		newSandboxLogsCmd(), newSandboxActivityCmd(), newSandboxDestinationsCmd(), newSandboxUndoCmd(), newSandboxReviewCmd(),
 		newSandboxApprovalsCmd(), newSandboxDecideCmd(true), newSandboxDecideCmd(false), newSandboxUnblockCmd(),
-		newSandboxPullCmd(), newSandboxPolicyCmd(), newSandboxPackCmd(), newSandboxImageCmd(),
+		newSandboxPullCmd(), newSandboxPolicyCmd(), newSandboxPackCmd(), newSandboxImageCmd(), newSandboxVaultCmd(),
 		newSandboxWrapperCmd(true), newSandboxWrapperCmd(false), newSandboxTeardownCmd(),
 	)
 	rootCmd.AddCommand(sandboxCmd)

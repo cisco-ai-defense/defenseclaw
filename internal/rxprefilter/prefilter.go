@@ -152,6 +152,20 @@ func required(re *syntax.Regexp) []clause {
 				run, runFold = append(run, sub.Rune...), fold
 				continue
 			}
+			if len(run) > 0 && sub.Op == syntax.OpAlternate {
+				// The parser factors a common prefix out of an
+				// alternation: (?i)nc|ncat|netcat reads as n(?:c(?:at)?|etcat).
+				// The run and the leading literal of each branch are one
+				// literal of the match ("nc" or "netcat"); kept apart, the run
+				// was a lone "n" every text holds, and the CMD-REVSHELL-NC
+				// regex ran over each 1 MiB text of a call (rel-1-0-10:GAP-0299).
+				if continued, ok := continuedClause(run, runFold, sub); ok {
+					out = append(out, continued)
+					run = nil
+					out = append(out, required(sub)...)
+					continue
+				}
+			}
 			flush()
 			out = append(out, required(sub)...)
 		}
@@ -160,6 +174,48 @@ func required(re *syntax.Regexp) []clause {
 	default:
 		return nil
 	}
+}
+
+// continuedClause is the clause of a literal run that alternation alt
+// directly follows in a concatenation: run joined to the leading literal of
+// each branch. ok is false when a branch has no leading literal of the run's
+// case folding (an empty branch, a class, a repeat), or the clause would be
+// too wide.
+func continuedClause(run []rune, fold bool, alt *syntax.Regexp) (clause, bool) {
+	if len(alt.Sub) > maxClause {
+		return nil, false
+	}
+	out := make(clause, 0, len(alt.Sub))
+	for _, branch := range alt.Sub {
+		lead := leadingLiteral(branch)
+		if lead == nil || lead.Flags&syntax.FoldCase != 0 != fold {
+			return nil, false
+		}
+		l, ok := newLiteral(append(append([]rune(nil), run...), lead.Rune...), fold)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, l)
+	}
+	return out, true
+}
+
+// leadingLiteral is the literal every match of re starts with (nil: none
+// known).
+func leadingLiteral(re *syntax.Regexp) *syntax.Regexp {
+	switch re.Op {
+	case syntax.OpLiteral:
+		if len(re.Rune) > 0 {
+			return re
+		}
+	case syntax.OpCapture:
+		return leadingLiteral(re.Sub[0])
+	case syntax.OpConcat:
+		if len(re.Sub) > 0 {
+			return leadingLiteral(re.Sub[0])
+		}
+	}
+	return nil
 }
 
 // bestClause is the clause whose shortest literal is longest.
@@ -262,6 +318,22 @@ type Text struct {
 	// runMu guards runs, the runs of the text per set of bytes (windows.go).
 	runMu sync.Mutex
 	runs  map[runKey]runSet
+	// valid and aligned (guarded by mu) say whether the text is valid UTF-8
+	// and whether its fold keeps every rune's width (literal_ranges.go).
+	valid, validDone   bool
+	aligned, alignDone bool
+	// hitMu guards hitSets, the literal hits of the text per search plan
+	// (literal_ranges.go).
+	hitMu   sync.Mutex
+	hitSets map[*literalPlan]hitSet
+	// memo, for a text of a role checked again and again (NewTextMemo,
+	// memo.go): memoGen is this text's turn in it, memoCommon the common
+	// prefix with the text before; the views answer the literals (mu).
+	memo       *Memo
+	memoGen    uint64
+	memoCommon int
+	rawView    *PresenceView
+	foldedView *PresenceView
 }
 
 // NewText returns the check state for text.
@@ -287,6 +359,21 @@ func (t *Text) holds(re *regexp.Regexp) bool {
 		return false
 	}
 	if !set.ok {
+		return true
+	}
+	if t.memo != nil {
+		for _, c := range set.clauses {
+			found := false
+			for _, l := range c {
+				if t.contains(l.text, l.fold) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
 		return true
 	}
 	folded := ""
@@ -320,6 +407,16 @@ func (t *Text) holds(re *regexp.Regexp) bool {
 // MayMatch is Text.MayMatch for one expression.
 func MayMatch(re *regexp.Regexp, text string) bool {
 	return NewText(text).MayMatch(re)
+}
+
+// HoldsLiterals is RequiredLiteralsIn for the text, of any length: false
+// only when re cannot match it. The text keeps its fold for the next
+// expression, so several expressions read one short text cheaply.
+func (t *Text) HoldsLiterals(re *regexp.Regexp) bool {
+	if t == nil || re == nil {
+		return true
+	}
+	return t.holds(re)
 }
 
 // RequiredLiteralsIn reports whether text, of any length, satisfies every

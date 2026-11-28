@@ -309,6 +309,7 @@ func (s *Store) attemptGroupedTx(
 		return hooks.begin(turnErr), false
 	}
 	defer release()
+	s.followWriteLockHold()
 	begin := s.db.BeginTx
 	if groupedBatchDurable(batch) {
 		conn, connErr := s.durableBatchConn(batchCtx)

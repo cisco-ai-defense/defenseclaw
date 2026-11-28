@@ -999,8 +999,22 @@ func (m *Manager) image(ctx context.Context, cfg *config.Config, spec *harness.S
 		UID: uid, GID: gid, IngressPort: m.opts.IngressPort, FailMode: connector.SandboxFailMode,
 		DefenseClawVersion: m.opts.DefenseClawVersion, MicroVM: image.MicroVMTarget(d), TrustedCAs: trusted,
 	}
+	// A harness whose image hooks DefenseClaw cannot prove (no built-in mock
+	// LLM wiring) has no image a build could verify, so it is refused
+	// before a build spends minutes and gigabytes on an image that is then
+	// refused (GAP-2067). An image already verified is still used. The
+	// verification label is not the test: OpenCode is labelled unverified
+	// and its image is proven with the mock.
+	unverified := !image.CanProveHooks(spec.Name)
+	if unverified {
+		build = false
+	}
 	rec, err := m.opts.Images.Resolve(ctx, bs, build)
 	switch {
+	case errors.Is(err, ErrImageMissing) && unverified:
+		return image.Record{}, sandboxapi.Errorf(sandboxapi.CodeImageUnavailable,
+			"%s does not run in a sandbox yet: DefenseClaw has not verified that its hooks fire in one, so no image was built",
+			spec.DisplayName)
 	case errors.Is(err, ErrImageMissing):
 		return image.Record{}, sandboxapi.Errorf(sandboxapi.CodeImageUnavailable,
 			"no verified %s sandbox image is built; run `defenseclaw sandbox image build %s`", spec.DisplayName, spec.Name)

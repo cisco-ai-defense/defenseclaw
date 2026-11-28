@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func guardRequest(t *testing.T, connector string, mode string) GuardRequest {
@@ -228,9 +229,7 @@ func TestGuardFailsClosedOnSymlinkedHookFile(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, target, link)
 	decision := EvaluateForeignHooks(req)
 	if !decision.Deny || !strings.Contains(decision.Reason, "cannot be verified") {
 		t.Fatalf("a symlinked hook file must fail closed: %+v", decision)
@@ -354,6 +353,7 @@ func TestPublicPolicyGuardFlags(t *testing.T) {
 // onto machine policy; the summary the hook-time guard reads must say so, or
 // the guard would keep exempting the per-user plugin and per-user commands.
 func TestPublicPolicyReportsTheOpenCodeMachinePolicyRoute(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := publishTestOptions(t)
 	if route := BuildPublicPolicy(opts, []string{"opencode"}).Connectors["opencode"].Route; route != RoutePerUser {
 		t.Fatalf("without the artifact OpenCode is per-user, got %s", route)
@@ -385,6 +385,7 @@ func TestPublicPolicyReportsTheOpenCodeMachinePolicyRoute(t *testing.T) {
 // per-user plugin's guard deny every OpenCode tool call on DefenseClaw's own
 // plugin and make cleanup move it aside every cycle.
 func TestPublicPolicyKeepsOpenCodePerUserUntilItsManagedConfigNamesThePlugin(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	ownershipOff := func(p *config.EnterpriseConnectorPolicy) { p.Ownership = config.MachinePolicyOwnershipOff }
 	for name, setup := range map[string]func(*testing.T, *Options){
 		"ownership off": func(t *testing.T, opts *Options) {

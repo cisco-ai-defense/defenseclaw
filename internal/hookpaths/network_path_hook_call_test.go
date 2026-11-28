@@ -11,17 +11,29 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// hookCallShares is three shares that do not answer and one that answers in
-// 100 ms, below the 750 ms answer wait. The answering share holds an
-// ordinary sourced script and one that writes the local keys file.
+// hookCallShares is three shares that do not answer and one that answers at
+// once. The answering share holds an ordinary sourced script and one that
+// writes the local keys file.
+//
+// A test of a read the call budget cuts holds the answering share (holdLive)
+// until the test ends, so whether that read is made is the budget's answer
+// alone. rel-1-0-10:GAP-2183: the share used to answer after a 100 ms sleep,
+// and after three shares that do not answer the call has a 94 ms share wait
+// left (shareWait: half of what is left of the tail). Whether the share was
+// read was a 6 ms race between the two, which native Windows lost about one
+// run in three in either token (its monotonic clock steps by the timer tick).
 type hookCallShares struct {
 	home, dead, dead2, dead3, live, keys string
-	deadAsked                            chan struct{}
+	liveHeld                             *atomic.Bool
 }
+
+// holdLive keeps the answering share from answering until the test ends.
+func (s hookCallShares) holdLive() { s.liveHeld.Store(true) }
 
 func newHookCallShares(t *testing.T) hookCallShares {
 	t.Helper()
@@ -30,7 +42,7 @@ func newHookCallShares(t *testing.T) hookCallShares {
 		home: home, dead: filepath.Join(home, "dead-share"), dead2: filepath.Join(home, "dead-share-2"),
 		dead3: filepath.Join(home, "dead-share-3"),
 		live:  filepath.Join(home, "live-share"),
-		keys:  filepath.Join(home, ".ssh", "authorized_keys"), deadAsked: make(chan struct{}),
+		keys:  filepath.Join(home, ".ssh", "authorized_keys"), liveHeld: new(atomic.Bool),
 	}
 	for _, dir := range []string{s.dead, s.dead2, s.dead3, s.live, filepath.Dir(s.keys)} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -48,14 +60,10 @@ func newHookCallShares(t *testing.T) hookCallShares {
 	}
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
-	var asked sync.Once
 	fakeNetworkShare(t, s.dead, 750*time.Millisecond, 5*time.Second, func(root string) {
-		if strings.HasPrefix(root, s.dead) || strings.HasPrefix(root, s.dead2) {
-			asked.Do(func() { close(s.deadAsked) })
+		if strings.HasPrefix(root, s.dead) || strings.HasPrefix(root, s.dead2) || s.liveHeld.Load() {
 			<-release
-			return
 		}
-		time.Sleep(100 * time.Millisecond)
 	})
 	networkShareRootOf = func(path string) string {
 		for _, root := range []string{s.dead, s.dead2, s.dead3, s.live} {
@@ -88,7 +96,7 @@ func TestSeparateHookCallsEachHaveTheirOwnShareWait(t *testing.T) {
 	s := newHookCallShares(t)
 	first := HookCall()
 	start := time.Now()
-	if !networkPathUnanswered(filepath.Join(s.dead, "notes.txt")) {
+	if !shareUnanswered(filepath.Join(s.dead, "notes.txt")) {
 		t.Fatal("the share that does not answer answered")
 	}
 	if took := time.Since(start); took > 2*time.Second {
@@ -103,7 +111,7 @@ func TestSeparateHookCallsEachHaveTheirOwnShareWait(t *testing.T) {
 // Reads outside a hook call each wait for their own share, as before.
 func TestReadsOutsideAHookCallEachWaitForTheirShare(t *testing.T) {
 	s := newHookCallShares(t)
-	if !networkPathUnanswered(filepath.Join(s.dead, "notes.txt")) {
+	if !shareUnanswered(filepath.Join(s.dead, "notes.txt")) {
 		t.Fatal("the share that does not answer answered")
 	}
 	s.checkLiveRead(t)
@@ -119,7 +127,7 @@ func TestConcurrentHookCallsEachHaveTheirOwnShareWait(t *testing.T) {
 	go func() {
 		defer close(finished)
 		defer HookCall()()
-		spent <- networkPathUnanswered(filepath.Join(s.dead, "notes.txt"))
+		spent <- shareUnanswered(filepath.Join(s.dead, "notes.txt"))
 		<-done
 	}()
 	if !<-spent {
@@ -167,7 +175,7 @@ func TestHookCallInsideAHookCallSharesItsWait(t *testing.T) {
 	}
 	defer HookCall()()
 	for i := range spent {
-		if !networkPathUnanswered(fmt.Sprintf("/dead%d.example/share/notes.txt", i)) {
+		if !shareUnanswered(fmt.Sprintf("/dead%d.example/share/notes.txt", i)) {
 			t.Fatal("the share that does not answer answered")
 		}
 	}
@@ -193,7 +201,7 @@ func TestHookCallInsideAHookCallSharesItsWait(t *testing.T) {
 func TestOneHookCallDeadShareDoesNotStarveAnAnsweringShare(t *testing.T) {
 	s := newHookCallShares(t)
 	defer HookCall()()
-	if !networkPathUnanswered(filepath.Join(s.dead, "notes.txt")) {
+	if !shareUnanswered(filepath.Join(s.dead, "notes.txt")) {
 		t.Fatal("the share that does not answer answered")
 	}
 	s.checkLiveRead(t)
@@ -207,7 +215,7 @@ func TestOneHookCallTwoDeadSharesDoNotStarveAnAnsweringShare(t *testing.T) {
 	s := newHookCallShares(t)
 	defer HookCall()()
 	for _, dead := range []string{s.dead, s.dead2} {
-		if !networkPathUnanswered(filepath.Join(dead, "notes.txt")) {
+		if !shareUnanswered(filepath.Join(dead, "notes.txt")) {
 			t.Fatal("the share that does not answer answered")
 		}
 	}
@@ -246,7 +254,7 @@ func TestOneHookCallWaitIsBoundedAcrossDeadShares(t *testing.T) {
 	defer HookCall()()
 	start := time.Now()
 	for i := range shares {
-		if !networkPathUnanswered(fmt.Sprintf("/dead%d.example/share/notes.txt", i)) {
+		if !shareUnanswered(fmt.Sprintf("/dead%d.example/share/notes.txt", i)) {
 			t.Fatal("the share that does not answer answered")
 		}
 	}
@@ -262,9 +270,10 @@ func TestOneHookCallWaitIsBoundedAcrossDeadShares(t *testing.T) {
 // it for a body that writes nothing, whatever the number of shares before.
 func TestOneHookCallBudgetCutOnAScriptBodyIsRecorded(t *testing.T) {
 	s := newHookCallShares(t)
+	s.holdLive()
 	defer HookCall()()
 	for _, dead := range []string{s.dead, s.dead2, s.dead3} {
-		if !networkPathUnanswered(filepath.Join(dead, "notes.txt")) {
+		if !shareUnanswered(filepath.Join(dead, "notes.txt")) {
 			t.Fatal("the share that does not answer answered")
 		}
 	}
@@ -287,7 +296,7 @@ func TestOneHookCallRecordsOnlyABodyTheBudgetCut(t *testing.T) {
 		s := newHookCallShares(t)
 		defer HookCall()()
 		for _, dead := range []string{s.dead, s.dead2} {
-			networkPathUnanswered(filepath.Join(dead, "notes.txt"))
+			shareUnanswered(filepath.Join(dead, "notes.txt"))
 		}
 		if _, read := readIndirectSource("safe.sh", s.live); !read || ShareBodyUnread() {
 			t.Errorf("the answering share: read %v, unread recorded %v", read, ShareBodyUnread())
@@ -295,11 +304,12 @@ func TestOneHookCallRecordsOnlyABodyTheBudgetCut(t *testing.T) {
 	})
 	t.Run("path read cut by the budget", func(t *testing.T) {
 		s := newHookCallShares(t)
+		s.holdLive()
 		defer HookCall()()
 		for _, dead := range []string{s.dead, s.dead2, s.dead3} {
-			networkPathUnanswered(filepath.Join(dead, "notes.txt"))
+			shareUnanswered(filepath.Join(dead, "notes.txt"))
 		}
-		if !networkPathUnanswered(filepath.Join(s.live, "notes.txt")) || ShareBodyUnread() {
+		if !shareUnanswered(filepath.Join(s.live, "notes.txt")) || ShareBodyUnread() {
 			t.Errorf("a path read recorded an unread body: %v", ShareBodyUnread())
 		}
 	})
@@ -313,7 +323,7 @@ func TestOneHookCallRecordsOnlyABodyTheBudgetCut(t *testing.T) {
 	t.Run("outside a hook call", func(t *testing.T) {
 		s := newHookCallShares(t)
 		for _, dead := range []string{s.dead, s.dead2, s.dead3} {
-			networkPathUnanswered(filepath.Join(dead, "notes.txt"))
+			shareUnanswered(filepath.Join(dead, "notes.txt"))
 		}
 		if _, read := readIndirectSource("safe.sh", s.live); !read || ShareBodyUnread() {
 			t.Errorf("outside a call: read %v, unread recorded %v", read, ShareBodyUnread())

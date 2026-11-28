@@ -40,6 +40,17 @@ ALERT_NON_ALLOW_OUTCOMES = (
 # SandboxEgressCodeLookupRefused in internal/audit/store.go.
 ALERT_AUDIT_ONLY_DECISION_CODES = ("SANDBOX_EGRESS_HARNESS_FETCH", "SANDBOX_EGRESS_LOOKUP_REFUSED")
 
+# The gateway's skill audit rows on Agent Substrate (B5.4). Mirrors the
+# AuditSkill* constants in internal/gateway/substrate_skill_scan.go. The
+# refusals and alerts among them also raise a substrate alert row, which the
+# Alerts panel shows; these rows add the passed and pending side.
+SUBSTRATE_SKILL_AUDIT_ACTIONS = (
+    "substrate.skill.scanned",
+    "substrate.skill.blocked",
+    "substrate.skill.unscanned",
+    "substrate.skill.pending",
+)
+
 ALERT_LEGACY_FINDING_ACTIONS = (
     "alert",
     "connector-hook-tampered",

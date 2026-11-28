@@ -7,12 +7,12 @@ It checks, in order:
 1. Substrate installs on a new kind cluster and its API answers.
 2. A worker pool and an atespace come up, and a stub agent image is built and pushed to the local registry.
 3. A new actor has no egress. A policy naming a host opens that host, and removing the policy closes it again.
-4. The DefenseClaw chart installs, actor creation writes the policy, and a hook event from the stub agent is denied by the real gateway (`defenseclaw.sh`).
+4. The gateway and skill scanner sidecar images are built from this checkout, the DefenseClaw chart installs with the sidecar ready, actor creation writes the policy, and a hook event from the stub agent is denied by the real gateway (`defenseclaw.sh`).
 5. Uninstalling the chart leaves no DefenseClaw policy and no open egress.
 
 ## Run it
 
-On a machine with docker, kubectl, helm, git and kind:
+On a machine with docker, kubectl, helm, git, kind, Go, uv and npm (the last three build the gateway and skill scanner sidecar images from this checkout; set `E2E_GATEWAY_IMAGE` and `E2E_SCANNER_IMAGE` to use images already in a registry the cluster reads):
 
     test/substrate-e2e/run.sh                # every phase, then cleanup
     test/substrate-e2e/run.sh egress         # one phase (phases: tools substrate workers stub egress defenseclaw uninstall cleanup)
@@ -20,6 +20,10 @@ On a machine with docker, kubectl, helm, git and kind:
 Against a cluster that already runs Substrate (a dev cluster), in your own namespace and atespace:
 
     E2E_CLUSTER_MODE=existing E2E_NAMESPACE=mine E2E_ATESPACE=mine-gv test/substrate-e2e/run.sh
+
+The chart as shipped has the skill scanner sidecar off. The default run turns it on (and builds its image) to prove the sidecar; this run installs the chart without that setting and checks the gateway pod carries no scanner container, so no image beyond the gateway's is needed:
+
+    E2E_SKILL_SCANNER=off test/substrate-e2e/run.sh
 
 The settings are the `E2E_*` variables at the top of `run.sh`. Results go to `$E2E_ARTIFACTS/results.tsv`, and a failure writes pod logs and events to `$E2E_ARTIFACTS/diagnostics/`. The script exits non-zero when any check fails.
 

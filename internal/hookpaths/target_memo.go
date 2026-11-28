@@ -4,8 +4,13 @@
 package hookpaths
 
 import (
+	"os"
 	"slices"
 	"sync"
+	"sync/atomic"
+
+	"github.com/defenseclaw/defenseclaw/internal/workcount"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // TargetMemo keeps the file system answers of one hook evaluation: the
@@ -36,6 +41,9 @@ type TargetMemo struct {
 	// startup is the agent's shell startup for this evaluation, from the
 	// hook client's header (nil: the process's own).
 	startup *ShellStartup
+	// callDots is set when the words of the whole call this evaluation
+	// judges may turn dotglob on (WithCallWords).
+	callDots atomic.Bool
 	// prefixes is the write-target walk state after each absolute path
 	// prefix (walkWritePathMemo).
 	prefixes map[string]walkState
@@ -54,6 +62,11 @@ type TargetMemo struct {
 	resolved map[string]resolvedTarget
 	// entries are the answers of stateEntryMayDiffer by the exact path.
 	entries map[string]stateEntry
+	// lstats are the Lstat answers of the paths the memo's walks and state
+	// entries read: the state scan reads the entry of each word the walk
+	// just read (rel-1-0-10:GAP-0299, two Lstat calls per word of a 1 MiB
+	// here-document).
+	lstats map[string]statAnswer
 	// The shared reach reader keeps complete names and per-parent answers.
 	reachNames   map[string]reachNames
 	reachParents map[reachParentKey]reachParentAnswer
@@ -71,6 +84,58 @@ type TargetMemo struct {
 	// short (hookCall.keepsSince): the share may answer later in the call,
 	// and an evaluation after that reads it (rel-1-0-10:GAP-1606).
 	owner *hookCall
+	// unread is the memo of this evaluation's decisions that read no file
+	// system (UnreadCommandDecision), and unreadDecisions their answers by
+	// input. Nothing they read is the host's, so they keep apart from this
+	// memo's own answers.
+	unread          *TargetMemo
+	unreadDecisions map[unreadDecisionKey]string
+	// parsed are the trees parsedShell handed out, by command.
+	parsed map[string]memoParse
+}
+
+// memoParse is one parseShell answer kept by a memo.
+type memoParse struct {
+	file *syntax.File
+	ok   bool
+}
+
+// maxMemoParses and maxMemoParseBytes bound the trees a memo keeps: a few
+// commands of the hook payload's size.
+const (
+	maxMemoParses     = 8
+	maxMemoParseBytes = 64 << 10
+)
+
+// parsedShell is parseShell of command for a reader that only reads the
+// tree: the memo parses each command once and hands every such reader the
+// same tree. One decision read the same 8 KB command with the parser four
+// times for the sed backup reader (both readings), the make proof and the
+// POSIX mention scan, most of a copy-mode by-name decision (FIX-F3PERF).
+// Only readers that never change a tree may use it:
+// literalWriteOperandsWithParsedKnown renames the shadowed builtins of its
+// tree in place (knownShadow), so it and the readers that hand it their
+// tree parse their own.
+func (m *TargetMemo) parsedShell(command string) (*syntax.File, bool) {
+	if m == nil || len(command) > maxMemoParseBytes {
+		return parseShell(command)
+	}
+	m.mu.Lock()
+	kept, found := m.parsed[command]
+	m.mu.Unlock()
+	if found {
+		return kept.file, kept.ok
+	}
+	file, ok := parseShell(command)
+	m.mu.Lock()
+	if m.parsed == nil {
+		m.parsed = make(map[string]memoParse)
+	}
+	if len(m.parsed) < maxMemoParses {
+		m.parsed[command] = memoParse{file: file, ok: ok}
+	}
+	m.mu.Unlock()
+	return file, ok
 }
 
 // maxTargetMemoEntries bounds a memo: past it, answers are computed and not
@@ -93,6 +158,28 @@ func NewTargetMemo() *TargetMemo {
 	return memo
 }
 
+// NewCallTargetMemo is an empty file system memory for one hook call on a
+// host where the call keeps none of its own (memoReads off: POSIX). The
+// memos of the call's evaluations (NewTargetMemoIn) resolve their write
+// targets and read their state entries in it.
+func NewCallTargetMemo() *TargetMemo { return newTargetMemo() }
+
+// NewTargetMemoIn is NewTargetMemo whose write targets and state entries
+// are kept in call, the memory of the hook call it judges (nil: none): the
+// gateway judges one call in several evaluations (the sandbox shell reading,
+// the trusted tool reading, their twins), and each walked every distinct word
+// of the command again; the 1 MiB here-document of GAP-0299 was 24,000 walks
+// per evaluation. The answers depend only on the path and the file system,
+// the same for the whole call; the flags of each evaluation stay its own.
+// Where the hook call keeps its own memory (Windows) that memory serves.
+func NewTargetMemoIn(call *TargetMemo) *TargetMemo {
+	memo := NewTargetMemo()
+	if memo.call == nil && call != nil {
+		memo.call = call
+	}
+	return memo
+}
+
 // newTargetMemo is an empty memo that keeps its own answers.
 func newTargetMemo() *TargetMemo {
 	return &TargetMemo{
@@ -103,12 +190,16 @@ func newTargetMemo() *TargetMemo {
 		files:    make(map[string]protectedFiles),
 		resolved: make(map[string]resolvedTarget),
 		entries:  make(map[string]stateEntry),
+		lstats:   make(map[string]statAnswer),
 	}
 }
 
 type resolvedTarget struct {
 	path string
 	ok   bool
+	// unanswered: the walk failed on a local read that did not answer
+	// (walkWritePathWhy).
+	unanswered bool
 }
 
 // protectedFiles is newProtectedFiles of home, once per memo.
@@ -199,6 +290,9 @@ type walkState struct {
 	crossed   []bool
 	linkDepth int
 	failed    bool
+	// unanswered: failed on a local read that did not answer
+	// (walkWritePathWhy).
+	unanswered bool
 }
 
 type memoWordKey struct {
@@ -306,33 +400,39 @@ func (m *TargetMemo) ResolveWriteTarget(path string) (string, bool) {
 
 // resolveWriteTarget is ResolveWriteTarget through the memo.
 func (m *TargetMemo) resolveWriteTarget(path string) (string, bool) {
+	resolved, ok, _ := m.resolveWriteTargetWhy(path)
+	return resolved, ok
+}
+
+// resolveWriteTargetWhy is resolveWriteTargetWhy through the memo.
+func (m *TargetMemo) resolveWriteTargetWhy(path string) (resolved string, ok, unanswered bool) {
 	if m == nil {
-		return ResolveWriteTarget(path)
+		return resolveWriteTargetWhy(path)
 	}
 	if m.call != nil {
-		return m.call.resolveWriteTarget(path)
+		return m.call.resolveWriteTargetWhy(path)
 	}
 	writeTargetWalks.Add(1)
 	m.mu.Lock()
 	known, found := m.resolved[path]
 	m.mu.Unlock()
 	if found {
-		return known.path, known.ok
+		return known.path, known.ok, known.unanswered
 	}
 	mark := m.cutMark()
-	resolved, _, _, ok := walkWritePathMemo("", path, 0, false, false, m)
+	resolved, _, _, ok = walkWritePathWhy("", path, 0, false, false, m, &unanswered)
 	if !m.keepsSince(mark) {
 		// A share on the way did not answer only because the call's
 		// budget cut its wait short: the next ask may read it
 		// (rel-1-0-10:GAP-1606).
-		return resolved, ok
+		return resolved, ok, unanswered
 	}
 	m.mu.Lock()
 	if len(m.resolved) < maxTargetMemoEntries {
-		m.resolved[path] = resolvedTarget{path: resolved, ok: ok}
+		m.resolved[path] = resolvedTarget{path: resolved, ok: ok, unanswered: unanswered}
 	}
 	m.mu.Unlock()
-	return resolved, ok
+	return resolved, ok, unanswered
 }
 
 // stateEntry is one answer of actionStateEntryMayDiffer.
@@ -358,7 +458,7 @@ func (m *TargetMemo) stateEntryMayDiffer(value string) (differ, missing bool) {
 		return known.differ, known.missing
 	}
 	mark := m.cutMark()
-	differ, missing = actionStateEntryMayDiffer(value)
+	differ, missing = actionStateEntryMayDifferWith(value, m)
 	if !m.keepsSince(mark) {
 		return differ, missing
 	}
@@ -368,6 +468,33 @@ func (m *TargetMemo) stateEntryMayDiffer(value string) (differ, missing bool) {
 	}
 	m.mu.Unlock()
 	return differ, missing
+}
+
+// lstat is pathLstat through the memo (nil: the file system): each path is
+// read once for the memo's walks and state entries. An answer read while the
+// budget cut a share wait short is not kept (rel-1-0-10:GAP-1606).
+func (m *TargetMemo) lstat(name string) (os.FileInfo, error) {
+	if m == nil {
+		workcount.Add(workcount.WordLookup)
+		return pathLstat(name)
+	}
+	m.mu.Lock()
+	answer, found := m.lstats[name]
+	m.mu.Unlock()
+	if found {
+		return answer.info, answer.err
+	}
+	mark := m.cutMark()
+	workcount.Add(workcount.WordLookup)
+	info, err := pathLstat(name)
+	if m.keepsSince(mark) {
+		m.mu.Lock()
+		if len(m.lstats) < maxTargetMemoEntries {
+			m.lstats[name] = statAnswer{info, err}
+		}
+		m.mu.Unlock()
+	}
+	return info, err
 }
 
 // nonWritesExcused is set for the scan ActionMentionsNoWriteRole runs; a nil memo
@@ -404,4 +531,31 @@ func (m *TargetMemo) shellStartup() ShellStartup {
 		return *m.startup
 	}
 	return CurrentShellStartup()
+}
+
+// WithCallWords records the whole call the evaluation judges and returns
+// the memo. When its words may turn dotglob or globdots on
+// (CommandMayDotglob), every statement read in this evaluation is read with
+// * and ? matching a leading dot, as the call's own reading is: the gateway
+// judges each statement of an eval body on its own, and the statement
+// rm -rf * of eval 'cd ~; shopt -s dotglob; rm -rf *' does not spell the
+// option its body turned on (rel-1-0-10:GAP-2267). It only turns the
+// reading on.
+func (m *TargetMemo) WithCallWords(command string) *TargetMemo {
+	if m != nil && !m.callDots.Load() && CommandMayDotglob(command) {
+		m.callDots.Store(true)
+	}
+	return m
+}
+
+// callMayDotglob reports a call whose words may turn dotglob on
+// (WithCallWords).
+func (m *TargetMemo) callMayDotglob() bool { return m != nil && m.callDots.Load() }
+
+// withCallDotglobOf gives m the call reading of from and returns m.
+func (m *TargetMemo) withCallDotglobOf(from *TargetMemo) *TargetMemo {
+	if m != nil && from.callMayDotglob() {
+		m.callDots.Store(true)
+	}
+	return m
 }

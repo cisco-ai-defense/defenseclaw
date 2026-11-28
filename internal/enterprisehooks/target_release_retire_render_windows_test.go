@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -147,5 +148,16 @@ func TestWindowsProtectedTargetRetireRenderTakesThisReleaseRetireRender(t *testi
 	windowsEnterpriseHookTrustCheck = func(string) error { return nil }
 
 	saveLock("1.0.9")
-	check("a lock 1.0.9 wrote", "1.0.9", true, "", false)
+	stateRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(stateRoot, "install"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, filepath.Join(stateRoot, "hook-guardian-state"))
+	check("a lock 1.0.9 wrote with no machine release history (GAP-1537)", "", false, "", false)
+	history := filepath.Join(stateRoot, "install", "release_history.json")
+	if err := os.WriteFile(history, []byte(`{"schema_version":1,"releases":["1.0.9"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gap1537SetSDDL(t, history, "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)")
+	check("a lock 1.0.9 wrote on a computer that ran 1.0.9", "1.0.9", true, "", false)
 }

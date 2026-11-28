@@ -137,7 +137,7 @@ What a gateway outage does to a GitHub Copilot CLI call, per install and fail mo
 - `preToolUse` blocks an action-mode call that needs confirmation. Copilot CLI does not tell its hook whether it can show an approval prompt, so DefenseClaw records the delivered denial as a block.
 - `permissionRequest`, `agentStop` and `subagentStop` can return a deny or block.
 - `postToolUseFailure` is advisory. It can add recovery context after the tool failed.
-- Outside Secure Client, Copilot CLI has no hook that can stop a prompt. Under Secure Client on Windows and macOS, an action-mode block replaces `userPromptTransformed` with DefenseClaw's notice before the model receives it; DefenseClaw records that replacement as `action=block`, `raw_action=block`, `would_block=false`, and `enforced=true`. Observe mode does not replace the prompt. Tool-call rules still block normally.
+- Copilot CLI has no hook that can deny a prompt, so on every install (per-user, standalone managed and Secure Client, on Linux, macOS and Windows) an action-mode block replaces `userPromptTransformed` with DefenseClaw's notice before the model receives it. The blocked prompt never reaches the model; Copilot's timeline still shows what the user typed. DefenseClaw records that replacement as `action=block`, `raw_action=block`, `would_block=false`, and `enforced=true`. Observe mode does not replace the prompt. A prompt check that cannot complete and fails closed replaces the prompt in both modes, as it blocks a tool call (see [Fail mode](#fail-mode)), and the hook writes DefenseClaw's notice itself when a block arrives without a replacement. Tool-call rules still block normally.
 
 ### Verdict mapping
 
@@ -146,7 +146,7 @@ What a gateway outage does to a GitHub Copilot CLI call, per install and fail mo
 | `preToolUse` | A policy confirm in action mode returns a native deny and records audit action `block`, with raw action `confirm`. Confirm findings on other events use a non-pausing audit and alert fallback. |
 | `permissionRequest`, `agentStop`, `subagentStop` | Return the official deny or block response. |
 | `postToolUseFailure` | Can add recovery `additionalContext`. Cannot block or reverse the failed tool. |
-| Prompt | Outside Secure Client, no hook can stop a prompt. Under Secure Client on Windows and macOS, an action-mode block replaces `userPromptTransformed` before the model receives it and records the replacement as an enforced block. Observe mode remains advisory. |
+| Prompt | On every install an action-mode block replaces `userPromptTransformed` with DefenseClaw's notice before the model receives it and records the replacement as an enforced block. Observe mode remains advisory. The legacy contract (Copilot CLI before 1.0.76) has no `userPromptTransformed` hook, so a blocked prompt there reaches the model. |
 
 ### Confirmations and prompt availability
 
@@ -156,7 +156,7 @@ If `disableAllHooks` appears in DefenseClaw's own Copilot hook file, status, doc
 
 ### Fail mode
 
-Copilot runs a call when its hook times out or cannot start. On a per-user install a gateway that is not running follows the policy tier: the default and permissive policies let the call run with one warning and a record in `~/.defenseclaw/logs/hook-failures.jsonl`, and the gateway reports a `guardrail-degraded` alert when it starts again; the strict policy denies it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). Every other failure DefenseClaw sees (an unusable answer, a missing token) is denied with Copilot's own `deny`, and the reason names the next step. Oversized input is denied on a managed host and in the strict policy; in the default and permissive policies the gateway judges a bounded review of it ([Fail modes](/docs/reference/fail-modes)). On a managed standalone host the administrator-owned hook denies `preToolUse` and `permissionRequest` while the gateway service is not running. Under Secure Client the hook stays open. The gateway requires the exact trusted event-specific registration header and never infers the event from stdin fields.
+Copilot runs a call when its hook times out or cannot start. On a per-user install a gateway that is not running follows the policy tier: the default and permissive policies let the call run with one warning and a record in `~/.defenseclaw/logs/hook-failures.jsonl`, and the gateway reports a `guardrail-degraded` alert when it starts again; the strict policy denies it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). Every other failure DefenseClaw sees (an unusable answer, a missing token) is denied with Copilot's own `deny`, and the reason names the next step. Oversized input is denied on a managed host and in the strict policy; in the default and permissive policies the gateway judges a bounded review of it ([Fail modes](/docs/reference/fail-modes)). On a managed standalone host the administrator-owned hook denies `preToolUse` and `permissionRequest` while the gateway service is not running. Wherever a tool call is denied this way, a prompt sent through `userPromptTransformed` is replaced with DefenseClaw's notice, so it does not reach the model unchecked. Under Secure Client the hook stays open. The gateway requires the exact trusted event-specific registration header and never infers the event from stdin fields.
 
 ## GitHub Copilot in VS Code
 
@@ -219,7 +219,7 @@ Not covered yet:
 
 ## Limits
 
-- Outside Secure Client, no hook can stop a prompt. Under Secure Client on Windows and macOS, an action-mode block replaces `userPromptTransformed` before the model receives it and is recorded as enforced; observe mode remains advisory.
+- No hook can deny a prompt. An action-mode block replaces `userPromptTransformed` with DefenseClaw's notice before the model receives it, on every install, and is recorded as enforced; observe mode remains advisory. Copilot's timeline still shows the prompt the user typed. Copilot CLI before 1.0.76 has no `userPromptTransformed` hook, so there a blocked prompt reaches the model.
 - `postToolUseFailure` cannot block or reverse the failed tool.
 - Copilot runs a call when its hook times out or cannot start. See the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) for per-user and managed outage behavior. An unchecked call is recorded in `~/.defenseclaw/logs/hook-failures.jsonl`; on a per-user install it is reported as a `guardrail-degraded` alert when the gateway starts again. A managed gateway raises no such alert: on a managed host whose administrator selected `open`, the call keeps only that account's `hook-failures.jsonl` line (`outcome` `fail_open`). Every other failure DefenseClaw sees (unusable answer, missing token, oversized input) is denied, and the reason names the next step. Under Secure Client the hook stays open.
 - DefenseClaw does not configure Copilot's own OpenTelemetry exporter. Telemetry comes from hook events.

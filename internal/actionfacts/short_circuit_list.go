@@ -240,6 +240,34 @@ type sequenceStatement struct {
 // (u) or LOGNAME (o); other conditional and loop bodies are kind c.
 var loopScopeKinds = map[string]byte{"USER": 'u', "LOGNAME": 'o'}
 
+// lastPipelineStageScopeKind and backgroundScopeKind are the scope kinds of
+// the last stage of a pipeline and of a statement run in the background
+// (&). Bash runs both in a subshell, and the walk drops their state as it
+// does for kind s, but zsh and Bash with lastpipe run the last stage in the
+// shell itself, and the laptop's readers keep the folder a cd in either
+// moves to for the commands after it. SimpleCommand.LastStageOrBackground
+// marks the commands in them (substrate-1 GAP-0648 review P2-1).
+const (
+	lastPipelineStageScopeKind byte = 'p'
+	backgroundScopeKind        byte = 'b'
+)
+
+// lastStageOrBackgroundScope reports a scope in the last stage of a
+// pipeline or in a background statement, at any depth.
+func lastStageOrBackgroundScope(scope string) bool {
+	for scope != "" {
+		index := strings.LastIndexByte(scope, '/')
+		if index < 0 {
+			return false
+		}
+		if kind := scope[index+1]; kind == lastPipelineStageScopeKind || kind == backgroundScopeKind {
+			return true
+		}
+		scope = scope[:index]
+	}
+	return false
+}
+
 // simpleLoopBind is a for or select loop that gives USER or LOGNAME one
 // word of its list in each iteration (an empty list is the positional
 // parameters).
@@ -280,7 +308,7 @@ func pipelineStage(stmt *syntax.Stmt) bool {
 	return ok && (binary.Op == syntax.Pipe || binary.Op == syntax.PipeAll)
 }
 
-// sequenceStatementDetails is the one full-parser flattening step. The
+// sequenceStatementDetailsWalk is the one full-parser flattening step. The
 // reductions retain ordinary pipelines as a unit; simple-command policy
 // evaluation asks it to expose their individual stages too. Scope identifies
 // statements whose shell directory and variables are shared. walkUncalled
@@ -289,7 +317,7 @@ func pipelineStage(stmt *syntax.Stmt) bool {
 // judges only what the shell runs, Input.StraightLineFunctions) such a body
 // contributes no statement and no state. straight limits the code a loop
 // binding follows to the top-level statements before the loop (Input.LoopBindsStraightLine).
-func sequenceStatementDetails(source string, compound, allSimple, straight, walkUncalled bool) (statements []sequenceStatement, reduced, ok bool) {
+func sequenceStatementDetailsWalk(source string, compound, allSimple, straight, walkUncalled bool) (statements []sequenceStatement, reduced, ok bool) {
 	if source == "" {
 		return nil, false, false
 	}
@@ -337,7 +365,9 @@ func sequenceStatementDetails(source string, compound, allSimple, straight, walk
 	// (its state is dropped), c a conditional or loop body of the same
 	// shell (its state joins the path that skipped it), f a function body
 	// run by this shell (its state replaces the caller state, less its
-	// local variables), e a function body run by a child shell.
+	// local variables), e a function body run by a child shell, p the last
+	// stage of a pipeline and b a background statement (both dropped as s
+	// is, lastPipelineStageScopeKind).
 	namedScope := func(kind byte, name string, walk func() bool) bool {
 		parent := scope
 		nextScope++
@@ -350,6 +380,10 @@ func sequenceStatementDetails(source string, compound, allSimple, straight, walk
 		return walk()
 	}
 	childScope := func(kind byte, walk func() bool) bool { return namedScope(kind, "", walk) }
+	// innerPipeline marks the walk of the left side x | y of a pipeline
+	// x | y | z, whose last stage y is not the last stage of the pipeline
+	// (lastPipelineStageScopeKind).
+	innerPipeline := false
 	// assigned holds the static values the walk has seen assigned to each
 	// variable, so a program word such as $x can name the function it
 	// calls (GAP-0934); unbound holds the variables the action may also
@@ -418,6 +452,9 @@ func sequenceStatementDetails(source string, compound, allSimple, straight, walk
 	}
 	subshells := 0
 	functions := make(map[string]*syntax.Stmt)
+	// certainDefinitions marks the function bodies whose definition the
+	// shell surely ran where the walk met it.
+	certainDefinitions := make(map[*syntax.Stmt]bool)
 	functionDepth := 0
 	// expanded are the function bodies a call walked; definitions are the
 	// functions the walk met, to be walked where defined when no call did.
@@ -499,12 +536,22 @@ func sequenceStatementDetails(source string, compound, allSimple, straight, walk
 				// child scope per level made the name of a scope as long as
 				// the pipeline before it, and the names of n stages took
 				// n^2 bytes (GAP-0254: a 67 KB pipeline held 6 GiB).
+				last := lastPipelineStageScopeKind
+				if innerPipeline {
+					last = 's'
+				}
+				innerPipeline = false
 				left := func() bool { return childScope('s', func() bool { return flatten(typed.X) }) }
 				if pipelineStage(typed.X) {
-					left = func() bool { return flatten(typed.X) }
+					left = func() bool {
+						innerPipeline = true
+						ok := flatten(typed.X)
+						innerPipeline = false
+						return ok
+					}
 				}
 				return true, left() &&
-					childScope('s', func() bool { return flatten(typed.Y) })
+					childScope(last, func() bool { return flatten(typed.Y) })
 			}
 			if !flatten(typed.X) {
 				return true, false
@@ -524,6 +571,11 @@ func sequenceStatementDetails(source string, compound, allSimple, straight, walk
 				return true, false
 			}
 			functions[typed.Name.Value] = typed.Body
+			// A definition surely ran before a later call only when nothing
+			// around it may skip it: no && or ||, branch, loop, pipeline,
+			// subshell or background around it, only the bodies of the
+			// functions being run (substrate-1:GAP-0713, CHK-T6-SCB).
+			certainDefinitions[typed.Body] = skippable == 0 && subshells == 0 && sequenceScopeOnlyFunctionBodies(scope)
 			definitions = append(definitions, functionDefinition{body: typed.Body, at: len(statements),
 				scope: scope, binds: slices.Clone(loopBinds), subshells: subshells, depth: functionDepth})
 			return true, true
@@ -680,7 +732,7 @@ func sequenceStatementDetails(source string, compound, allSimple, straight, walk
 			// (rel-1-0-10:GAP-1021).
 			subshells++
 			defer func() { subshells-- }()
-			return childScope('s', walk)
+			return childScope(backgroundScopeKind, walk)
 		}
 		if replaced, ok := flattenRedirected(stmt); replaced {
 			reduced = true
@@ -777,7 +829,16 @@ func sequenceStatementDetails(source string, compound, allSimple, straight, walk
 						functionDepth++
 						calling = append(calling, call)
 						expanded[body] = true
-						ok := childScope('f', func() bool { return flatten(body) })
+						run := body
+						if body == functions[program] && program == name && certainDefinitions[body] {
+							if args, ok := sequenceRunnerCallArgs(call, body); ok {
+								// After f() { "$@"; }, the body runs the call's
+								// arguments in this shell: f cd X is the cd X
+								// (substrate-1:GAP-0713).
+								run = &syntax.Stmt{Cmd: &syntax.CallExpr{Args: args}}
+							}
+						}
+						ok := childScope('f', func() bool { return flatten(run) })
 						calling = calling[:len(calling)-1]
 						functionDepth--
 						if !ok {
@@ -886,6 +947,57 @@ func sequenceStatementDetails(source string, compound, allSimple, straight, walk
 		}
 	}
 	return statements, reduced, true
+}
+
+// sequenceScopeOnlyFunctionBodies reports a walk scope that is the top
+// level or the bodies of functions run by this shell alone (kind f).
+func sequenceScopeOnlyFunctionBodies(scope string) bool {
+	parts := strings.Split(scope, "/")
+	for _, part := range parts[1:] {
+		if !strings.HasPrefix(part, "f") {
+			return false
+		}
+	}
+	return true
+}
+
+// sequenceRunnerCallArgs returns the arguments a call of a function whose
+// body only runs them in the shell (workFolderArgRunner) runs as a command:
+// the words after the function name. It declines a call with assignments,
+// and an argument with a substitution (already walked with the call) or a
+// positional or special parameter (it reads another value in the body).
+//
+// It reads only a folder change (cd, pushd, popd: f cd X moves the shell as
+// cd X, substrate-1:GAP-0713); any other command keeps the reading of the
+// body it had. Flattened, run sh -c 'if false; then printf c >>
+// ~/.defenseclaw/config.yaml; fi' after run() { "$@"; } became the plain sh
+// -c call, whose dead branch the plain reading judges, and the ordinary
+// row of TestGAP0456WrappedStateWriteVerdictParity blocked where rel allows.
+func sequenceRunnerCallArgs(call *syntax.CallExpr, body *syntax.Stmt) ([]*syntax.Word, bool) {
+	if len(call.Assigns) != 0 || len(call.Args) < 2 || !workFolderArgRunner(body) {
+		return nil, false
+	}
+	switch call.Args[1].Lit() {
+	case "cd", "pushd", "popd":
+	default:
+		return nil, false
+	}
+	args := call.Args[1:]
+	plain := true
+	for _, arg := range args {
+		syntax.Walk(arg, func(node syntax.Node) bool {
+			switch typed := node.(type) {
+			case *syntax.CmdSubst, *syntax.ProcSubst, *syntax.ArithmExp:
+				plain = false
+			case *syntax.ParamExp:
+				if typed.Param == nil || !simpleVariableName(typed.Param.Value) {
+					plain = false
+				}
+			}
+			return plain
+		})
+	}
+	return args, plain
 }
 
 // simpleUncalledBodyCommand classifies node, a command of the body of a

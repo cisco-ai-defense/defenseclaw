@@ -133,7 +133,7 @@ commands change in these ways. Everything else on this page works as written.
   The administrator turns sandboxes on with `openshell.enabled` and decides how
   OpenShell is provided; in `setup` install mode your daemon installs NVIDIA's
   release into `~/.local` at your first sandbox. The first-use progress line is
-  "Installing OpenShell 0.1.6 for your account and starting it (first run only)…".
+  "Installing OpenShell 0.1.9 for your account and starting it (first run only)…".
 - **`sandbox policy allow` and `block`** save one host decision at a time in
   the managed gateway. Start a sandbox first; if you have several, use
   `--sandbox NAME` to select the policy that checks the decision. The gateway
@@ -232,7 +232,7 @@ asking. Doctor exits `1` when a check fails, with `--output json` too, after it
 prints the result (so `ok` is `false` exactly when it exits `1`). The JSON holds `ok`,
 `ready` (`ok`, with sandboxes turned on), `openshell_install` (setup would offer
 to install OpenShell), `openshell_upgrade` (setup would offer to upgrade a
-  supported OpenShell older than 0.1.6 in place) and `openshell_install_version`
+  supported OpenShell older than 0.1.9 in place) and `openshell_install_version`
 (the release setup installs), then every check with its id, title, status,
 detail and fix, the OpenShell and Docker versions found, and the compute driver. When a burst of sandbox commands hit the request limit while doctor read the organization policy, that row warns and asks you to run doctor again; it does not report a failed policy;
 the TUI's Setup wizard reads these fields. When sandboxes are on
@@ -934,6 +934,7 @@ A few rules the flags follow:
 | `--rm` | switch |  | Delete the sandbox when the session ends. |
 | `--safe` | switch |  | Keep the harness's own permission prompts (skip-permissions off). |
 | `--unmask` | text, repeatable |  | Share a masked secret file or glob with the sandbox (repeatable). |
+| `--vault` | text, repeatable |  | NAME: give the sandbox a placeholder for `$NAME` from your vault; it works only against the host the vault binds it to (repeatable; see sandbox vault). |
 | `-y`, `--yes` | switch |  | Take the defaults at the end of the session (mount: keep the changes; copy: leave them in the sandbox for later pull --apply, --branch or --patch-out FILE). |
 {/* AUTOGEN-END: sandbox-flags */}
 
@@ -1095,6 +1096,11 @@ would not start. Without a name, a red `Telemetry` row appears when the
 audit recorder refused sandbox records since the daemon started, with the
 count and the last error.
 
+When sandboxes are off, `sandbox status` names the reason for your primary
+connector: your organization's profiles match per connector, so the answer is
+the one for the agent your configuration names as primary. `sandbox run` names
+the reason for the agent you run.
+
 ```bash
 defenseclaw sandbox status
 defenseclaw sandbox status myapp-7f3a --output json
@@ -1248,8 +1254,14 @@ its port unless it is 443, and an IPv6 address with its port is bracketed
 `unblock` command. A large upload is a ⚠ report (`⚠ large upload to
 files.example.net (more than 25 MiB)`), or with
 [the large-upload block](/docs/sandboxes/policy-packs) on, a ✗
-that names the threshold. `-f` follows the feed. Each event has a sequence
-number, and `--since` starts after one.
+that names the threshold. `-f` follows the feed. While sandboxes are off for
+your account (your organization turned them off, your profile does not allow
+them, another account is using them, or the organization manages the setting),
+`-f` prints the same reason `sandbox status` gives and exits `1` at once,
+without waiting for the feed. When only the installed OpenShell cannot run a
+sandbox, `-f` follows the feed of the sandboxes that still run. When the daemon
+just stops, it says so. Each event has a sequence number,
+and `--since` starts after one.
 
 ```bash
 defenseclaw sandbox activity -f
@@ -1955,6 +1967,169 @@ defenseclaw sandbox pack validate ~/.defenseclaw/policies/sandbox/team-web/pack.
 
 {/* AUTOGEN-BEGIN: sandbox-flags pack validate */}
 This command has no flags.
+{/* AUTOGEN-END: sandbox-flags */}
+
+## Secrets
+
+### `sandbox vault`
+
+The vault keeps your secrets for your sandboxes. Each secret is bound to the
+one host it may be sent to. Start a sandbox with `--vault NAME` and the agent
+sees only a placeholder in `$NAME`; OpenShell puts the real value in on the way
+out, to that host only. See [Credential vault](/docs/sandboxes/vault).
+
+```bash
+defenseclaw sandbox vault list
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags vault */}
+| Subcommand | Purpose |
+| --- | --- |
+| [`sandbox vault add`](#sandbox-vault-add) | Add a secret bound to one host (asks for the value with echo off). |
+| [`sandbox vault bind`](#sandbox-vault-bind) | Set the one host a secret may be sent to. |
+| [`sandbox vault confirm`](#sandbox-vault-confirm) | Confirm a captured secret is yours, so sandboxes can use it. |
+| [`sandbox vault list`](#sandbox-vault-list) | List your secrets (names, hosts and status; never values). |
+| [`sandbox vault remove`](#sandbox-vault-remove) | Remove a secret from the vault. |
+| [`sandbox vault rename`](#sandbox-vault-rename) | Rename a secret (the variable the sandbox sees). |
+| [`sandbox vault replace`](#sandbox-vault-replace) | Replace a secret's value (after you rotate it). |
+| [`sandbox vault show`](#sandbox-vault-show) | Show one secret's host, status, source and use (never its value). |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox vault list`
+
+Lists your secrets with their host, status, source and last use. Values are
+never printed. `needs a host` means no sandbox can use the secret until you
+bind one; `exposed: rotate` means an agent's model may have seen the value
+before DefenseClaw captured it.
+
+The first line says how the vault is kept: `sealed (macOS Keychain)`,
+`sealed (Secret Service)` or `file (owner-only, not encrypted)`. `--json`
+carries it as `storage` and `sealed`, with `storage_note` when a plain file is
+not sealed (the reason) or when this session cannot read a sealed vault's key
+(commands that need its values then fail). See
+[Where the vault lives](/docs/sandboxes/vault#where-the-vault-lives).
+
+```bash
+defenseclaw sandbox vault list
+defenseclaw sandbox vault list --json
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags vault list */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox vault show`
+
+Shows one secret's host, status, where it came from and when a sandbox last
+used it, never its value.
+
+```bash
+defenseclaw sandbox vault show STRIPE_API_KEY
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags vault show */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox vault add`
+
+Adds a secret. `NAME` is the environment variable the sandbox sees; `--host`
+is the only host the value is ever sent to. The value is typed with echo off,
+or piped with `--value-stdin`; it never goes on the command line.
+
+```bash
+defenseclaw sandbox vault add STRIPE_API_KEY --host api.stripe.com
+printf '%s\n' "$VALUE" | defenseclaw sandbox vault add PAYMENTS_KEY --host api.example.com:8443 --value-stdin
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags vault add */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--host` | text |  | The only host the secret may be sent to (host or host:port). |
+| `--value-stdin` | switch |  | Read the value from standard input (one line). |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox vault replace`
+
+Replaces a secret's value, for example after you rotate it with its issuer.
+A replaced secret is no longer marked exposed. Sandboxes started afterwards use
+the new value.
+
+```bash
+defenseclaw sandbox vault replace GITHUB_TOKEN
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags vault replace */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--value-stdin` | switch |  | Read the value from standard input (one line). |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox vault confirm`
+
+Confirms that a secret DefenseClaw captured from a sandbox is yours. A captured
+secret is **unconfirmed** and no sandbox gets it until you confirm it: an agent
+in a sandbox can make a call that looks like your prompt, so a captured value
+may be one it planted. `confirm` shows where the secret came from, when, and
+the last 4 characters of its value, then asks. An exposed secret cannot be
+confirmed; replace it with a new value instead.
+
+```bash
+defenseclaw sandbox vault confirm GITHUB_TOKEN
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags vault confirm */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `-y`, `--yes` | switch |  | Do not ask. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox vault bind`
+
+Sets the one host a secret may be sent to. A captured secret of a kind with no
+single API (a Google API key) needs this before a sandbox can use it.
+
+```bash
+defenseclaw sandbox vault bind GOOGLE_API_KEY --host generativelanguage.googleapis.com
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags vault bind */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--host` | text |  | The only host the secret may be sent to (host or host:port). |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox vault rename`
+
+Renames a secret, which changes the variable the sandbox sees.
+
+```bash
+defenseclaw sandbox vault rename GITHUB_TOKEN_2 GITHUB_BOT_TOKEN
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags vault rename */}
+This command has no flags.
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox vault remove`
+
+Removes a secret. Running sandboxes keep the value until they stop; revoke it
+with its issuer if it may have leaked.
+
+```bash
+defenseclaw sandbox vault remove STRIPE_API_KEY --yes
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags vault remove */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `-y`, `--yes` | switch |  | Do not ask. |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ## Requirements and platform facts

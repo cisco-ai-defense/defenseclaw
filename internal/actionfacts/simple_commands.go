@@ -91,6 +91,15 @@ type SimpleCommand struct {
 	// (rel-1-0-10:GAP-0996). A write there is judged against the previous
 	// home only (GAP-2476): a scratch HOME=$(mktemp -d) keeps its writes.
 	UnprovenHome bool
+	// LastStageOrBackground marks a command in the last stage of a pipeline
+	// or in a statement run in the background (&), or in a body such a
+	// command runs. Bash runs it in a subshell, so the walk drops a folder
+	// it moves to there, but zsh and Bash with lastpipe run the last stage
+	// in the shell itself, and the laptop's readers keep that folder for the
+	// later commands; the copy-mode guest placement keeps it as a folder the
+	// call runs in (substrate-1 GAP-0648 review P2-1). It is no other
+	// reading: a piece of the call is the same piece without it.
+	LastStageOrBackground bool
 	// EvaluationFailure is "limit" or "parse" when no complete per-command
 	// view can be produced, EvaluationFailureInternal when the reader
 	// itself failed, and EvaluationFailureSyntax when a text with a syntax
@@ -145,7 +154,7 @@ func isSyntaxTailUnread(simple SimpleCommand) bool {
 // (EvaluationFailureUnresolvedBody, rel-1-0-10:GAP-0876). The consumer
 // reading takes the readable statements for the bindings that may rename a
 // data program (hereDocCallBindings, GAP-0902, GAP-0913).
-func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, depth int, interpreter string, inherited map[string]string, guess bool) []SimpleCommand {
+func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, depth int, interpreter string, inherited map[string]string, guess bool, operands *RelativeOperandMemo) []SimpleCommand {
 	result := make([]SimpleCommand, 0, len(tail.Statements)+2)
 	emitted := make(map[SimpleCommand]bool, len(tail.Statements))
 	capped := tail.Truncated.Any()
@@ -168,7 +177,7 @@ func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, depth int, inte
 		if !add(SimpleCommand{Text: statement, CWD: input.CWD}) {
 			return false
 		}
-		for _, command := range simpleCommands(piece, Analyze(piece), depth+1, interpreter, inherited, guess, nil) {
+		for _, command := range simpleCommands(piece, Analyze(piece), depth+1, interpreter, inherited, guess, nil, operands) {
 			if command.EvaluationFailure == "limit" {
 				// A statement whose own reading is past the statement
 				// budget is a capped reading of the text, not a refusal of
@@ -538,11 +547,11 @@ func (pieces *simplePieces) add(command SimpleCommand) {
 }
 
 // has reports a command that is one of the pieces. A reading marked
-// LoginGuess is judged as the piece it repeats.
+// LoginGuess or LastStageOrBackground is judged as the piece it repeats.
 func (pieces *simplePieces) has(command SimpleCommand) bool {
-	command.LoginGuess = false
+	command.LoginGuess, command.LastStageOrBackground = false, false
 	return slices.ContainsFunc(*pieces, func(piece SimpleCommand) bool {
-		piece.LoginGuess = false
+		piece.LoginGuess, piece.LastStageOrBackground = false, false
 		return piece == command
 	})
 }
@@ -552,7 +561,14 @@ func (pieces *simplePieces) has(command SimpleCommand) bool {
 // addition to the original action. A plain single command needs no second
 // pass. Ordinary assignments and known home or local variable expansions
 // are resolved; a subshell or pipeline stage has its own shell state.
-func SimpleCommands(input Input, facts Facts) (commands []SimpleCommand) {
+func SimpleCommands(input Input, facts Facts) []SimpleCommand {
+	return SimpleCommandsWith(input, facts, nil)
+}
+
+// SimpleCommandsWith is SimpleCommands with the relative-operand answers of
+// relative (nil: none kept), for callers that split several readings of one
+// call (GAP-0923).
+func SimpleCommandsWith(input Input, facts Facts, operands *RelativeOperandMemo) (commands []SimpleCommand) {
 	defer func() {
 		if recover() != nil {
 			commands = []SimpleCommand{{EvaluationFailure: EvaluationFailureInternal}}
@@ -566,7 +582,7 @@ func SimpleCommands(input Input, facts Facts) (commands []SimpleCommand) {
 	if argsOnly && argsExecutionTool(input.Tool) {
 		pieces = new(simplePieces)
 	}
-	result := simpleCommandsOfCall(input, facts, pieces)
+	result := simpleCommandsOfCall(input, facts, pieces, operands)
 	if facts.Parse.Dialect == DialectPOSIX && facts.Parse.Status != StatusInvalid {
 		source := input.Command
 		if source == "" && (bytes.Contains(input.Args, []byte("<<")) || facts.Parse.Status == StatusPartial) {
@@ -597,11 +613,17 @@ func SimpleCommands(input Input, facts Facts) (commands []SimpleCommand) {
 		}
 		// A command that is a piece of the call as written adds nothing: the
 		// call is judged as written, with the rules and the enforcement it had
-		// before this reading. Only a reading with a variable resolved is new.
+		// before this reading. Only a reading with a variable resolved is new,
+		// and so is a piece the walk read in a folder a cd moved the shell
+		// to: the call as written is judged in its own folder only, so time {
+		// cd D && ls; }; X, or cd D; cat <(...); X, judged X in the hook
+		// folder alone, a state write in D included (substrate-1 GAP-0668).
 		// The walk records the pieces as it reads them, so a text that merely
 		// occurs elsewhere in the call (a comment, a quoted word) is no piece.
 		if pieces != nil {
-			result = slices.DeleteFunc(result, pieces.has)
+			result = slices.DeleteFunc(result, func(simple SimpleCommand) bool {
+				return simple.CWD == input.CWD && pieces.has(simple)
+			})
 		}
 	}
 	return result
@@ -925,8 +947,8 @@ func hereDocBodyMayWriteState(body string, input Input) bool {
 	return false
 }
 
-func simpleCommandsOfCall(input Input, facts Facts, pieces *simplePieces) []SimpleCommand {
-	result := simpleCommands(input, facts, 0, "", nil, false, pieces)
+func simpleCommandsOfCall(input Input, facts Facts, pieces *simplePieces, operands *RelativeOperandMemo) []SimpleCommand {
+	result := simpleCommands(input, facts, 0, "", nil, false, pieces, operands)
 	// USER and LOGNAME carry a value from the home only as the guess that the
 	// login is the home's last element, and the shell may hold another. A
 	// second walk reads the action with that guess, to prove a write to state
@@ -939,7 +961,7 @@ func simpleCommandsOfCall(input Input, facts Facts, pieces *simplePieces) []Simp
 	if input.Command != "" && !strings.Contains(input.Command, "USER") && !strings.Contains(input.Command, "LOGNAME") {
 		return result
 	}
-	for _, guessed := range simpleCommands(input, facts, 0, "", nil, true, pieces) {
+	for _, guessed := range simpleCommands(input, facts, 0, "", nil, true, pieces, operands) {
 		if !slices.Contains(result, guessed) {
 			guessed.LoginGuess = true
 			result = append(result, guessed)
@@ -954,7 +976,7 @@ func simpleCommandsOfCall(input Input, facts Facts, pieces *simplePieces) []Simp
 // hands one to a shell body. inherited holds the values USER and LOGNAME
 // have where a shell body starts (simpleChildUserVars); nil is the start of
 // the action, where guess gives both the home base name.
-func simpleCommands(input Input, facts Facts, depth int, interpreter string, inherited map[string]string, guess bool, pieces *simplePieces) []SimpleCommand {
+func simpleCommands(input Input, facts Facts, depth int, interpreter string, inherited map[string]string, guess bool, pieces *simplePieces, operands *RelativeOperandMemo) []SimpleCommand {
 	if facts.Parse.Dialect == DialectPowerShell || facts.Parse.Dialect == DialectCMD {
 		return windowsSimpleCommands(input, facts)
 	}
@@ -988,7 +1010,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	// for its tail, so a call that parses pays no second parse.
 	if facts.Parse.Status == StatusInvalid && containsIssue(facts.Parse.Issues, IssueInvalidSyntax) {
 		if tail, ok := shellparse.ReadSyntaxTail(source); ok {
-			return syntaxTailCommands(input, tail, depth, interpreter, inherited, guess)
+			return syntaxTailCommands(input, tail, depth, interpreter, inherited, guess, operands)
 		}
 	}
 	// A ~+ head is the working folder, which only the walk writes
@@ -1277,7 +1299,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			// environment of the program (effective, used for nested scripts).
 			resolvedVariable := false
 			resolve := func(text string) string {
-				if resolved, ok := simpleResolvedVariables(text, state.vars); ok {
+				if resolved, ok := simpleResolvedVariables(text, state.vars, home, state.cwd); ok {
 					text = resolved
 					changed, resolvedVariable = true, true
 				}
@@ -1299,7 +1321,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			if strings.TrimSpace(text) == "" {
 				return parseGap()
 			}
-			relative := state.cwdUnknown && simpleRelativePathOperand(text)
+			relative := state.cwdUnknown && operands.of(text)
 			if relative {
 				unproven = true
 			}
@@ -1313,6 +1335,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				UnboundUser:             simpleUnboundUser(text, effective, bound),
 				AbsoluteOnly:            state.cwdUnknown && !relative,
 				UnresolvedFolder:        relative,
+				LastStageOrBackground:   lastStageOrBackgroundScope(part.scope),
 				UnprovenHome:            simpleReadsThroughUnprovenHome(input, state, part.text, text, resolvedVariable)}
 			if text == part.text {
 				pieces.add(command)
@@ -1335,6 +1358,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						UnresolvedBoundVariable: simpleUnresolvedBoundVariable(reading, effective, bound),
 						UnboundUser:             simpleUnboundUser(reading, effective, bound),
 						AbsoluteOnly:            command.AbsoluteOnly,
+						LastStageOrBackground:   command.LastStageOrBackground,
 						UnprovenHome:            command.UnprovenHome}
 					if reading == unprefixed {
 						pieces.add(alone)
@@ -1398,10 +1422,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					innerInput := input
 					innerInput.Command, innerInput.Args, innerInput.Argv = script, nil, nil
 					innerInput.CWD = state.cwd
-					var wrapperFolderUnknown bool
-					if folder, changed, unknown := simpleNestedChildFolder(nestedCall.Args, nestedVars, state.cwd); changed {
+					var wrapperFolderUnknown, wrapperFolder bool
+					if folder, changed, unknown := simpleNestedChildFolder(nestedCall.Args, nestedVars, state.cwd, input.StandInCWD); changed {
 						innerInput.CWD = folder
-						wrapperFolderUnknown = unknown
+						wrapperFolder, wrapperFolderUnknown = true, unknown
 						innerCWDUnknown = innerCWDUnknown || unknown
 					}
 					if innerCWDUnknown {
@@ -1414,7 +1438,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					// read as on the top level (rel-1-0-10:GAP-1042).
 					innerInput.folderUnknown = innerInput.CWD == "" && (wrapperFolderUnknown || state.cwdUnknown || input.CWD == "")
 					if shared {
-						if resolved, ok := simpleResolvedVariables(script, effective); ok {
+						if resolved, ok := simpleResolvedVariables(script, effective, home, innerInput.CWD); ok {
 							innerInput.Command = resolved
 						}
 					}
@@ -1433,7 +1457,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						innerPieces = nil
 					}
 					inner := simpleCommands(innerInput, innerFacts, depth+1, innerInterpreter,
-						simpleChildUserVars(call, effective, shared, innerInterpreter, login), guess, innerPieces)
+						simpleChildUserVars(call, effective, shared, innerInterpreter, login), guess, innerPieces, operands)
 					if !bodyParsed && !slices.ContainsFunc(inner, isSyntaxTailUnread) {
 						return parseGap()
 					}
@@ -1459,6 +1483,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						child.UnresolvedBoundVariable = child.UnresolvedBoundVariable ||
 							simpleUnresolvedBoundVariable(child.Text, effective, bound)
 						child.UnboundUser = child.UnboundUser || simpleUnboundUser(child.Text, effective, bound)
+						child.LastStageOrBackground = child.LastStageOrBackground || command.LastStageOrBackground
 						result = append(result, child)
 						if child.bodyReading {
 							extra++
@@ -1473,7 +1498,11 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					// moved to: `cd X || cd Y && eval "$body"` runs the body
 					// in X or Y, so it is read in each of them as well
 					// (rel-1-0-10:GAP-1144, GAP-0183). A body that starts in
-					// a folder of its own (innerCWDUnknown) has none.
+					// a folder of its own (innerCWDUnknown) has none. A body a
+					// wrapper runs in a folder it names (sudo -D DIR, env -C
+					// DIR, chroot) starts in that folder as placed from each
+					// of the caller's folders, never in the caller's folder
+					// itself (rel-1-0-10:GAP-1274).
 					//
 					// These readings come on top of the statements of the
 					// call: they never make the call over its budget. Past
@@ -1487,6 +1516,13 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					if !innerCWDUnknown && innerInput.CWD != "" {
 						capped := false
 						for _, dir := range mayRunIn[partIndex] {
+							if wrapperFolder {
+								folder, _, unknown := simpleNestedChildFolder(nestedCall.Args, nestedVars, dir, input.StandInCWD)
+								if unknown || folder == "" {
+									continue
+								}
+								dir = folder
+							}
 							if dir == innerInput.CWD {
 								continue
 							}
@@ -1497,7 +1533,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 							otherInput := innerInput
 							otherInput.CWD, otherInput.folderUnknown = dir, false
 							others := simpleCommands(otherInput, Analyze(otherInput), depth+1, innerInterpreter,
-								simpleChildUserVars(call, effective, shared, innerInterpreter, login), guess, nil)
+								simpleChildUserVars(call, effective, shared, innerInterpreter, login), guess, nil, operands)
 							if len(others) == 0 && strings.TrimSpace(otherInput.Command) != "" {
 								others = []SimpleCommand{{Text: otherInput.Command, CWD: dir}}
 							}
@@ -1510,7 +1546,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 									unproven = true
 									continue
 								}
-								if !simpleRelativePathOperand(child.Text) {
+								if !operands.of(child.Text) {
 									continue // read in its own folder above
 								}
 								child.UnresolvedBoundVariable = child.UnresolvedBoundVariable ||
@@ -1531,7 +1567,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						}
 						if capped {
 							for _, child := range inner {
-								if child.EvaluationFailure != "" || child.OtherFolder || !simpleRelativePathOperand(child.Text) {
+								if child.EvaluationFailure != "" || child.OtherFolder || !operands.of(child.Text) {
 									continue
 								}
 								child.UnresolvedBoundVariable = child.UnresolvedBoundVariable ||
@@ -1644,7 +1680,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			// IFS=x; read u <<< w), and placed in a folder it proved one the
 			// shell never makes.
 			dirs := mayRunIn[partIndex]
-			if len(dirs) == 0 || guess || command.LoginGuess || !simpleRelativePathOperand(command.Text) {
+			if len(dirs) == 0 || guess || command.LoginGuess || !operands.of(command.Text) {
 				continue
 			}
 			for _, dir := range mayRunIn[partIndex] {
@@ -2540,7 +2576,7 @@ func callBindsNames(call *syntax.CallExpr, match func(string) bool, every []stri
 			}
 			words = append(words, text)
 		}
-		for _, name := range evalCodeBindsNames(strings.Join(words, " "), 0, match, every) {
+		for _, name := range evalCodeBindsNames(strings.Join(words, " "), match, every) {
 			add(name)
 		}
 	}
@@ -2566,18 +2602,13 @@ func simpleStaticWordOrEmpty(word *syntax.Word, prefix byte) bool {
 	return known && text != "" && text[0] == prefix
 }
 
-// evalCodeBindsUser returns the names of USER and LOGNAME that the shell
-// code text binds: an assignment, a loop name, or a call that binds one
-// (CallBindsUserNames). Code that does not parse may bind any.
-func evalCodeBindsUser(text string, depth int) []string {
-	return evalCodeBindsNames(text, depth, func(name string) bool { return slices.Contains(simpleUserNames, name) }, simpleUserNames)
-}
-
-// evalCodeBindsNames is evalCodeBindsUser for the names match accepts
-// (every, when the code does not parse).
-func evalCodeBindsNames(text string, depth int, match func(string) bool, every []string) []string {
+// evalCodeBindsNames returns the names match accepts that the shell code
+// text binds: an assignment, a loop name, or a call that binds one
+// (callBindsNames, so a nested eval is read the same way; its code is part
+// of text, so the walk ends). Code that does not parse may bind any: every.
+func evalCodeBindsNames(text string, match func(string) bool, every []string) []string {
 	file, ok := shellparse.Parse(text)
-	if !ok || depth >= 4 {
+	if !ok {
 		return every
 	}
 	var names []string
@@ -2750,7 +2781,7 @@ func simpleUnboundUser(source string, vars map[string]string, bound map[string]b
 }
 
 func simpleStaticWord(word *syntax.Word, vars map[string]string) (string, bool) {
-	return simpleStaticWordWithNewline(word, vars, false)
+	return simpleStaticWordWithNewline(word, vars, false, false)
 }
 
 // '[' is a literal test builtin. The ordinary word resolver rejects its
@@ -2773,10 +2804,10 @@ func simpleZshHistoryCall(call *syntax.CallExpr, vars map[string]string, interpr
 // A quoted -c or trap action can contain physical lines. Other shell words
 // still require one line so they cannot silently become a different command.
 func simpleStaticScriptWord(word *syntax.Word, vars map[string]string) (string, bool) {
-	return simpleStaticWordWithNewline(word, vars, true)
+	return simpleStaticWordWithNewline(word, vars, true, false)
 }
 
-func simpleStaticWordWithNewline(word *syntax.Word, vars map[string]string, allowNewline bool) (string, bool) {
+func simpleStaticWordWithNewline(word *syntax.Word, vars map[string]string, allowNewline, allowPWDSuffix bool) (string, bool) {
 	if word == nil {
 		return "", false
 	}
@@ -2805,8 +2836,9 @@ func simpleStaticWordWithNewline(word *syntax.Word, vars map[string]string, allo
 			// default of an unset name is what the shell expands.
 			defaulted := part.Exp != nil && simpleVariableName(part.Param.Value) &&
 				(part.Exp.Op == syntax.DefaultUnset || part.Exp.Op == syntax.DefaultUnsetOrNull)
+			pwdSuffix := allowPWDSuffix && simpleKnownPWDSuffix(part, vars)
 			if !known && !defaulted || part.Excl || part.Length || part.Width || part.IsSet || part.Index != nil ||
-				part.Slice != nil || part.Repl != nil || part.Names != 0 || part.Exp != nil && !defaulted ||
+				part.Slice != nil || part.Repl != nil || part.Names != 0 || part.Exp != nil && !defaulted && !pwdSuffix ||
 				part.Flags != nil || part.NestedParam != nil || len(part.Modifiers) != 0 {
 				safe = false
 			}
@@ -2856,7 +2888,63 @@ func simplePlainLiteral(text string) bool {
 	return true
 }
 
-func simpleResolvedVariables(source string, vars map[string]string) (string, bool) {
+// simpleKnownPWDSuffix accepts only a literal path suffix removed from the
+// walk's known current folder. Other parameter patterns remain dynamic; the
+// shell word evaluator below performs the actual expansion.
+func simpleKnownPWDSuffix(param *syntax.ParamExp, vars map[string]string) bool {
+	if param == nil || param.Param == nil || param.Param.Value != "PWD" ||
+		param.Exp == nil || param.Exp.Op != syntax.RemSmallSuffix || param.Exp.Word == nil {
+		return false
+	}
+	pwd, known := vars["PWD"]
+	suffix := param.Exp.Word.Lit()
+	return known && simplePOSIXAbs(pwd) && simplePlainLiteral(pwd) && len(suffix) > 1 &&
+		strings.HasPrefix(suffix, "/") && simplePlainLiteral(suffix)
+}
+
+func simplePWDSuffixPlainSpelling(target, shellHome, activeHome string) string {
+	plain := "'" + strings.ReplaceAll(target, "'", "'\\''") + "'"
+	if shellHome != "" && shellHome == activeHome &&
+		(target == shellHome || strings.HasPrefix(target, shellHome+"/")) {
+		plain = "~" + strings.TrimPrefix(target, shellHome)
+	}
+	return plain
+}
+
+// simplePWDSuffixPlainControls keeps the existing path owner's content
+// boundary. Every known suffix target is spelled directly in one control
+// command, so the control analysis cannot recurse through sibling suffixes.
+// A safe quoted payload that the plain reader leaves alone gains no finding.
+func simplePWDSuffixPlainControls(control string, targets []string, activeHome, cwd string) bool {
+	if len(control) > maxCommandBytes {
+		return false
+	}
+	facts := Analyze(Input{Tool: "Bash", Command: control, CWD: cwd,
+		ActiveHome: activeHome, DialectHint: DialectPOSIX})
+	if !facts.Authoritative() {
+		return false
+	}
+	for _, target := range targets {
+		if !strings.HasPrefix(target, "/") {
+			return false
+		}
+		normalized := simplePathClean(target)
+		found := false
+		for _, path := range facts.Paths {
+			if path.Resolved == normalized &&
+				(path.Access == PathAccessWrite || path.Access == PathAccessAppend || path.Access == PathAccessDelete) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func simpleResolvedVariables(source string, vars map[string]string, activeHome, cwd string) (string, bool) {
 	file, parsed := shellparse.Parse(source)
 	if !parsed {
 		return "", false
@@ -2864,9 +2952,11 @@ func simpleResolvedVariables(source string, vars map[string]string) (string, boo
 	type replacement struct {
 		start, end int
 		text       string
+		pwdTarget  string
 	}
 	var replacements []replacement
 	redirectTargets := map[*syntax.Word]bool{}
+	pwdSuffixControls := 0
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if redirect, ok := node.(*syntax.Redirect); ok {
 			if redirect.Op == syntax.Hdoc || redirect.Op == syntax.DashHdoc {
@@ -2887,6 +2977,7 @@ func simpleResolvedVariables(source string, vars map[string]string) (string, boo
 			return false
 		}
 		hasParam := false
+		pwdSuffix := false
 		hasTilde := false
 		if len(word.Parts) != 0 {
 			if lit, ok := word.Parts[0].(*syntax.Lit); ok {
@@ -2894,25 +2985,67 @@ func simpleResolvedVariables(source string, vars map[string]string) (string, boo
 			}
 		}
 		syntax.Walk(word, func(part syntax.Node) bool {
-			if _, ok := part.(*syntax.ParamExp); ok {
+			if param, ok := part.(*syntax.ParamExp); ok {
 				hasParam = true
+				pwdSuffix = pwdSuffix || simpleKnownPWDSuffix(param, vars)
 			}
 			return true
 		})
 		if !hasParam && !hasTilde {
 			return false
 		}
-		value, known := simpleStaticWord(word, vars)
+		if pwdSuffix && !redirectTargets[word] {
+			return false
+		}
+		value, known := simpleStaticWordWithNewline(word, vars, false, pwdSuffix)
 		if !known {
 			return false
 		}
 		start, end := int(word.Pos().Offset()), int(word.End().Offset())
+		if pwdSuffix {
+			pwdSuffixControls++
+			if pwdSuffixControls > 4 {
+				return false
+			}
+		}
 		if start >= 0 && end > start && end <= len(source) {
-			replacements = append(replacements, replacement{start, end,
-				"'" + strings.ReplaceAll(value, "'", "'\\''") + "'"})
+			r := replacement{start: start, end: end,
+				text: "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"}
+			if pwdSuffix {
+				r.pwdTarget = value
+			}
+			replacements = append(replacements, r)
 		}
 		return false
 	})
+	if pwdSuffixControls > 0 {
+		safe := pwdSuffixControls <= 4
+		if safe {
+			control := source
+			var targets []string
+			for i := len(replacements) - 1; i >= 0; i-- {
+				r := replacements[i]
+				if r.pwdTarget == "" {
+					continue
+				}
+				control = control[:r.start] +
+					simplePWDSuffixPlainSpelling(r.pwdTarget, vars["HOME"], activeHome) +
+					control[r.end:]
+				targets = append(targets, r.pwdTarget)
+			}
+			safe = len(targets) == pwdSuffixControls &&
+				simplePWDSuffixPlainControls(control, targets, activeHome, cwd)
+		}
+		if !safe {
+			filtered := replacements[:0]
+			for _, r := range replacements {
+				if r.pwdTarget == "" {
+					filtered = append(filtered, r)
+				}
+			}
+			replacements = filtered
+		}
+	}
 	if len(replacements) == 0 {
 		return "", false
 	}
@@ -3329,11 +3462,14 @@ func simplePwdSubstitution(subst *syntax.CmdSubst) bool {
 // A home that does not sit in such a folder tells nothing, and the prefix stays
 // unresolved. The directory-stack forms (~N, ~+N, ~-N, ~+, ~-) are never an
 // account name: bash takes them from the dirs list, PWD and OLDPWD
-// (directoryStackTildeName, rel-1-0-10:GAP-0887). macOS keeps root's home in
+// (directoryStackTildeName, rel-1-0-10:GAP-0887). The dot segments . and ..
+// are no account name either: no account can be named so, bash keeps ~. and
+// ~.. literal, and beside the home they name the homes folder itself or its
+// parent, not a home (rel-1-0-10:GAP-0948). macOS keeps root's home in
 // /var/root, not beside the others in /Users.
 func simpleOtherAccountHome(name, activeHome string) (string, bool) {
 	home := strings.TrimRight(activeHome, "/")
-	if home == "" || directoryStackTildeName(name) || !activeUserTildeName.MatchString(name) ||
+	if home == "" || directoryStackTildeName(name) || name == "." || name == ".." || !activeUserTildeName.MatchString(name) ||
 		strings.EqualFold(name, path.Base(home)) {
 		return "", false
 	}
@@ -3377,8 +3513,12 @@ func directoryStackTildeName(name string) bool {
 
 // simpleNestedChildFolder follows the same static wrapper child indexes as
 // simpleNestedScript. A changed root or working directory belongs to the
-// child, not to the caller's later statements.
-func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd string) (folder string, changed, unknown bool) {
+// child, not to the caller's later statements. standIn is Input.StandInCWD:
+// a relative chroot root or nsenter working directory based at a folder
+// reached from it is unknown, not resolved (rel-1-0-10:GAP-2188, GAP-2189):
+// the stand-in is not the caller's folder, so a step up from it names no
+// known place.
+func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd, standIn string) (folder string, changed, unknown bool) {
 	words := make([]string, len(args))
 	static := make([]bool, len(args))
 	for i, arg := range args {
@@ -3395,10 +3535,13 @@ func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd st
 			}
 			child = parsed.childIndex
 			if !slices.Contains(words[1:child], "--skip-chdir") {
-				if filepath.IsAbs(parsed.root) {
-					folder = filepath.Clean(parsed.root)
-				} else if folder != "" {
-					folder = filepath.Join(folder, parsed.root)
+				// A chroot root is a POSIX path: read with the rules of the
+				// cd walk, not the native ones of the gateway host
+				// (rel-1-0-10:GAP-1881).
+				if simplePathAbs(parsed.root) {
+					folder = simplePathClean(parsed.root)
+				} else if folder != "" && !standInReached(folder, standIn) {
+					folder = simplePathJoin(folder, parsed.root)
 				} else {
 					return "", true, true
 				}
@@ -3414,9 +3557,53 @@ func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd st
 				return "", true, true
 			}
 			if parsed.workDir != "" {
-				folder, changed = filepath.Clean(parsed.workDir), true
+				if simplePathAbs(parsed.workDir) {
+					folder = simplePathClean(parsed.workDir)
+				} else if folder != "" && !standInReached(folder, standIn) {
+					folder = simplePathJoin(folder, parsed.workDir)
+				} else {
+					return "", true, true
+				}
+				changed = true
 			}
+		case "env":
+			dir, chdir, known := simpleEnvChdir(words, static)
+			if !chdir {
+				child = WrapperChildIndex(words, static)
+				break
+			}
+			if !known {
+				return "", true, true
+			}
+			switch {
+			case simplePathAbs(dir):
+				folder = simplePathClean(dir)
+			case folder != "" && !standInReached(folder, standIn):
+				folder = path.Join(folder, dir)
+			default:
+				return "", true, true
+			}
+			changed = true
+			child = simpleEnvChildIndex(words)
 		default:
+			// A prefix wrapper chain records the folder it runs its child in
+			// (sudo -D/--chdir DIR, env -C DIR) or that the child starts in
+			// a folder the words do not name (sudo -i/--login: the target
+			// user's home). The child's relative paths are read there, not
+			// in the caller's folder (rel-1-0-10:GAP-1274, the class of
+			// GAP-1241 for chroot and nsenter).
+			if run, ok := StaticPrefixWrapperChild(words, static); ok {
+				if run.DirUnknown {
+					return "", true, true
+				}
+				if run.Dir != "" {
+					next, known := simpleWrapperRunFolder(run.Dir, folder, vars, standIn)
+					if !known {
+						return "", true, true
+					}
+					folder, changed = next, true
+				}
+			}
 			child = WrapperChildIndex(words, static)
 		}
 		if child <= 0 || child >= len(words) {
@@ -3425,6 +3612,99 @@ func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd st
 		words, static = words[child:], static[child:]
 	}
 	return folder, changed, false
+}
+
+// simpleWrapperRunFolder is the folder a wrapper's child runs in when the
+// wrapper names dir (PrefixWrapperRun.Dir) and the caller runs in cwd: an
+// absolute dir as written, one spelled from the home (~, ~/x, the wrapper
+// reader's home marker) below the HOME the walk knows, a relative one below
+// cwd. known is false when the walk cannot place it: no home or no caller
+// folder, another account's home (~user), or a folder reached from the
+// stand-in folder (rel-1-0-10:GAP-2188).
+func simpleWrapperRunFolder(dir, cwd string, vars map[string]string, standIn string) (string, bool) {
+	if rest, home := strings.CutPrefix(dir, homeDirSentinel); home {
+		dir = "~" + rest
+	}
+	if dir == "~" || strings.HasPrefix(dir, "~/") {
+		home := vars["HOME"]
+		if !filepath.IsAbs(home) {
+			return "", false
+		}
+		folder := OperandPath(strings.TrimPrefix(strings.TrimPrefix(dir, "~"), "/"), home)
+		if hasDotDotStep(filepath.ToSlash(folder)) {
+			return "", false
+		}
+		return folder, true
+	}
+	if strings.HasPrefix(dir, "~") {
+		return "", false
+	}
+	var folder string
+	switch {
+	case filepath.IsAbs(dir):
+		folder = OperandPath(dir, "")
+	case cwd == "" || standInReached(cwd, standIn):
+		return "", false
+	default:
+		folder = OperandPath(dir, cwd)
+	}
+	// OperandPath keeps a dot-dot step raw where the kernel climbs from a
+	// link target the text does not name; the child's paths would later be
+	// joined to that text, so the folder is not known (CHK-RF-VB7 GAP-1274
+	// N2).
+	if hasDotDotStep(filepath.ToSlash(folder)) {
+		return "", false
+	}
+	return folder, true
+}
+
+// standInReached reports that folder is the stand-in folder (Input.StandInCWD),
+// a folder in it or one of its parents: a folder whose place on the caller's
+// file system is not known.
+func standInReached(folder, standIn string) bool {
+	if standIn == "" || folder == "" {
+		return false
+	}
+	folder, standIn = filepath.Clean(folder), filepath.Clean(standIn)
+	sep := string(filepath.Separator)
+	return folder == standIn || strings.HasPrefix(folder, standIn+sep) ||
+		strings.HasPrefix(standIn, strings.TrimSuffix(folder, sep)+sep)
+}
+
+// simpleEnvChdir is the folder an env call (words after the walk expanded
+// them) runs its program in: the value of its last -C DIR, -CDIR,
+// --chdir DIR or --chdir=DIR before the program, as GNU env reads it
+// (substrate-1:GAP-0685). chdir is false when env changes no folder; known
+// is false when the folder word is made at run time or empty.
+func simpleEnvChdir(words []string, static []bool) (dir string, chdir, known bool) {
+	known = true
+	for index := 1; index < len(words); index++ {
+		arg := words[index]
+		if !static[index] {
+			return dir, chdir, false
+		}
+		switch {
+		case arg == "--":
+			return dir, chdir, known
+		case arg == "--chdir" || arg == "-C":
+			index++
+			if index >= len(words) {
+				return "", true, false
+			}
+			dir, chdir, known = words[index], true, static[index] && words[index] != ""
+		case len(arg) > len("--chdir=") && strings.HasPrefix(arg, "--chdir="):
+			dir, chdir, known = strings.TrimPrefix(arg, "--chdir="), true, true
+		case len(arg) > len("-C") && strings.HasPrefix(arg, "-C"):
+			dir, chdir, known = strings.TrimPrefix(arg, "-C"), true, true
+		case arg == "-u" || arg == "--unset":
+			index++
+		case strings.HasPrefix(arg, "-") || isStaticEnvironmentAssignment(arg):
+			continue
+		default:
+			return dir, chdir, known
+		}
+	}
+	return dir, chdir, known
 }
 
 // simpleNestedScript returns a static shell -c or eval body. eval shares the
@@ -3618,6 +3898,7 @@ func simpleNestedScriptRun(args []*syntax.Word, vars map[string]string, depth, n
 		// invocation grammar as Analyze so option order and +n are honored.
 		return "", false, false, false
 	}
+	shortSeen := false
 	for index := 1; index < len(args); index++ {
 		// The option is the word the shell sees, after quote removal and
 		// escapes ('-c', "-c", $'-c', -'c', \-c read as -c), not its
@@ -3634,6 +3915,16 @@ func simpleNestedScriptRun(args []*syntax.Word, vars map[string]string, depth, n
 		if option == "--" {
 			continue
 		}
+		if shellProgram == "bash" && !shortSeen && strings.HasPrefix(option, "--") {
+			if login, ok := simpleBashLongOption(option); ok {
+				if login && cwdUnknown != nil {
+					// A login shell runs its profile before the body.
+					*cwdUnknown = true
+				}
+				continue
+			}
+		}
+		shortSeen = true
 		if option == "-o" || option == "+o" {
 			index++
 			if index >= len(args) {
@@ -3668,6 +3959,25 @@ func simpleNestedScriptRun(args []*syntax.Word, vars map[string]string, depth, n
 		}
 	}
 	return "", false, false, false
+}
+
+// simpleBashLongOption reports a long option bash reads before its short
+// ones, as Analyze reads it (parseBashInvocation), that takes no value and
+// leaves a following -c body what the shell runs: --norc, --noprofile,
+// --noediting, --posix, --restricted, --verbose and --login (login: the
+// profile it runs may change folder first). Before, the walk read no long
+// option, so bash --norc -c BODY was a gap of the split whose twins added the
+// unknown tier (ACTION-COMPOUND-LIMIT) to a relative protected path of BODY,
+// in the folder a cd or an env -C gave it (substrate-1:GAP-0685 follow-up).
+// --rcfile, --init-file and --debugger name startup input and stay unread.
+func simpleBashLongOption(option string) (login, ok bool) {
+	switch option {
+	case "--login":
+		return true, true
+	case "--norc", "--noprofile", "--noediting", "--posix", "--restricted", "--verbose":
+		return false, true
+	}
+	return false, false
 }
 
 func simpleShellNoExec(args []*syntax.Word, vars map[string]string, program string) bool {
@@ -3740,10 +4050,15 @@ func simpleNestedWrapper(program string) bool {
 	}
 }
 
-// An env assignment changes the child's environment but leaves a following
-// static shell -c body executable. Directory changes are accepted here only
-// when they preserve the caller's directory; other forms stay whole-action
-// only until the simple-command walker can carry their new CWD.
+// An env assignment changes the environment of the child but leaves a
+// following static shell -c body executable. A change of folder (-C DIR,
+// -CDIR, --chdir DIR, --chdir=DIR) runs the child in DIR, as (cd DIR &&
+// child) does: the walk starts a nested body there (simpleNestedChildFolder)
+// and Analyze reads the child there (posixEnvChdir, substrate-1:GAP-0685),
+// so the call is no gap of the split. Before GAP-0685 the walk stopped at
+// such an env (a parse gap); once Analyze read the child, that gap added the
+// unknown tier (ACTION-COMPOUND-LIMIT) to every protected path the child
+// touches, which its cd spelling does not get.
 func simpleEnvChildIndex(argv []string) int {
 	for index := 1; index < len(argv); index++ {
 		arg := argv[index]
@@ -3763,13 +4078,14 @@ func simpleEnvChildIndex(argv []string) int {
 			}
 		case strings.HasPrefix(arg, "--unset="):
 			continue
-		case arg == "--chdir=." || arg == "-C.":
-			continue
 		case arg == "--chdir" || arg == "-C":
 			index++
-			if index >= len(argv) || argv[index] != "." {
+			if index >= len(argv) {
 				return -1
 			}
+		case len(arg) > len("--chdir=") && strings.HasPrefix(arg, "--chdir="),
+			len(arg) > len("-C") && strings.HasPrefix(arg, "-C"):
+			continue
 		case strings.HasPrefix(arg, "-"):
 			return -1
 		case isStaticEnvironmentAssignment(arg):
@@ -4368,10 +4684,7 @@ func simpleCommandNextCWD(source string, state *simpleShellState, vars map[strin
 	if state.cwd == "" {
 		return "", true
 	}
-	if simplePOSIXAbs(state.cwd) {
-		return path.Join(state.cwd, dir), true
-	}
-	return filepath.Clean(filepath.Join(state.cwd, dir)), true
+	return simplePathJoin(state.cwd, dir), true
 }
 
 // simplePathAbs reports whether a shell directory or operand is absolute.
@@ -4390,6 +4703,16 @@ func simplePathClean(value string) string {
 		return path.Clean(value)
 	}
 	return filepath.Clean(value)
+}
+
+// simplePathJoin joins a relative operand to a folder with the rules of
+// the folder: POSIX rules for a "/" folder (filepath.Join would turn
+// /srv/root into \srv\root on Windows), native rules for any other.
+func simplePathJoin(folder, operand string) string {
+	if simplePOSIXAbs(folder) {
+		return path.Join(folder, operand)
+	}
+	return filepath.Join(folder, operand)
 }
 
 // simplePOSIXAbs reports a "/" path that is not a "//host/share" one, which

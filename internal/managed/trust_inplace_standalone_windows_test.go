@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // g582 round 4 (class audit E2-E6): every in-place owner or DACL repair of a
@@ -33,6 +35,13 @@ func TestRefuseStandaloneInPlaceRepairDecision(t *testing.T) {
 		{name: "twin: Secure Client, Users write", dacl: usersWriteDACL},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if !tc.refused {
+				// An object the repair is allowed to touch must pass the
+				// trust walk, which accepts only an administrator-owned tree;
+				// a standard user owns the test folder, which is untrusted by
+				// design (GAP-1099). The refusals hold on every token.
+				testenv.RequireElevated(t, "an accepted object must be owned by an administrator, and a standard user owns the temp folder")
+			}
 			path := filepath.Join(t.TempDir(), "object")
 			kind := ObjectAdminFile
 			if tc.directory {

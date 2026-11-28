@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // diskLinkStateRow is one Claude Code Bash call judged by a per-user
@@ -60,12 +61,8 @@ func judgeDiskLinkStateRows(t *testing.T, rows []diskLinkStateRow) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(state, filepath.Join(ext, "y")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(keys, filepath.Join(ext, "x")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, state, filepath.Join(ext, "y"))
+	testenv.Symlink(t, keys, filepath.Join(ext, "x"))
 	junctions := ""
 	if runtime.GOOS == "windows" {
 		junctions = t.TempDir()

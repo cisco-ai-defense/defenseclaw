@@ -45,6 +45,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/vault"
 	"gopkg.in/yaml.v3"
 )
 
@@ -384,6 +385,11 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 		EgressRefusals: func(b sandboxauth.Binding) []SandboxEgressRefusal {
 			return sandboxEgressRefusalsOf(mgr.EgressRefusals(b.ID, b.SandboxName))
 		},
+	}
+	if cfg.OpenShell.Vault.AutoCaptureEnabled() {
+		// The data directory is the account's own: ~/.defenseclaw, or the
+		// managed sandbox daemon's state directory.
+		ingress.Vault = vault.Open(vault.DirIn(dataDir))
 	}
 	if opts.Managed {
 		ingress.Relay, ingress.Registration, ingress.OnGeneration = opts.Relay, deps.registration, deps.onGeneration

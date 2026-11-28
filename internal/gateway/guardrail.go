@@ -33,6 +33,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
@@ -1234,7 +1235,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	ciscoClient := g.currentCiscoInspector()
 	regexStart := time.Now()
 	_, endRegex := g.startPhaseSpan(ctx, "regex")
-	signals := triagePatternsFor(ctx, direction, content)
+	signals, triageFaulted := g.guardedTriagePatterns(ctx, direction, content)
 	judge := g.requestJudge(ctx)
 	if judge != nil && direction == "prompt" {
 		// Opt-in only: a prompt with one half of an injection shape goes to the
@@ -1281,6 +1282,9 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	if len(high) > 0 && (regexVerdictForSpan == nil || severityRank["HIGH"] > severityRank[regexVerdictForSpan.Severity]) {
 		regexVerdictForSpan = &ScanVerdict{Action: guardrailFallbackActionForSeverity("HIGH"), Severity: "HIGH"}
 	}
+	if triageFaulted {
+		regexVerdictForSpan = withTriageFault(regexVerdictForSpan)
+	}
 	endRegex(phaseAction(regexVerdictForSpan), phaseSeverity(regexVerdictForSpan), time.Since(regexStart))
 
 	var ciscoResult *ScanVerdict
@@ -1295,12 +1299,16 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
 	}
 
-	// HIGH_SIGNAL triage findings produce an immediate verdict.
-	if len(high) > 0 {
+	// HIGH_SIGNAL triage findings, or a triage fault (GAP-1953), produce
+	// an immediate verdict.
+	if len(high) > 0 || triageFaulted {
 		verdict := signalsToVerdict(high, "local-triage")
 		verdict.ScannerSources = []string{"local-triage"}
 		if ruleVerdict != nil {
 			verdict = mergeVerdicts(verdict, ruleVerdict)
+		}
+		if triageFaulted {
+			verdict = withTriageFault(verdict)
 		}
 		local := verdict
 
@@ -1400,8 +1408,13 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		err     bool
 	}
 
+	type triageResult struct {
+		signals []TriageSignal
+		faulted bool
+	}
+
 	judgeCh := make(chan result, 1)
-	triageCh := make(chan []TriageSignal, 1)
+	triageCh := make(chan triageResult, 1)
 
 	// Run judge and triage in parallel.
 	//
@@ -1410,7 +1423,8 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	// request and permanently pinning the http handler goroutine.
 	// Both producers therefore wrap their body in defer/recover() and
 	// fall back to an error sentinel so the parent always proceeds
-	// (judge → regex fallback, triage → empty signal set) even under
+	// (judge → regex fallback, triage → the triage fault, which raises
+	// the verdict and is never an empty signal set: GAP-1953) even under
 	// a pathological policy / scanner bug.
 	if judge := g.requestJudge(ctx); judge != nil && judge.cfg != nil {
 		go func() {
@@ -1436,20 +1450,21 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 			if rec := recover(); rec != nil {
 				g.recordRecoveredPanic(ctx)
 				fmt.Fprintf(defaultLogWriter, "[guardrail] judge_first: triage goroutine panic recovered: %v\n", rec)
-				triageCh <- nil
+				triageCh <- triageResult{faulted: true}
 			}
 		}()
 		regexStart := time.Now()
 		_, endRegex := g.startPhaseSpan(ctx, "regex")
-		sigs := triagePatternsFor(ctx, direction, content)
+		sigs, faulted := g.guardedTriagePatterns(ctx, direction, content)
 		// Regex phase without a verdict still records latency — timing
 		// alone is a useful signal when comparing judge_first budgets.
 		endRegex("", "", time.Since(regexStart))
-		triageCh <- sigs
+		triageCh <- triageResult{signals: sigs, faulted: faulted}
 	}()
 
 	judgeRes := <-judgeCh
-	signals := <-triageCh
+	triage := <-triageCh
+	signals := triage.signals
 
 	// If the judge failed completely (nil, explicit error, or all sub-judges
 	// errored), fall back to full regex scanning. If the judge partially
@@ -1472,6 +1487,9 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		endFallback(phaseAction(localResult), phaseSeverity(localResult), time.Since(fallbackStart))
 		if localResult != nil {
 			localResult.ScannerSources = []string{"local-pattern", "judge-fallback"}
+		}
+		if triage.faulted {
+			localResult = withTriageFault(localResult)
 		}
 		local := localResult
 		// Also run Cisco remote on fallback for full parity with regex_only path.
@@ -1508,6 +1526,9 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	if len(high) > 0 {
 		regexVerdict := signalsToVerdict(high, "local-triage")
 		merged = mergeWithJudge(merged, regexVerdict)
+	}
+	if triage.faulted {
+		merged = withTriageFault(merged)
 	}
 
 	if len(ruleFindings) > 0 {
@@ -1904,10 +1925,12 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 // (proxyRuleGeneration).
 //
 // A prompt with a parts view (withPromptPartsView) is also scanned as the
-// model reads it, and the two verdicts are unioned (GAP-0465).
+// model reads it, and the two verdicts are unioned (GAP-0465). A mid-stream
+// check of a stream reads content with the stream's memo
+// (midStreamScanState, GAP-0515); the parts view is read whole.
 func scanLocalPatternsFor(ctx context.Context, direction, content string) *ScanVerdict {
 	rules, patterns := proxyRuleGeneration(ctx), localPatternsOf(pinnedGeneration(ctx))
-	verdict := scanLocalPatternsWithActivation(direction, content, rules, patterns)
+	verdict := scanLocalPatternsWithState(direction, content, rules, patterns, midStreamScanStateOf(ctx))
 	if view := promptPartsViewOf(ctx, content); view != "" {
 		verdict = unionLocalPatternVerdicts(verdict, scanLocalPatternsWithActivation(direction, view, rules, patterns))
 	}
@@ -1940,17 +1963,24 @@ func scanProxyContentRules(ctx context.Context, content string) []RuleFinding {
 // single pass. One reading is the proxy's own: a weak password assigned to a
 // bare password key (weakPasswordAssignmentFindings).
 func scanUntrustedContentRules(generation *compiledRulePackCategories, content string) []RuleFinding {
-	findings := scanContentRuleCategoryWithGeneration(generation, content, "", ruleContentScopeUntrusted, "")
-	findings = unionRuleFindings(findings, weakPasswordAssignmentFindings(generation, content))
+	return scanUntrustedContentRulesWithState(generation, content, nil)
+}
+
+// scanUntrustedContentRulesWithState is scanUntrustedContentRules for a
+// mid-stream check of a stream: every text it reads keeps its answers in st
+// (midStreamScanState, GAP-0515; nil: none).
+func scanUntrustedContentRulesWithState(generation *compiledRulePackCategories, content string, st *midStreamScanState) []RuleFinding {
+	findings := scanContentRulesWithOptions(generation, content, "", ruleContentScopeUntrusted, ruleScanOptions{memo: st, memoRole: "content"})
+	findings = unionRuleFindings(findings, weakPasswordAssignmentFindings(generation, content, st))
 	if secureClientGeneration() {
 		return findings
 	}
 	if folded := trustPatternText(content); folded != content {
 		findings = unionRuleFindings(findings, scanRuleGeneration(generation, folded, "", ruleScanOptions{
-			contentScope: ruleContentScopeUntrusted, onlyCategory: "trust-exploit",
+			contentScope: ruleContentScopeUntrusted, onlyCategory: "trust-exploit", memo: st, memoRole: "trust",
 		}))
 	}
-	return withZeroWidthSecretFindings(generation, findings, content, "", ruleContentScopeUntrusted)
+	return withZeroWidthSecretFindingsWithState(generation, findings, content, "", ruleContentScopeUntrusted, st)
 }
 
 // withZeroWidthSecretFindings adds to findings the secret rules found on
@@ -1968,12 +1998,18 @@ func scanUntrustedContentRules(generation *compiledRulePackCategories, content s
 // two findings (unionRuleFindings). Off under Secure Client, like the folded
 // trust pass: callers skip it there.
 func withZeroWidthSecretFindings(generation *compiledRulePackCategories, findings []RuleFinding, content, toolName string, scope ruleContentScope) []RuleFinding {
+	return withZeroWidthSecretFindingsWithState(generation, findings, content, toolName, scope, nil)
+}
+
+// withZeroWidthSecretFindingsWithState is withZeroWidthSecretFindings with
+// the memo of a stream's mid-stream checks (GAP-0515; nil: none).
+func withZeroWidthSecretFindingsWithState(generation *compiledRulePackCategories, findings []RuleFinding, content, toolName string, scope ruleContentScope, st *midStreamScanState) []RuleFinding {
 	invisible := credentialVisibleText(content)
 	if invisible == content {
 		return findings
 	}
 	return unionRuleFindings(findings, scanRuleGeneration(generation, invisible, toolName, ruleScanOptions{
-		contentScope: scope, onlyCategory: "secret",
+		contentScope: scope, onlyCategory: "secret", memo: st, memoRole: "visible",
 	}))
 }
 
@@ -1991,14 +2027,17 @@ func withZeroWidthSecretFindings(generation *compiledRulePackCategories, finding
 // pattern, so a pack that disables or replaces SEC-PASSWORD-ASSIGN turns this
 // off or changes them. The text without its invisible characters
 // (credentialVisibleText) is read too, as rel read its normalized text.
-func weakPasswordAssignmentFindings(generation *compiledRulePackCategories, content string) []RuleFinding {
+//
+// st is the memo of a stream's mid-stream checks (GAP-0515; nil: none): the
+// literal check of content reads it through the memo.
+func weakPasswordAssignmentFindings(generation *compiledRulePackCategories, content string, st *midStreamScanState) []RuleFinding {
 	if generation == nil {
 		return nil
 	}
 	if len(generation.members) > 0 {
 		var out []RuleFinding
 		for i, member := range generation.members {
-			findings := weakPasswordAssignmentFindings(member, content)
+			findings := weakPasswordAssignmentFindings(member, content, st)
 			if i < len(generation.memberNames) {
 				for j := range findings {
 					findings[j].profile = generation.memberNames[i]
@@ -2021,7 +2060,11 @@ func weakPasswordAssignmentFindings(generation *compiledRulePackCategories, cont
 				continue
 			}
 			for _, text := range texts {
-				if !(&ruleScanText{text: text}).mayMatch(rule.Pattern) {
+				scan := &ruleScanText{text: text}
+				if st != nil && text == content {
+					scan, _ = st.scanTexts("content", text)
+				}
+				if !scan.mayMatch(rule.Pattern) {
 					continue
 				}
 				for _, loc := range rule.Pattern.FindAllStringIndex(text, -1) {
@@ -2083,6 +2126,19 @@ func scanLocalPatternsWithActivation(
 	rules *compiledRulePackCategories,
 	activation *localPatternsActivation,
 ) *ScanVerdict {
+	return scanLocalPatternsWithState(direction, content, rules, activation, nil)
+}
+
+// scanLocalPatternsWithState is scanLocalPatternsWithActivation with the
+// memo of one stream's mid-stream checks (midStreamScanState, GAP-0515; nil:
+// none). The normalized text and the matches of the PII data regexes come
+// from the memo; they are the ones the whole text gives.
+func scanLocalPatternsWithState(
+	direction, content string,
+	rules *compiledRulePackCategories,
+	activation *localPatternsActivation,
+	st *midStreamScanState,
+) *ScanVerdict {
 	// managed_enterprise: local regex detection is disabled — Cisco AI
 	// Defense is authoritative. Return an allow verdict so any residual
 	// call site (router lane, etc.) produces no local signal.
@@ -2113,7 +2169,7 @@ func scanLocalPatternsWithActivation(
 	// normalized string so "/ etc / passwd" and "/etc//passwd" still
 	// flag; the judge still receives `content` (the unmodified original)
 	// to avoid false-positive leakage from normalization.
-	lower := normalizeForTriage(content)
+	lower := st.normalizeForTriage(content)
 	var flags []string
 	isHigh := false
 	type localPIICandidate struct {
@@ -2165,7 +2221,7 @@ func scanLocalPatternsWithActivation(
 	// be a lie: PII/secret regexes are exactly the surfaces an attacker
 	// would target with invisible-character splicing.
 	for _, re := range piiDRegexes {
-		if match, _, ok := findAcceptedLocalPIIMatch(content, lower, re); ok {
+		if match, _, ok := st.findAcceptedLocalPIIMatch(content, lower, re); ok {
 			localPIICandidates = append(localPIICandidates, localPIICandidate{
 				evidence: normalizedPIIEvidenceKey(sanitizeEvidence(match)),
 			})
@@ -2199,7 +2255,7 @@ func scanLocalPatternsWithActivation(
 	// hit is at least MEDIUM, HIGH for the high-signal ones. A rule-pack
 	// finding carries its own severity and nothing else (rel-1-0-10:GAP-0172).
 	maxRuleSev := "NONE"
-	ruleFindings := scanUntrustedContentRules(rules, content)
+	ruleFindings := scanUntrustedContentRulesWithState(rules, content, st)
 	catalogPIIEvidence := make(map[string]struct{})
 	for _, rf := range ruleFindings {
 		if strings.HasPrefix(rf.RuleID, "ENT-") && hasTag(rf.Tags, "pii") {
@@ -2228,7 +2284,7 @@ func scanLocalPatternsWithActivation(
 	for _, rf := range ruleFindings {
 		flags = append(flags, rf.RuleID+":"+rf.Title)
 		ruleSeverity := rf.Severity
-		if severityRank[ruleSeverity] == 0 || (rf.enforcement == findingEnforcementDetectionOnly && severityRank[ruleSeverity] < severityRank["MEDIUM"]) {
+		if severityRank[ruleSeverity] == 0 || (rf.Proof.Recorded() && severityRank[ruleSeverity] < severityRank["MEDIUM"]) {
 			// A rule without a known severity, and a shipped weak-literal rule
 			// that the trust-literal context demoted to detection-only LOW
 			// (TRUST-FICTIONAL, TRUST-PROMPT-EXTRACT), keep the MEDIUM floor the
@@ -2587,20 +2643,19 @@ func signalsToVerdict(signals []TriageSignal, scanner string) *ScanVerdict {
 // so we extract the window from the normalized string instead and prefix
 // the returned snippet with "[normalized]" so log consumers can tell.
 //
-// Rationale: before Phase 7, `lower` was just strings.ToLower(original)
-// and its byte offsets aligned 1:1 with original for the ASCII+BMP fast
-// path. After Phase 7, `normalized` can be shorter than original (whitespace-
-// around-slash collapse, duplicate-slash collapse, NFC composition), so
-// using a normalized offset as an index into original produces a window
-// pointing at the wrong bytes. Re-locating against strings.ToLower(original)
-// restores byte alignment in the common case.
+// `normalized` can be shorter than original (whitespace-around-slash
+// collapse, duplicate-slash collapse, NFC composition), so a normalized
+// offset is not an offset of original. The pattern is located in
+// asciifold.Lower(original), which has the length and the bytes of original
+// at every offset: strings.ToLower is not, because a letter's lower case can
+// be longer (U+023A, 2 bytes, lowers to 3) or shorter (U+212A, U+0130), and
+// its offsets cut original at the wrong byte or past its end (GAP-1933).
 //
 // UTF-8 safety: extractEvidenceAt clamps both ends to the nearest rune
 // boundary so we never emit invalid UTF-8 to logs, audit records, or
 // downstream sinks.
 func extractEvidence(original, normalized, pattern string) string {
-	lowerOrig := strings.ToLower(original)
-	if idx := strings.Index(lowerOrig, pattern); idx >= 0 {
+	if idx := strings.Index(asciifold.Lower(original), pattern); idx >= 0 {
 		return extractEvidenceAt(original, idx, idx+len(pattern))
 	}
 	// Fast path missed: normalization was load-bearing for the match.
@@ -2620,10 +2675,11 @@ func extractEvidence(original, normalized, pattern string) string {
 // required for the regex to hit.
 //
 // Assumes `re` is pre-lowercased (all triage regexes in this file are);
-// case-insensitivity is handled by lowercasing original rather than by
-// a `(?i)` flag, matching how the rest of this file dispatches.
+// case-insensitivity is handled by lowering original's ASCII letters
+// (asciifold.Lower, whose offsets are original's) rather than by a `(?i)`
+// flag, matching how the rest of this file dispatches.
 func extractEvidenceRegex(original, normalized string, re *regexp.Regexp) string {
-	if loc := re.FindStringIndex(strings.ToLower(original)); loc != nil {
+	if loc := re.FindStringIndex(asciifold.Lower(original)); loc != nil {
 		return extractEvidenceAt(original, loc[0], loc[1])
 	}
 	if loc := re.FindStringIndex(normalized); loc != nil {

@@ -18,6 +18,7 @@ package config
 
 import (
 	"encoding/json"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -65,16 +66,19 @@ func TestSubstrateConfigMatchesTheClosedSchema(t *testing.T) {
 		{SubstrateServicesConfig{}, []string{"substrate", "services"}},
 		{SubstrateUnattendedConfig{}, []string{"substrate", "unattended"}},
 		{SubstrateRateLimitsConfig{}, []string{"substrate", "rate_limits"}},
+		{SubstrateUsageConfig{}, []string{"substrate", "usage"}},
 		{SubstrateExtprocConfig{}, []string{"substrate", "extproc"}},
 		{SubstrateExtprocUIDConfig{}, []string{"substrate", "extproc", "uid"}},
 		{SubstrateExtprocChainConfig{}, []string{"substrate", "extproc", "chain"}},
 		{SubstrateExtprocAskConfig{}, []string{"substrate", "extproc", "ask"}},
 		{SubstrateExtprocJudgeConfig{}, []string{"substrate", "extproc", "judge"}},
 		{SubstrateExtprocDLPConfig{}, []string{"substrate", "extproc", "dlp"}},
+		{SubstrateExtprocRateLimitsConfig{}, []string{"substrate", "extproc", "rate_limits"}},
 		{SubstrateLLMConfig{}, []string{"substrate", "llm"}},
 		{SubstrateLLMCredentialConfig{}, []string{"substrate", "llm", "credential"}},
 		{SubstrateEgressConfig{}, []string{"substrate", "egress"}},
 		{SubstrateTemplatesConfig{}, []string{"substrate", "templates"}},
+		{SubstrateActivityConfig{}, []string{"substrate", "activity"}},
 	} {
 		got := yamlFieldNames(reflect.TypeOf(tc.typ))
 		if want := schemaObjectProperties(t, tc.path...); !reflect.DeepEqual(got, want) {
@@ -128,6 +132,7 @@ substrate:
     keys_ca_file: /run/servicedns.podcert.ate.dev/trust-bundle.pem
     oidc: {issuer: https://login.example.com, client_id: defenseclaw-launcher, groups_claim: groups}
     workload_oidc: [{issuer: https://token.actions.githubusercontent.com, audience: defenseclaw-prod, claims: {repository: acme/web}}]
+    revocation: {enabled: true, sync_interval: 5s, max_stale: 60s, max_tokens_per_person: 64}
   services: {actor: defenseclaw-actor.defenseclaw-system.svc, admin: defenseclaw-admin.defenseclaw-system.svc}
   launcher_atespaces: {engineering: [eng-payments, eng-web]}
   require_attested_templates: true
@@ -143,8 +148,15 @@ substrate:
     revoked_digests: ["sha256:0000000000000000000000000000000000000000000000000000000000000000"]
   default_sandbox_class: gvisor
   idle_suspend_after: 30m
+  relay_tls: required
   unattended: {asks: deny, ask_timeout: 30m, telemetry_sampling: 1.0}
+  interactive:
+    port_forward: {enabled: auto, ports: "3000,8000-8999", max_streams: 32}
+    mcp_bridge: {enabled: off, max_servers: 4, message_max_bytes: 1048576}
+    idle_close: 30m
   rate_limits: {per_actor_rps: 20, per_atespace_rps: 500}
+  activity: {status_window: 30s, notifications: "off"}
+  usage: {enabled: true, sync_interval: 10s}
   extproc:
     enabled: true
     failure_mode: closed
@@ -225,7 +237,6 @@ func TestSubstrateValidate(t *testing.T) {
 		"api.auth":           func(s *SubstrateConfig) { s.API.Auth = "kerberos" },
 		"supported_versions": func(s *SubstrateConfig) { s.SupportedVersions = "~1.0" },
 		"token_lifetime":     func(s *SubstrateConfig) { s.Identity.TokenLifetimeSeconds = 4000 },
-		"actor_cert_oid":     func(s *SubstrateConfig) { s.Identity.ActorCertOID = "1.3.x" },
 		"keys_url http":      func(s *SubstrateConfig) { s.Identity.KeysURL = "http://idp.ate-system.svc/openid/v1/jwks" },
 		"keys_url query":     func(s *SubstrateConfig) { s.Identity.KeysURL = "https://idp.ate-system.svc/jwks?a=1" },
 		"oidc client":        func(s *SubstrateConfig) { s.Identity.OIDC.Issuer = "https://login" },
@@ -264,6 +275,9 @@ func TestSubstrateValidate(t *testing.T) {
 		"ask timeout":               func(s *SubstrateConfig) { s.Unattended.AskTimeout = "48h" },
 		"sampling":                  func(s *SubstrateConfig) { r := 1.5; s.Unattended.TelemetrySampling = &r },
 		"rps":                       func(s *SubstrateConfig) { s.RateLimits.PerActorRPS = -1 },
+		"extproc rps nan":           func(s *SubstrateConfig) { s.Extproc.RateLimits.PerActorRPS = math.NaN() },
+		"extproc rps +inf":          func(s *SubstrateConfig) { s.Extproc.RateLimits.PerActorRPS = math.Inf(1) },
+		"extproc rps -inf":          func(s *SubstrateConfig) { s.Extproc.RateLimits.PerActorRPS = math.Inf(-1) },
 		"failure mode":              func(s *SubstrateConfig) { s.Extproc.FailureMode = "ignore" },
 		"body mode":                 func(s *SubstrateConfig) { s.Extproc.BodyInspection = "always" },
 		"chain failure mode":        func(s *SubstrateConfig) { s.Extproc.Chain.FailureMode = "sometimes" },

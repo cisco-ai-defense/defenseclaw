@@ -58,6 +58,10 @@ func healthyCluster() Observed {
 		NamespaceLabels: map[string]string{APIAccessLabel: "true"},
 		SignInIssuer:    "https://kc.cluster-a.example/realms/dc", SignInRead: true,
 		Conflicts: &Conflicts{Agents: []ConflictAgent{}},
+		Bundles: &Bundles{Stages: []BundleStage{{Stage: "s-eng", Atespaces: []string{"eng-web"}, BundleID: "b-01AAAAAAAAAAAAAAAAAAAAAAAA", Version: 3,
+			KeyID: "acme-2026a", ManifestSHA256: strings.Repeat("ab", 32), AppliedAt: "2026-11-13T15:00:00Z", Source: "admin", ReceiptID: "r-0123456789abcdef",
+			State: BundleVerified}}},
+		RelayCA: &RelayCA{Secret: "defenseclaw-relay-ca", Present: true},
 	}
 }
 
@@ -136,6 +140,8 @@ func TestMembersMatchTheSchemas(t *testing.T) {
 		"substrate-verify.schema.json#/$defs/policy_conflicts":             reflect.TypeOf(PolicyConflicts{}),
 		"substrate-status.schema.json#/$defs/atespace_conflicts":           reflect.TypeOf(AtespaceConflicts{}),
 		"substrate-verify.schema.json#/$defs/atespace_conflicts":           reflect.TypeOf(AtespaceConflicts{}),
+		"substrate-status.schema.json#/$defs/bundle_stage":                 reflect.TypeOf(BundleStage{}),
+		"substrate-verify.schema.json#/$defs/bundle_stage":                 reflect.TypeOf(BundleStage{}),
 	} {
 		contracttest.RequireMembers(t, name, typ)
 	}

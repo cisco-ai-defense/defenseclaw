@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -161,6 +162,17 @@ func (m *mockInspector) setVerdict(direction string, v *ScanVerdict) {
 
 func newTestProxy(t *testing.T, prov LLMProvider, insp ContentInspector, mode string) *GuardrailProxy {
 	t.Helper()
+	store, logger := testStoreAndLogger(t)
+	return newTestProxyOnStore(t, prov, insp, mode, store, logger)
+}
+
+// newTestProxyOnStore is newTestProxy on an audit store and logger the
+// caller made. The audit store is most of the cost of a test proxy (a copy
+// of the migrated template, its Init and its read pool), so a table that
+// serves hundreds of streams makes one store for the test and a new proxy
+// per stream; the stream paths only write audit rows, they never read them.
+func newTestProxyOnStore(t *testing.T, prov LLMProvider, insp ContentInspector, mode string, store *audit.Store, logger *audit.Logger) *GuardrailProxy {
+	t.Helper()
 	// A test proxy has no gateway generation of its own, so guardrail
 	// profiles another test left in liveGuardrailProfiles (NewAPIServer
 	// publishes its set there) are not its profiles: with a default profile
@@ -177,7 +189,6 @@ func newTestProxy(t *testing.T, prov LLMProvider, insp ContentInspector, mode st
 		Port:      0,
 		Mode:      mode,
 	}
-	store, logger := testStoreAndLogger(t)
 	health := NewSidecarHealth()
 
 	p := &GuardrailProxy{

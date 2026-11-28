@@ -37,6 +37,30 @@ const floorCheckMarker = "defenseclaw-package-floor-check/1"
 // floorCheckMarkerAnnotation holds floorCheckMarker on the command.
 const floorCheckMarkerAnnotation = "defenseclaw.package-floor-check"
 
+// endedSentence ends the message of a floor-check refusal with a full stop.
+// The package scripts (rpm, deb and the apt guard, macOS pkg) append " Nothing
+// was changed." to it, and a refusal that stops without one ran the two
+// sentences together (rel-1-0-10 GAP-2069). The error chain is kept, so the
+// exit code and the typed errors underneath still match. A nil error stays nil.
+func endedSentence(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &endedSentenceError{err: err}
+}
+
+type endedSentenceError struct{ err error }
+
+func (e *endedSentenceError) Error() string {
+	msg := strings.TrimRight(e.err.Error(), " \t\r\n")
+	if strings.HasSuffix(msg, ".") {
+		return msg
+	}
+	return msg + "."
+}
+
+func (e *endedSentenceError) Unwrap() error { return e.err }
+
 // newEnterpriseBundleFloorCheckCommand is the release floor check the Linux
 // and macOS package scripts run with the installed gateway before any file
 // is replaced: a device that takes signed bundles must not go below the release
@@ -65,12 +89,18 @@ func newEnterpriseBundleFloorCheckCommand() *cobra.Command {
 				return cliusage.WithExitCode(&enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}, bundleFloorRefusedExit)
 			}
 			if err := env.BundleProductFloorRefusal(strings.TrimSpace(version)); err != nil {
-				return cliusage.WithExitCode(err, bundleFloorRefusedExit)
+				return cliusage.WithExitCode(endedSentence(err), bundleFloorRefusedExit)
+			}
+			// An older release refuses a config.yaml that sets a key it
+			// does not have, after its files replaced these
+			// (rel-1-0-10 GAP-2035).
+			if err := newerConfigDowngradeRefusal(env, strings.TrimSpace(version)); err != nil {
+				return cliusage.WithExitCode(endedSentence(err), bundleFloorRefusedExit)
 			}
 			// A release before route-only would leave every routed
 			// account pointing at a listener it does not have
 			// (rel-1-0-10 GAP-0647).
-			return cliusage.WithExitCode(routeOnlyDowngradeRefusal(cmd.Context(), env, strings.TrimSpace(version)), bundleFloorRefusedExit)
+			return cliusage.WithExitCode(endedSentence(routeOnlyDowngradeRefusal(cmd.Context(), env, strings.TrimSpace(version))), bundleFloorRefusedExit)
 		},
 	}
 	cmd.Flags().StringVar(&version, "product-version", "", "the DefenseClaw version about to be installed")

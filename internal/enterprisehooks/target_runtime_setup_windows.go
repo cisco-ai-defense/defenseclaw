@@ -252,10 +252,10 @@ func ProtectWindowsManagedRuntimeAdminFile(path string) error {
 
 // PlanWindowsManagedRuntimeRoots resolves and de-duplicates every enabled
 // manifest row. Existing roots must have the exact target-owner/seven-ACE
-// contract, and each planned root's identity is pinned into the plan. On
-// Secure Client a drifted retained root is re-stamped to it first (recorded in
-// RepairedProfiles) and a profile that still cannot be planned is skipped
-// with its rows kept; the direct standalone plan and strict mode refuse both.
+// contract, and each planned root's identity is pinned into the plan. A
+// profile the plan cannot use is skipped with its rows kept, on both profiles
+// (GAP-1733); on Secure Client a drifted retained root is re-stamped first
+// (recorded in RepairedProfiles). Strict mode refuses both.
 // Absent roots receive independent random staging names and marker SIDs.
 func PlanWindowsManagedRuntimeRoots(
 	manifest Manifest,
@@ -339,11 +339,13 @@ func planWindowsManagedRuntimeRoots(
 	if !validWindowsManagedRuntimeDigest(manifestSHA256) {
 		return plan, fmt.Errorf("enterprise hooks: invalid managed runtime manifest SHA-256")
 	}
-	// Secure Client skips an unusable profile and may repair its retained
-	// root. Standalone lifecycle validation also skips that account, without
-	// repairing or following its folder. Direct standalone validation and
-	// strict mode still return the account failure.
-	resilient := !managed.TrustStrictAncestors() && (!windowsEnterpriseStandaloneProcess() || skipAccountFailures)
+	// Both profiles skip an unusable profile (busy, unusable, or holding a
+	// per-user install's folder) instead of failing every user, and record
+	// it (GAP-1733). The skipped folder is never followed, repaired or taken
+	// over. Direct standalone validation (one user's check) and strict mode
+	// still return the account failure.
+	standalone := windowsEnterpriseStandaloneProcess()
+	resilient := !managed.TrustStrictAncestors() && (!standalone || !validation || skipAccountFailures)
 	var (
 		targets []windowsManagedRuntimeTarget
 		skipped []WindowsManagedRuntimeSkippedProfile
@@ -394,10 +396,12 @@ func planWindowsManagedRuntimeRoots(
 	// skip a user probes that a profile opens for staging and drops a skipped
 	// user's rows.
 	probeMutable := publish != nil && resilient
-	// Install, Upgrade and Repair plans re-stamp a drifted retained root
-	// instead of failing every user; a validation plan never changes a
-	// folder. A profile the plan still cannot use is skipped below.
-	repairDrift := !validation && resilient
+	// Secure Client Install, Upgrade and Repair plans re-stamp a drifted
+	// retained root instead of failing every user; a validation plan never
+	// changes a folder. Drift repair stays Secure Client only: on standalone
+	// it would loosen the trust verdict on a folder DefenseClaw did not
+	// stamp. A profile the plan still cannot use is skipped below.
+	repairDrift := !validation && resilient && !standalone
 	deferredOnly := windowsManagedRuntimeDeferredOnlyRoots(manifest)
 	roots := make([]WindowsManagedRuntimeRootPlan, 0, len(targets))
 	var repaired []WindowsManagedRuntimeSkippedProfile
@@ -420,7 +424,8 @@ func planWindowsManagedRuntimeRoots(
 				// like any other profile the plan cannot use: the folder is
 				// left untouched and the account is not enrolled, so one
 				// user's old per-user install no longer fails the install
-				// for every user. A standalone or strict plan refuses it.
+				// for every user (GAP-1733, both profiles). A strict plan
+				// refuses it.
 				if !resilient || errors.Is(inspectErr, errWindowsManagedRuntimePlanHost) {
 					return inspectErr
 				}
@@ -1086,7 +1091,9 @@ func resolveWindowsManagedRuntimeTarget(userHome, rawSID, rawDataDir string) (wi
 // found it only after minutes of work, and a run that got further committed
 // and then failed on it (GAP-0741). A folder the plan takes over (one a
 // standalone purge kept, or one the account created itself before
-// enrollment) passes.
+// enrollment) passes. Outside strict mode the install plan skips such a user
+// and enrolls the others (GAP-1733), so the preflight refuses only when it
+// would skip every target.
 func PreflightWindowsManagedRuntimeRoots(manifest Manifest) error {
 	if err := windowsManagedRuntimeSetupAuthorize(); err != nil {
 		return err
@@ -1095,14 +1102,42 @@ func PreflightWindowsManagedRuntimeRoots(manifest Manifest) error {
 	if err != nil {
 		return err
 	}
+	strict := managed.TrustStrictAncestors()
 	return windowsManagedRuntimeSetupPrivilege(func() error {
+		refusals := make([]error, 0, len(targets))
 		for _, target := range targets {
-			if err := inspectWindowsManagedRuntimeRoot(target); err != nil {
+			err := inspectWindowsManagedRuntimeRoot(target)
+			if err != nil && strict {
 				return err
 			}
+			refusals = append(refusals, err)
 		}
-		return nil
+		return windowsManagedRuntimePreflightVerdict(refusals, strict)
 	})
+}
+
+// windowsManagedRuntimePreflightVerdict is the preflight's answer from each
+// target's inspection: the first refusal in strict mode, otherwise the first
+// refusal only when every target is refused (the install would enrol nobody).
+func windowsManagedRuntimePreflightVerdict(refusals []error, strict bool) error {
+	var first error
+	refused := 0
+	for _, err := range refusals {
+		if err == nil {
+			continue
+		}
+		if strict {
+			return err
+		}
+		if first == nil {
+			first = err
+		}
+		refused++
+	}
+	if refused == len(refusals) {
+		return first
+	}
+	return nil
 }
 
 // inspectWindowsManagedRuntimeRoot is the read-only half of
@@ -1121,7 +1156,7 @@ func inspectWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget) error 
 		return fmt.Errorf("enterprise hooks: inspect managed runtime baseline: %w", err)
 	}
 	defer windows.CloseHandle(final)
-	if err := refuseWindowsPerUserInstallFolder(target); err != nil {
+	if err := refuseWindowsPerUserInstallFolder(final, target); err != nil {
 		return err
 	}
 	err = validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
@@ -1138,41 +1173,129 @@ func inspectWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget) error 
 var windowsPerUserInstallLeftovers = []string{"config.yaml", "audit.db", ".venv", "installer"}
 
 // windowsPerUserInstallLeftover names the first per-user install entry in
-// dataDir, or "".
+// dataDir, or "". It is the path form for the LocalSystem cleanups; an
+// entry it cannot check (any error but not-found) is named too, so a folder
+// it cannot read is left as found (GAP-1733).
 func windowsPerUserInstallLeftover(dataDir string) string {
 	for _, name := range windowsPerUserInstallLeftovers {
-		if _, err := os.Lstat(filepath.Join(dataDir, name)); err == nil {
+		if _, err := os.Lstat(filepath.Join(dataDir, name)); !errors.Is(err, os.ErrNotExist) {
 			return name
 		}
 	}
 	return ""
 }
 
+// windowsPerUserInstallLeftoverAt names the first per-user install entry in
+// the .defenseclaw folder behind dir, a no-follow handle. Each entry is opened
+// below that handle with backup intent and without following a link, the way
+// the plan opens the folder itself. A path lookup was denied to an elevated
+// Administrator by the per-user DACL (owner and LocalSystem only) and read as
+// absent, so the install took the folder over (GAP-1733). An entry that
+// cannot be checked (any error but not-found) is named with that error:
+// present or unknown, never absent.
+func windowsPerUserInstallLeftoverAt(dir windows.Handle) (string, error) {
+	for _, name := range windowsPerUserInstallLeftovers {
+		handle, err := openWindowsManagedRuntimeEntry(dir, name, windows.FILE_READ_ATTRIBUTES)
+		if err == nil {
+			windows.CloseHandle(handle)
+			return name, nil
+		}
+		if !windowsManagedRuntimeRootMissing(err) {
+			return name, err
+		}
+	}
+	return "", nil
+}
+
+// openWindowsManagedRuntimeEntry opens leaf, a file or a folder, below parent
+// without following a link at it (the link itself is opened), with backup
+// intent.
+func openWindowsManagedRuntimeEntry(parent windows.Handle, leaf string, access uint32) (windows.Handle, error) {
+	if err := validateWindowsManagedRuntimeLeaf(leaf); err != nil {
+		return 0, err
+	}
+	name, err := windows.NewNTUnicodeString(leaf)
+	if err != nil {
+		return 0, err
+	}
+	attributes := windows.OBJECT_ATTRIBUTES{
+		Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+		RootDirectory: parent,
+		ObjectName:    name,
+		Attributes:    windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+	}
+	var handle windows.Handle
+	var status windows.IO_STATUS_BLOCK
+	err = windows.NtCreateFile(
+		&handle,
+		access|windows.SYNCHRONIZE,
+		&attributes,
+		&status,
+		nil,
+		0,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		windows.FILE_OPEN,
+		windows.FILE_OPEN_REPARSE_POINT|windows.FILE_OPEN_FOR_BACKUP_INTENT|windows.FILE_SYNCHRONOUS_IO_NONALERT,
+		0,
+		0,
+	)
+	return handle, err
+}
+
 // refuseWindowsPerUserInstallFolder refuses the data folder of a per-user
-// 1.0 install. It carries the same private DACL as a managed one, so the DACL
-// checks took it over and the install enrolled the account (GAP-1047, and
-// GAP-1434 for an explicit install); what it holds tells it apart.
-func refuseWindowsPerUserInstallFolder(target windowsManagedRuntimeTarget) error {
-	if leftover := windowsPerUserInstallLeftover(target.data); leftover != "" {
-		return &windowsPerUserInstallFolderError{dataDir: target.data, leftover: leftover}
+// 1.0 install, given final, the plan's no-follow handle of it. It carries the
+// same private DACL as a managed one, or the owner-private shape a purge or a
+// guardian setup leaves, so the DACL checks took it over and the install
+// enrolled the account (GAP-1047, GAP-1434, GAP-1733); what it holds tells
+// it apart.
+func refuseWindowsPerUserInstallFolder(final windows.Handle, target windowsManagedRuntimeTarget) error {
+	leftover, err := windowsPerUserInstallLeftoverAt(final)
+	if leftover != "" {
+		return &windowsPerUserInstallFolderError{dataDir: target.data, leftover: leftover, err: err}
 	}
 	return nil
 }
 
+// refuseWindowsPerUserInstallFolderBelow opens the target's .defenseclaw
+// below parent, the profile handle, and refuses it as
+// refuseWindowsPerUserInstallFolder does. A folder that is gone is left to
+// the caller's own checks.
+func refuseWindowsPerUserInstallFolderBelow(parent windows.Handle, target windowsManagedRuntimeTarget) error {
+	final, err := openWindowsManagedRuntimeChild(parent, ".defenseclaw", windowsManagedRuntimeFinalReadAccess(), false)
+	if windowsManagedRuntimeRootMissing(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: open %s to check for a per-user DefenseClaw install: %w", target.data, err)
+	}
+	defer windows.CloseHandle(final)
+	return refuseWindowsPerUserInstallFolder(final, target)
+}
+
 // windowsPerUserInstallFolderError is refuseWindowsPerUserInstallFolder's
 // refusal. The per-user install has to be removed before the account can be
-// enrolled: a Secure Client plan skips that user and reports the folder, a
-// standalone or strict plan refuses.
+// enrolled: an install plan outside strict mode skips that user and reports
+// the folder; strict mode and direct validation refuse. err is set when the
+// entry could not be checked.
 type windowsPerUserInstallFolderError struct {
 	dataDir, leftover string
+	err               error
 }
 
 func (e *windowsPerUserInstallFolderError) Error() string {
+	if e.err != nil {
+		return fmt.Sprintf(
+			"enterprise hooks: reject noncanonical managed runtime baseline: %s may hold %s, which a per-user DefenseClaw install leaves; it could not be checked: %v",
+			e.dataDir, e.leftover, e.err,
+		)
+	}
 	return fmt.Sprintf(
 		"enterprise hooks: reject noncanonical managed runtime baseline: %s holds %s, which a per-user DefenseClaw install leaves",
 		e.dataDir, e.leftover,
 	)
 }
+
+func (e *windowsPerUserInstallFolderError) Unwrap() error { return e.err }
 
 // windowsManagedRuntimePurgeKeptAdoptable reports the folder shape
 // adoptWindowsManagedRuntimePurgeKeptRoot takes over: owned by the target
@@ -1186,7 +1309,7 @@ func windowsManagedRuntimePurgeKeptAdoptable(final windows.Handle, target window
 	if err != nil || owner == nil || !owner.Equals(target.sid) {
 		return false
 	}
-	relaxed, err := windowsSetupRelaxedDirectoryDACL(descriptor)
+	relaxed, err := managed.IsWindowsSetupRelaxedDirectoryDACL(descriptor)
 	return err == nil && relaxed
 }
 
@@ -1276,20 +1399,27 @@ func planWindowsManagedRuntimeRoot(
 		// A standalone install plan, explicit or after the ensure preflight,
 		// never takes over a per-user install folder (GAP-1434).
 		if adoptPurgeKept {
-			if err := refuseWindowsPerUserInstallFolder(target); err != nil {
+			if err := refuseWindowsPerUserInstallFolder(final, target); err != nil {
 				return WindowsManagedRuntimeRootPlan{}, "", err
 			}
 		}
 		err := validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
-		if err != nil && !adoptPurgeKept && windowsEnterpriseStandaloneProcess() &&
-			recoverStaleWindowsSetupRelaxedDataDir(target.data, target.sid) {
+		if err != nil && !adoptPurgeKept && windowsEnterpriseStandaloneProcess() {
+			// The guardian's setup shape is also the DACL a per-user install
+			// puts on its folder, so that folder is refused first: as
+			// LocalSystem the recovery below re-stamped it (GAP-1733).
+			if refuseErr := refuseWindowsPerUserInstallFolder(final, target); refuseErr != nil {
+				return WindowsManagedRuntimeRootPlan{}, "", refuseErr
+			}
 			// An Upgrade/Repair plan over a data directory a guardian left
 			// in its setup shape (stopped mid-setup, or by a rolled-back
 			// lifecycle) recovers it as the generation GC does: /repair
 			// refused it as a per-user install leftover, before the GC
 			// that recovers it ever ran (GAP-1334). A relax a running setup
 			// holds, and any other DACL, stay refused.
-			err = validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
+			if recoverStaleWindowsSetupRelaxedDataDir(target.data, target.sid) {
+				err = validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
+			}
 		}
 		if err != nil && adoptPurgeKept {
 			adopted, adoptErr := adoptWindowsManagedRuntimePurgeKeptRoot(parent, final, target)
@@ -1314,7 +1444,7 @@ func planWindowsManagedRuntimeRoot(
 		if err != nil && repair {
 			// The per-user install refusal comes first: a repair must never
 			// take over a per-user install's folder (GAP-1434).
-			if refuseErr := refuseWindowsPerUserInstallFolder(target); refuseErr != nil {
+			if refuseErr := refuseWindowsPerUserInstallFolder(final, target); refuseErr != nil {
 				return WindowsManagedRuntimeRootPlan{}, "", refuseErr
 			}
 			if repairErr := repairWindowsManagedRuntimeBaseline(parent, final, target); repairErr != nil {
@@ -1458,7 +1588,7 @@ func restampWindowsManagedRuntimeReadOnlyGrants(parent, final windows.Handle, ta
 	if err != nil || len(extras) == 0 {
 		return nil, err
 	}
-	if err := refuseWindowsPerUserInstallFolder(target); err != nil {
+	if err := refuseWindowsPerUserInstallFolder(final, target); err != nil {
 		return nil, err
 	}
 	identity, err := windowsManagedRuntimeHandleIdentity(final, true)
@@ -1510,7 +1640,7 @@ func adoptWindowsManagedRuntimePurgeKeptRoot(parent, final windows.Handle, targe
 	if err != nil || owner == nil || !owner.Equals(target.sid) {
 		return false, err
 	}
-	if relaxed, err := windowsSetupRelaxedDirectoryDACL(descriptor); err != nil || !relaxed {
+	if relaxed, err := managed.IsWindowsSetupRelaxedDirectoryDACL(descriptor); err != nil || !relaxed {
 		return false, err
 	}
 	identity, err := windowsManagedRuntimeHandleIdentity(final, true)
@@ -1606,7 +1736,7 @@ func stageWindowsManagedRuntimeRoot(rootPlan WindowsManagedRuntimeRootPlan, jour
 		// same DACL and identity, so stage took the folder over (GAP-1202).
 		// Only an install plan is staged; Upgrade/Repair plans are not.
 		if windowsEnterpriseStandaloneProcess() {
-			if err := refuseWindowsPerUserInstallFolder(target); err != nil {
+			if err := refuseWindowsPerUserInstallFolder(final, target); err != nil {
 				return claim, err
 			}
 		}
@@ -1670,7 +1800,7 @@ func finalizeWindowsManagedRuntimeRoot(rootPlan WindowsManagedRuntimeRootPlan, e
 	if rootPlan.Baseline == windowsManagedRuntimeBaselineCanonical {
 		// A per-user install made after stage is refused too (GAP-1202).
 		if windowsEnterpriseStandaloneProcess() {
-			if err := refuseWindowsPerUserInstallFolder(target); err != nil {
+			if err := refuseWindowsPerUserInstallFolderBelow(parent, target); err != nil {
 				return claim, err
 			}
 		}
@@ -2656,6 +2786,12 @@ func validateWindowsManagedRuntimeLeaf(value string) error {
 	if _, ok := windowsManagedRuntimeCleanupLeaves[value]; ok {
 		return nil
 	}
+	// The per-user install entries are only probed (GAP-1733).
+	for _, leaf := range windowsPerUserInstallLeftovers {
+		if value == leaf {
+			return nil
+		}
+	}
 	for _, leaf := range []string{
 		"hooks",
 		"inventory.db", "inventory.db-journal", "inventory.db-shm", "inventory.db-wal",
@@ -3365,7 +3501,7 @@ func validateWindowsManagedRuntimeCleanupSubdirectoryHandle(
 	if err != nil {
 		return err
 	}
-	if setup, err := windowsSetupRelaxedDirectoryDACL(descriptor); err != nil {
+	if setup, err := managed.IsWindowsSetupRelaxedDirectoryDACL(descriptor); err != nil {
 		return err
 	} else if !setup {
 		return canonicalErr

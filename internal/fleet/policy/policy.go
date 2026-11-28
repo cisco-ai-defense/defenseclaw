@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/mqtt"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 const installedCompilerPath = "/usr/local/lib/defenseclaw/policy_compiler.py"
@@ -295,7 +296,7 @@ func sourceCompilerPath() string {
 	if err != nil {
 		return ""
 	}
-	exe, err = filepath.EvalSymlinks(exe)
+	exe, err = winpath.EvalLinks(exe)
 	if err != nil {
 		return ""
 	}
@@ -318,7 +319,7 @@ func sourceCompilerPath() string {
 // For a checkout, stop at its executable directory; for an installed path,
 // stop at the installation prefix (both are checked separately below).
 func trustedCompilerFile(path, base string) bool {
-	resolved, err := filepath.EvalSymlinks(path)
+	resolved, err := winpath.EvalLinks(path)
 	if err != nil || resolved != filepath.Clean(path) {
 		return false
 	}
@@ -354,7 +355,7 @@ func pythonForCompiler(compilerPath string) (string, error) {
 		if runtime.GOOS == "windows" {
 			interpreter = filepath.Join(home, ".venv", "Scripts", "python.exe")
 		}
-		resolved, err := filepath.EvalSymlinks(interpreter)
+		resolved, err := winpath.EvalLinks(interpreter)
 		if err != nil || !trustedDirectory(filepath.Dir(interpreter), home) ||
 			!trustedCompilerFile(resolved, filepath.VolumeName(resolved)+string(filepath.Separator)) {
 			return "", fmt.Errorf("trusted policy compiler Python interpreter unavailable at %s", interpreter)
@@ -375,7 +376,7 @@ func managedCompilerRuntime() bool {
 
 func trustedDirectory(dir, base string) bool {
 	for ; ; dir = filepath.Dir(dir) {
-		resolved, err := filepath.EvalSymlinks(dir)
+		resolved, err := winpath.EvalLinks(dir)
 		if err != nil || resolved != dir {
 			return false
 		}
@@ -440,7 +441,7 @@ func defaultCompilerPath() string {
 // executable's own installation prefix.
 func installedCompilerPaths() []string {
 	if exe, err := os.Executable(); err == nil {
-		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		if resolved, err := winpath.EvalLinks(exe); err == nil {
 			prefix := filepath.Dir(filepath.Dir(resolved))
 			paths := make([]string, 0, 2)
 			for _, libdir := range []string{"lib", "lib64"} {
@@ -455,7 +456,7 @@ func installedCompilerPaths() []string {
 // isUnderAllowedDir checks the resolved path against installed/home locations
 // and the exact compiler beside the running source-checkout gateway binary.
 func isUnderAllowedDir(abs string) bool {
-	resolved, err := filepath.EvalSymlinks(abs)
+	resolved, err := winpath.EvalLinks(abs)
 	if err != nil {
 		return false
 	}
@@ -465,7 +466,7 @@ func isUnderAllowedDir(abs string) bool {
 	}
 	if !managedCompilerRuntime() {
 		if source := sourceCompilerPath(); source != "" {
-			if resolvedSource, err := filepath.EvalSymlinks(source); err == nil && absPath == resolvedSource {
+			if resolvedSource, err := winpath.EvalLinks(source); err == nil && absPath == resolvedSource {
 				return true
 			}
 		}
@@ -498,7 +499,7 @@ func isUnderAllowedDir(abs string) bool {
 	}
 
 	for _, d := range allowed {
-		resolvedDir, err := filepath.EvalSymlinks(d)
+		resolvedDir, err := winpath.EvalLinks(d)
 		if err != nil {
 			continue
 		}

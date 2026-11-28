@@ -148,7 +148,7 @@ EXPECTED_SANDBOX_IDENTITY_PROCESSOR = {
 }
 EXPECTED_VOLUMES = {"prometheus-data", "loki-data", "tempo-data", "grafana-data"}
 
-EXPECTED_HISTOGRAM_SHA256 = "000945027326672c0d24e939d7812ccce07174cde37940b1291744b00b2f6fe9"
+EXPECTED_HISTOGRAM_SHA256 = "43831f573ba0b06619e9e4bdee3f673b994ba590e4339c1f57adccb25d3a7f84"
 
 PROMETHEUS_RESOURCE_LABELS = {
     "deployment_environment_name",
@@ -680,6 +680,9 @@ MANAGED_SANDBOX_RESOURCE_ATTRIBUTES = (
     "service.instance.id",
     "deployment.environment.name",
     "os.type",
+    # One value per install, no user, host or pod: the chart's namespaceLabel scopes the
+    # Substrate policy alerts with it (GAP-0669).
+    "k8s.namespace.name",
 )
 EXPECTED_MANAGED_SANDBOX_RESOURCE_PROCESSOR = {
     "error_mode": "ignore",
@@ -772,8 +775,8 @@ def _collector_errors() -> list[str]:
         )
     if processors.get("transform/managed-sandbox-resource") != EXPECTED_MANAGED_SANDBOX_RESOURCE_PROCESSOR:
         errors.append(
-            "transform/managed-sandbox-resource must keep only the service, environment and OS resource "
-            "attributes: the managed sandbox counters carry no host or account label",
+            "transform/managed-sandbox-resource must keep only the service, environment, OS and Kubernetes "
+            "namespace resource attributes: the managed sandbox counters carry no host or account label",
         )
     resource_actions = collector.get("processors", {}).get("resource", {}).get("attributes")
     if resource_actions != EXPECTED_RESOURCE_ATTRIBUTE_ACTIONS:

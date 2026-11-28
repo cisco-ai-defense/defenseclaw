@@ -37,6 +37,10 @@ const (
 	defenseClawControlUnprovenRuleID = "tamper.defenseclaw_control_unproven"
 )
 
+// defenseClawControlReader is actionfacts.DefenseClawControl; tests replace
+// it to inject a reader fault.
+var defenseClawControlReader = actionfacts.DefenseClawControl
+
 // defenseClawControlFindings adds the DefenseClaw self-protection findings of
 // one call. A rule the active pack does not hold adds nothing. Read-only
 // DefenseClaw commands and restarts add nothing.
@@ -51,20 +55,38 @@ func defenseClawControlFindings(ctx context.Context, request trustedActionReques
 	if text == "" {
 		return findings
 	}
-	controls := actionfacts.DefenseClawControl(actionfacts.Analyze(request.Input), text)
+	controls := defenseClawControlReader(actionfacts.Analyze(request.Input), text)
+	// A program run through static prefix wrappers that hand it its argv
+	// unchanged (chrt -i 0 pkill -f defenseclaw, taskset 0x1 defenseclaw
+	// uninstall --all) is read as its plain call too (GAP-1494,
+	// actionfacts.WrapperUnwrapExactTwin).
+	if twin, ok := actionfacts.WrapperUnwrapExactTwin(text); ok {
+		input := request.Input
+		input.Command, input.Args, input.Argv = twin, nil, nil
+		controls = append(controls, defenseClawControlReader(actionfacts.Analyze(input), twin)...)
+	}
 	if len(controls) == 0 {
 		return findings
 	}
+	out := append([]RuleFinding(nil), findings...)
+	if fault := slices.IndexFunc(controls, func(control actionfacts.DefenseClawControlFact) bool {
+		return control.Kind == actionfacts.DefenseClawControlFault
+	}); fault >= 0 {
+		// A reader fault is the evaluation fault of the call, the answer of
+		// trustedToolCallFindings' recovery (a block in every pack and mode),
+		// with the facts read before it kept (GAP-1936).
+		logEvaluatorFault("defenseclaw control connector="+request.Connector, controls[fault].Fault)
+		out = withEvaluationFaultFinding(out, evaluatorFaultTitle, request.EnforcementCapable)
+		controls = slices.Delete(slices.Clone(controls), fault, fault+1)
+	}
 	generation := snapshotRulePackGenerationFor(ctx, request.Connector)
 	if generation == nil {
-		return findings
+		return out
 	}
-	out := append([]RuleFinding(nil), findings...)
 	// A proven self-disable is an alert where the user runs DefenseClaw
 	// themselves with the default or permissive pack, a block under the strict
 	// pack and in every managed install.
-	provenAlertOnly := !request.StrictPolicy && !request.ManagedInstall
-	add := func(ruleID, note string, alertOnly bool) {
+	add := func(ruleID, note string, tiered bool) {
 		if slices.ContainsFunc(out, func(finding RuleFinding) bool { return finding.RuleID == ruleID }) {
 			return
 		}
@@ -75,16 +97,15 @@ func defenseClawControlFindings(ctx context.Context, request trustedActionReques
 		out = append(out, RuleFinding{
 			RuleID: rule.ID, Title: rule.Title + " (" + note + ")", Severity: rule.Severity, Confidence: rule.Confidence,
 			Evidence: "defenseclaw " + note, Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
-			enforcement: findingEnforcementAllowed,
-			proof:       newExactFallbackFindingProof(rule.ID, true, true, true, true),
+			proof: newExactFallbackFindingProof(rule.ID, true, true, true, true),
 		})
-		if alertOnly {
-			out[len(out)-1].enforcement = findingEnforcementAlertOnly
+		if tiered {
+			out[len(out)-1].Proof = request.tieredProof(out[len(out)-1].Proof, tierGateManaged)
 		}
 	}
 	for _, control := range controls {
 		if control.Proven {
-			add(defenseClawControlDisableRuleID, string(control.Kind), provenAlertOnly)
+			add(defenseClawControlDisableRuleID, string(control.Kind), true)
 		} else {
 			add(defenseClawControlUnprovenRuleID, string(control.Kind), false)
 		}

@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // writeWindowsAgentPackageJSON drops a minimal package.json under
@@ -386,9 +388,7 @@ func TestWindowsCursorPresenceRejectsReparseHomeState(t *testing.T) {
 			} else if err := os.Mkdir(filepath.Dir(link), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Symlink(destination, link); err != nil {
-				t.Skipf("directory symlink creation is unavailable: %v", err)
-			}
+			testenv.Symlink(t, destination, link)
 			if windowsAgentPresence(home, "cursor") {
 				t.Fatal("reparse-backed Cursor state was accepted as presence")
 			}

@@ -56,15 +56,20 @@ func TestBuiltRelayAcceptsTheInstallsSessionTokens(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			signer, pub := gatewaySigner(t, cfg)
-			keys, rs, err := relaySessions(cfg, []string{pub}, "", "", "", true)
+			gw := cfg.Substrate.ActorGatewayURL()
+			keys, rs, err := relaySessions(cfg, []string{pub}, "", "", "", gw)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if rs.Issuer != signer.Issuer() || !slices.Equal(rs.KeyIDs, []string{signer.KeyID()}) || rs.Audience != identity.SessionAudience {
 				t.Fatalf("relay sessions %+v, gateway issuer %q kid %q", rs, signer.Issuer(), signer.KeyID())
 			}
-			spec, _, err := kitspec.Spec(kitspec.Options{Connector: "claudecode", KitVersion: "t", HookBinary: []byte("h"),
-				RelayBinary: []byte("r"), MetadataOnly: true, SessionKeys: keys, SessionIssuer: rs.Issuer, Audience: rs.Audience})
+			// Every built relay also asks the gateway (GAP-0435).
+			if rs.VerifyURL != gw+kit.RelayVerifyPath {
+				t.Fatalf("verify URL %q, want %q", rs.VerifyURL, gw+kit.RelayVerifyPath)
+			}
+			spec, _, err := kitspec.Spec(kitspec.Options{Connector: "claudecode", KitVersion: "t", HookBinary: []byte("h"), GatewayURL: gw,
+				RelayBinary: []byte("r"), MetadataOnly: true, SessionKeys: keys, SessionIssuer: rs.Issuer, Audience: rs.Audience, VerifyURL: rs.VerifyURL})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -84,6 +89,9 @@ func TestBuiltRelayAcceptsTheInstallsSessionTokens(t *testing.T) {
 			}
 			if err := kc.Validate(); err != nil {
 				t.Fatal(err)
+			}
+			if kc.Relay.VerifyURL != rs.VerifyURL {
+				t.Fatalf("baked verify_url %q, want %q", kc.Relay.VerifyURL, rs.VerifyURL)
 			}
 			// The relay reads the baked key files and its identity files; point
 			// both at a temporary directory.
@@ -106,11 +114,12 @@ func TestBuiltRelayAcceptsTheInstallsSessionTokens(t *testing.T) {
 			if err != nil {
 				t.Fatalf("the relay of the built image does not start: %v", err)
 			}
-			kv, ok := v.(*relay.KeyVerifier)
-			if !ok || kv == nil {
-				t.Fatalf("verifier %T", v)
+			cv, ok := v.(*relay.CheckedVerifier)
+			if !ok || cv == nil || cv.Keys == nil || cv.Gateway == nil || cv.Gateway.URL != rs.VerifyURL {
+				t.Fatalf("verifier %T, want the keys then the gateway at %s", v, rs.VerifyURL)
 			}
-			tok, _, err := signer.Issue("alice", actor, 5*time.Minute)
+			kv := cv.Keys
+			tok, _, err := signer.Issue(identity.SessionSignIn{Person: "alice", TokenKey: "jti:a"}, actor, 5*time.Minute)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -122,7 +131,7 @@ func TestBuiltRelayAcceptsTheInstallsSessionTokens(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			tok2, _, _ := other.Issue("alice", actor, 5*time.Minute)
+			tok2, _, _ := other.Issue(identity.SessionSignIn{Person: "alice", TokenKey: "jti:a"}, actor, 5*time.Minute)
 			if _, err := kv.VerifyToken(tok2); err == nil {
 				t.Fatal("a token of another issuer and key was accepted")
 			}
@@ -142,27 +151,28 @@ func mustKey(t *testing.T) *ecdsa.PrivateKey {
 func TestRelaySessionsRules(t *testing.T) {
 	cfg := &config.Config{}
 	signer, pub := gatewaySigner(t, cfg)
+	const gw = "http://defenseclaw-actor.dc.svc.cluster.local"
+	const custom = "http://defenseclaw-actor.other.svc.cluster.local/api/v1/substrate/relay/verify"
 	cases := []struct {
 		name        string
 		keys        []string
 		issuer, url string
-		startsRelay bool
 		wantErr     string
 		wantIssuer  string
+		wantURL     string
 	}{
-		{name: "kid matches", keys: []string{signer.KeyID() + "=" + pub}, startsRelay: true, wantIssuer: signer.Issuer()},
-		{name: "explicit issuer wins", keys: []string{pub}, issuer: "https://admin.example.test", startsRelay: true, wantIssuer: "https://admin.example.test"},
-		{name: "wrong kid", keys: []string{"k1=" + pub}, startsRelay: true, wantErr: "is not the key's id"},
-		{name: "keys and verify url", keys: []string{pub}, url: "http://defenseclaw-actor.dc.svc.cluster.local/api/v1/substrate/relay/verify", startsRelay: true, wantErr: "give one"},
-		{name: "nothing, relay starts", startsRelay: true, wantErr: "nobody could attach"},
-		{name: "nothing, keep entrypoint", startsRelay: false},
-		{name: "verify url only", url: "http://defenseclaw-actor.dc.svc.cluster.local/api/v1/substrate/relay/verify", startsRelay: true},
-		{name: "issuer without keys", issuer: "https://admin.example.test", url: "http://x.test/v", startsRelay: true, wantErr: "goes with --session-key"},
-		{name: "not a key", keys: []string{pub + ".missing"}, startsRelay: true, wantErr: "no such file"},
+		{name: "kid matches", keys: []string{signer.KeyID() + "=" + pub}, wantIssuer: signer.Issuer(), wantURL: gw + kit.RelayVerifyPath},
+		{name: "explicit issuer wins", keys: []string{pub}, issuer: "https://admin.example.test", wantIssuer: "https://admin.example.test", wantURL: gw + kit.RelayVerifyPath},
+		{name: "wrong kid", keys: []string{"k1=" + pub}, wantErr: "is not the key's id"},
+		{name: "keys and verify url", keys: []string{pub}, url: custom, wantIssuer: signer.Issuer(), wantURL: custom},
+		{name: "nothing: the gateway check", wantURL: gw + kit.RelayVerifyPath},
+		{name: "verify url only", url: custom, wantURL: custom},
+		{name: "issuer without keys", issuer: "https://admin.example.test", url: "http://x.test/v", wantErr: "goes with --session-key"},
+		{name: "not a key", keys: []string{pub + ".missing"}, wantErr: "no such file"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, rs, err := relaySessions(cfg, c.keys, c.issuer, "", c.url, c.startsRelay)
+			_, rs, err := relaySessions(cfg, c.keys, c.issuer, "", c.url, gw)
 			if c.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
 					t.Fatalf("err %v, want %q", err, c.wantErr)
@@ -172,8 +182,8 @@ func TestRelaySessionsRules(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if rs.Issuer != c.wantIssuer {
-				t.Fatalf("issuer %q, want %q", rs.Issuer, c.wantIssuer)
+			if rs.Issuer != c.wantIssuer || rs.VerifyURL != c.wantURL {
+				t.Fatalf("issuer %q url %q, want %q %q", rs.Issuer, rs.VerifyURL, c.wantIssuer, c.wantURL)
 			}
 		})
 	}
@@ -239,5 +249,40 @@ func TestTemplateCommandsTakeTheKitConnectors(t *testing.T) {
 			!strings.Contains(errb.String(), "is not a connector the kit builds") {
 			t.Errorf("scan --connector %s: %d %q", bad, code, errb.String())
 		}
+	}
+}
+
+// GAP-0435: every kit a template build renders sets verify_url, so the
+// relay asks the gateway, which checks that a token's person owns the
+// agent. A build given only --session-key (the documented command) gets
+// the actor listener's check by default, and a direct kitspec caller does
+// too.
+func TestTemplateBuildAlwaysSetsVerifyURLGAP0435(t *testing.T) {
+	cfg := &config.Config{}
+	signer, pub := gatewaySigner(t, cfg)
+	gw := cfg.Substrate.ActorGatewayURL()
+	keys, rs, err := relaySessions(cfg, []string{pub}, "", "", "", gw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rs.VerifyURL != kit.RelayVerifyURL(gw) {
+		t.Fatalf("--session-key alone: verify URL %q, want %q", rs.VerifyURL, kit.RelayVerifyURL(gw))
+	}
+	// kitspec without a verify URL (a direct caller) bakes the default.
+	spec, _, err := kitspec.Spec(kitspec.Options{Connector: "claudecode", KitVersion: "t", HookBinary: []byte("h"),
+		RelayBinary: []byte("r"), MetadataOnly: true, SessionKeys: keys, SessionIssuer: signer.Issuer()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kc kit.Config
+	for _, f := range spec.Files {
+		if f.Path == kit.ConfigPath {
+			if err := json.Unmarshal(f.Data, &kc); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if want := kit.RelayVerifyURL(kit.DefaultGatewayURL); kc.Relay.VerifyURL != want || len(kc.Relay.SessionKeys) != 1 {
+		t.Fatalf("baked relay verify_url %q keys %d, want %q and the key", kc.Relay.VerifyURL, len(kc.Relay.SessionKeys), want)
 	}
 }

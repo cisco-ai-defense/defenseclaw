@@ -24,7 +24,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -35,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
@@ -572,9 +572,9 @@ func TestManagedMigrationRecordReadRefusesWhatIsNotAPlainFile(t *testing.T) {
 			}
 		}, wantErr: true},
 		{name: "a dangling link", place: func(t *testing.T, p string) {
-			symlinkOrSkip(t, filepath.Join(dir, "gone.json"), p)
+			testenv.Symlink(t, filepath.Join(dir, "gone.json"), p)
 		}, wantErr: true},
-		{name: "a live link", place: func(t *testing.T, p string) { symlinkOrSkip(t, target, p) }, wantErr: true},
+		{name: "a live link", place: func(t *testing.T, p string) { testenv.Symlink(t, target, p) }, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			recordPath := filepath.Join(t.TempDir(), config.MigrationV9RecordFile)
@@ -613,7 +613,7 @@ func TestMigrateManagedStandaloneConfigRefusesALinkedMigrationRecord(t *testing.
 				t.Fatal(err)
 			}
 		}
-		symlinkOrSkip(t, target, config.MigrationRecordPath(path))
+		testenv.Symlink(t, target, config.MigrationRecordPath(path))
 		err := migrateManagedStandaloneConfig(context.Background(), path, "")
 		if err == nil || !strings.Contains(err.Error(), config.MigrationV9RecordFile) {
 			t.Fatalf("live=%v: config step = %v, want an error naming %s", live, err, config.MigrationV9RecordFile)
@@ -621,18 +621,6 @@ func TestMigrateManagedStandaloneConfigRefusesALinkedMigrationRecord(t *testing.
 		if raw, _ := os.ReadFile(path); string(raw) != string(open) {
 			t.Fatalf("live=%v: the config changed under a linked record:\n%s", live, raw)
 		}
-	}
-}
-
-// symlinkOrSkip links link to target, or skips where the account may not
-// create symbolic links (Windows without the privilege).
-func symlinkOrSkip(t *testing.T, target, link string) {
-	t.Helper()
-	if err := os.Symlink(target, link); err != nil {
-		if runtime.GOOS == "windows" {
-			t.Skipf("symbolic links unavailable: %v", err)
-		}
-		t.Fatal(err)
 	}
 }
 
@@ -712,7 +700,7 @@ func TestMigrateManagedStandaloneConfigRefusesBundleBindingOverUnreadableGenerat
 			broken := []byte(`{"generation":4,"config_sha256":`)
 			gone := filepath.Join(t.TempDir(), "gone.json")
 			if tc.link {
-				symlinkOrSkip(t, gone, configwrite.GenerationPath(path))
+				testenv.Symlink(t, gone, configwrite.GenerationPath(path))
 			} else if err := os.WriteFile(configwrite.GenerationPath(path), broken, 0o600); err != nil {
 				t.Fatal(err)
 			}

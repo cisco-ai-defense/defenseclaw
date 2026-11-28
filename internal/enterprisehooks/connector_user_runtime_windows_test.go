@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"golang.org/x/sys/windows"
 )
 
@@ -123,9 +124,7 @@ func TestWindowsConnectorUserRuntimeLeavesAreBounded(t *testing.T) {
 func TestRemoveWindowsConnectorUserRuntimeLeavesALinkedHooksFolderAsFound(t *testing.T) {
 	dataDir, target := t.TempDir(), t.TempDir()
 	writeConnectorRuntimeFixture(t, target, ".hook-cursor.token")
-	if err := os.Symlink(target, filepath.Join(dataDir, "hooks")); err != nil {
-		t.Skipf("cannot create a symbolic link here: %v", err)
-	}
+	testenv.Symlink(t, target, filepath.Join(dataDir, "hooks"))
 	root, err := os.OpenRoot(dataDir)
 	if err != nil {
 		t.Fatal(err)
@@ -205,6 +204,7 @@ func connectorRuntimeExists(t *testing.T, dataDir string, rels ...string) []bool
 }
 
 func TestRemoveWindowsConnectorUserRuntimeTakesOnlyTheConnectorAndItsLockEntry(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	home, dataDir, sid := connectorRuntimeFixture(t, connectorRuntimeGateway)
 	if err := RemoveWindowsConnectorUserRuntime(home, sid.String(), "", "cursor"); err != nil {
 		t.Fatal(err)
@@ -231,6 +231,7 @@ func TestRemoveWindowsConnectorUserRuntimeTakesOnlyTheConnectorAndItsLockEntry(t
 // A lock entry bound to another gateway service is superseded: the files of
 // the removed connector go, the entry is left.
 func TestRemoveWindowsConnectorUserRuntimeLeavesASupersededLockEntry(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	home, dataDir, sid := connectorRuntimeFixture(t, "DefenseClawGateway-OtherScope")
 	if err := RemoveWindowsConnectorUserRuntime(home, sid.String(), "", "cursor"); err != nil {
 		t.Fatal(err)
@@ -244,6 +245,7 @@ func TestRemoveWindowsConnectorUserRuntimeLeavesASupersededLockEntry(t *testing.
 }
 
 func TestRemoveWindowsConnectorUserRuntimeRefusesAWrongSIDAndANonLocalSystemCaller(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	home, dataDir, sid := connectorRuntimeFixture(t, connectorRuntimeGateway)
 	// Another account's SID against this profile.
 	if err := RemoveWindowsConnectorUserRuntime(home, "S-1-5-21-1-2-3-1999", "", "cursor"); err == nil {
@@ -266,6 +268,7 @@ func TestRemoveWindowsConnectorUserRuntimeRefusesAWrongSIDAndANonLocalSystemCall
 }
 
 func TestRemoveWindowsConnectorUserRuntimeLeavesLinksAsFound(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	// A junction at the DefenseClaw folder.
 	gap45AllowMutation(t)
 	sid := currentWindowsTestSID(t)
@@ -297,6 +300,7 @@ func TestRemoveWindowsConnectorUserRuntimeLeavesLinksAsFound(t *testing.T) {
 // A junction swapped in for the DefenseClaw folder right before the privileged
 // lock write cannot happen: the folder is pinned without delete sharing.
 func TestRemoveWindowsConnectorUserRuntimeCannotSwapTheFolderBeforeTheLockWrite(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	home, dataDir, sid := connectorRuntimeFixture(t, connectorRuntimeGateway)
 	outside, canary := outsideDataDirTree(t, home)
 	var renameErr error
@@ -319,6 +323,7 @@ func TestRemoveWindowsConnectorUserRuntimeCannotSwapTheFolderBeforeTheLockWrite(
 
 // A folder that holds a per-user DefenseClaw install is left as found.
 func TestRemoveWindowsConnectorUserRuntimeLeavesAPerUserInstall(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	home, dataDir, sid := connectorRuntimeFixture(t, connectorRuntimeGateway)
 	gap45WriteFile(t, filepath.Join(dataDir, "config.yaml"), "config_version: 8\n")
 	if err := RemoveWindowsConnectorUserRuntime(home, sid.String(), "", "cursor"); !errors.Is(err, ErrWindowsConnectorUserRuntimeKept) || !strings.Contains(err.Error(), "config.yaml") {
@@ -332,6 +337,7 @@ func TestRemoveWindowsConnectorUserRuntimeLeavesAPerUserInstall(t *testing.T) {
 // The account's runtime transaction lock is held around the removal, so an
 // install (or managed-policy removal) of the same account cannot interleave.
 func TestRemoveWindowsConnectorUserRuntimeWaitsForTheRuntimeTransactionLock(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	home, dataDir, sid := connectorRuntimeFixture(t, connectorRuntimeGateway)
 	release, err := lockWindowsUserRuntimeTransaction(sid.String())
 	if err != nil {
@@ -369,6 +375,7 @@ func TestRemoveWindowsConnectorUserRuntimeWaitsForTheRuntimeTransactionLock(t *t
 // count, and a folder that holds a per-user install is not offered (the removal
 // leaves it as found).
 func TestWindowsConnectorUserRuntimeLeftoversSeesOnlyTheConnectorsOwnFiles(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	home, dataDir, sid := connectorRuntimeFixture(t, connectorRuntimeGateway)
 	writeConnectorRuntimeFixture(t, dataDir, "hooks/_hardening.sh", "hooks/inspect-tool.sh", "hooks/.hookcfg", "hooks/.hookcfg.lock",
 		"hooks/.managed-runtime-cursorish-0123abcd.json", "notes.txt")
@@ -444,6 +451,7 @@ func (d decoyTree) requireUnchanged(t *testing.T) {
 // GAP-0964, lead ruling: the scan never follows a link or junction out of a
 // profile, and the removal never reads or changes what a link names.
 func TestWindowsConnectorUserRuntimeLeftoversNeverFollowAJunction(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	all := []string{"claudecode", "codex", "cursor"}
 
 	// A junction at the profile folder itself.
@@ -496,6 +504,7 @@ func TestWindowsConnectorUserRuntimeLeftoversNeverFollowAJunction(t *testing.T) 
 // not counted, not followed, and left in place; a hard link is the connector's
 // own name, which is unlinked without touching the file it shares.
 func TestWindowsConnectorUserRuntimeLinkLeaves(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	home, dataDir, sid := connectorRuntimeFixture(t, connectorRuntimeGateway)
 	decoys := newDecoyTree(t, filepath.Dir(home), "outside-leaf")
 	token := filepath.Join(dataDir, "hooks", ".hook-cursor.token")
@@ -511,9 +520,7 @@ func TestWindowsConnectorUserRuntimeLinkLeaves(t *testing.T) {
 	if err := os.Remove(record[0]); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(decoys.root, ".hook-cursor.token"), token); err != nil {
-		t.Skipf("cannot create a symlink here: %v", err)
-	}
+	testenv.Symlink(t, filepath.Join(decoys.root, ".hook-cursor.token"), token)
 	if got := WindowsConnectorUserRuntimeLeftovers(home, sid.String(), "", []string{"cursor"}); got != nil {
 		t.Fatalf("a symlink leaf was counted as a leftover: %v", got)
 	}

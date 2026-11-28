@@ -66,6 +66,22 @@
       }
     ]
   },
+  "bundles": [
+    {
+      "stage": "canary",
+      "atespaces": [
+        "eng-web"
+      ],
+      "bundle_id": "b-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "version": 3,
+      "key_id": "acme-2026a",
+      "manifest_sha256": "a3f1c0de5b7e9a2c4d6f8b0a1c3e5d7f9b1a3c5e7d9f0b2a4c6e8d0f1b3a5c7e",
+      "applied_at": "2026-11-13T14:50:00Z",
+      "source": "admin",
+      "receipt_id": "r-ea39c2384488a1ff",
+      "state": "verified"
+    }
+  ],
   "checks": [
     {
       "id": "substrate_version",
@@ -99,6 +115,11 @@
       "message": "ok"
     },
     {
+      "id": "bundle_state",
+      "status": "skip",
+      "message": "signed policy bundles are off (substrate.bundles.enabled)"
+    },
+    {
       "id": "callout_registered",
       "status": "pass",
       "message": "ok"
@@ -125,6 +146,11 @@
     },
     {
       "id": "worker_drain",
+      "status": "pass",
+      "message": "ok"
+    },
+    {
+      "id": "relay_tls",
       "status": "pass",
       "message": "ok"
     }

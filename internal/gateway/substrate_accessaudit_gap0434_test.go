@@ -97,7 +97,7 @@ func TestSubstrateRefusedCrossPersonAttemptIsAuditedAsTheCallerGAP0434(t *testin
 	// The relay's session check: alice's session token presented to bob's
 	// actor is refused; the row is the calling actor's (and its owner's),
 	// the token's person is recorded apart.
-	tok, _, err := f.sessions.Issue(alice.ID(), identity.SessionActor{Atespace: "eng-web", Name: "alice-1", UID: subUID1}, 0)
+	tok, _, err := f.sessions.Issue(identity.SignInOf(alice), identity.SessionActor{Atespace: "eng-web", Name: "alice-1", UID: subUID1}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

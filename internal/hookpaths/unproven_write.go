@@ -52,12 +52,73 @@ var unprovenReasonTitles = map[string]string{
 // (Perl and Ruby symlink, a .NET or COM link call).
 var linkCallText = lazyregexp.New(`(?i)symlink|hardlink|junction|\bos\.link\b|\bFile\.link\b|\blink\s*\(|mklink|createsymboliclink|createhardlink`)
 
-// newItemText is a New-Item spelling, read by commandNewItemMayMakeLink;
-// newItemAliasText is its ni alias in a command position.
-var (
-	newItemText      = lazyregexp.New(`(?i)\bnew-item\b`)
-	newItemAliasText = lazyregexp.New(`(?i)(?:^|[\s;|&({])ni\s`)
-)
+// newItemTextIndexes are the New-Item spellings of a text, read by
+// commandNewItemMayMakeLink: "new-item" in any ASCII case between word
+// boundaries, the matches of (?i)\bnew-item\b. A byte scan, not that
+// regular expression: the reading of a 1 MiB here-document spent about 0.45
+// s in the two regular expressions of this file, run on the whole text by
+// several link readers of one call (rel-1-0-10:GAP-0299). None of the
+// letters has a non-ASCII case fold, so the ASCII fold is the regexp's.
+func newItemTextIndexes(command string) [][]int {
+	const name = "new-item"
+	var out [][]int
+	for at := 0; at+len(name) <= len(command); at++ {
+		if c := command[at]; c != 'n' && c != 'N' {
+			// Skip to the next n or N.
+			next := strings.IndexAny(command[at:], "nN")
+			if next < 0 {
+				break
+			}
+			at += next
+			if at+len(name) > len(command) {
+				break
+			}
+		}
+		end := at + len(name)
+		if !strings.EqualFold(command[at:end], name) ||
+			at > 0 && asciiWordByte(command[at-1]) || end < len(command) && asciiWordByte(command[end]) {
+			continue
+		}
+		out = append(out, []int{at, end})
+		at = end - 1
+	}
+	return out
+}
+
+// newItemAliasIndexes are the ni aliases of New-Item in a command position:
+// ni and a white space at the start of the text or after a white space or one
+// of ; | & ( {, the matches of (?i)(?:^|[\s;|&({])ni\s, as a byte scan
+// (newItemTextIndexes). A match takes the byte before ni, so one that ends in
+// the white space before the next ni leaves that one out, as the regexp does.
+func newItemAliasIndexes(command string) [][]int {
+	var out [][]int
+	ni := func(at int) bool {
+		return at+3 <= len(command) && (command[at]|0x20) == 'n' && (command[at+1]|0x20) == 'i' && perlSpace(command[at+2])
+	}
+	if ni(0) {
+		out = append(out, []int{0, 3})
+	}
+	for at := len(out) * 3; at+4 <= len(command); at++ {
+		if c := command[at]; c != ';' && c != '|' && c != '&' && c != '(' && c != '{' && !perlSpace(c) {
+			continue
+		}
+		if ni(at + 1) {
+			out = append(out, []int{at, at + 4})
+			at += 3
+		}
+	}
+	return out
+}
+
+// asciiWordByte is a byte of \w in Go regular expressions.
+func asciiWordByte(c byte) bool {
+	return c == '_' || '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
+}
+
+// perlSpace is a byte of \s in Go regular expressions.
+func perlSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r'
+}
 
 // newItemSpellingIndexes are the New-Item spellings of PowerShell text: the
 // name, and its ni alias in a command position. The alias counts as the name
@@ -66,7 +127,7 @@ var (
 // (rel-1-0-10:GAP-0849, native T12: ni -Ty SymbolicLink with a computed
 // target read as no link, and with a static one it kept the opaque reading).
 func newItemSpellingIndexes(command string) [][]int {
-	return append(newItemText.FindAllStringIndex(command, -1), newItemAliasText.FindAllStringIndex(command, -1)...)
+	return append(newItemTextIndexes(command), newItemAliasIndexes(command)...)
 }
 
 // commandNewItemMayMakeLink reports a command whose New-Item calls may make
@@ -102,7 +163,7 @@ func commandNewItemLinkSpelled(command string) bool {
 // alias is read as New-Item is; in text of another dialect it is not read, as
 // in newItemCallsMayMakeLink.
 func newItemTextMayMakeLink(command string, powerShell bool) bool {
-	spellings := newItemText.FindAllStringIndex(command, -1)
+	spellings := newItemTextIndexes(command)
 	if powerShell {
 		spellings = newItemSpellingIndexes(command)
 	}
@@ -175,8 +236,8 @@ func newItemTextWords(rest string) (words []string, closed bool) {
 // read call (the text is not PowerShell, or the spelling is in a string or a
 // script block); powerShell is text that reads as PowerShell.
 func newItemCallsMayMakeLink(command string) (mayMakeLink, unread, powerShell bool) {
-	spellings := len(newItemText.FindAllStringIndex(command, -1))
-	aliases := len(newItemAliasText.FindAllStringIndex(command, -1))
+	spellings := len(newItemTextIndexes(command))
+	aliases := len(newItemAliasIndexes(command))
 	if spellings == 0 && aliases == 0 {
 		return false, false, false
 	}
@@ -570,7 +631,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 				return true
 			}
 			if program == "xargs" {
-				if len(literalPipelineOperands(file, called, cwd, home, depth)) == 0 &&
+				if (len(literalPipelineOperands(file, called, cwd, home, depth)) == 0 || xargsPerlChild(words)) &&
 					unprovenWriter.MatchString(command) {
 					set("dynamic-argument", true)
 				}
@@ -1531,8 +1592,9 @@ var (
 
 // pythonStringWriterText reports writer call text outside executable code.
 func pythonStringWriterText(code string) bool {
+	python := newPythonCodeScanner(code)
 	for _, location := range unprovenWriter.FindAllStringIndex(code, -1) {
-		if !pythonExecutableCodePosition(code, location[0]) {
+		if !python.at(location[0]) {
 			return true
 		}
 	}
@@ -1666,9 +1728,10 @@ func unprovenInterpreterCode(code, language, cwd, home string, maskInert bool) (
 		// run writer text that otherwise looks like inert Python data.
 		return "interpreter-path", true
 	}
+	python := newPythonCodeScanner(code)
 	if language == "python" || strings.HasPrefix(language, "python3") {
 		for _, location := range literalCopyCall.FindAllStringIndex(scan, -1) {
-			if scan != code && !pythonExecutableCodePosition(code, location[0]) {
+			if scan != code && !python.at(location[0]) {
 				continue
 			}
 			api := strings.TrimSuffix(code[location[0]:location[1]], "(")
@@ -1721,7 +1784,7 @@ func unprovenInterpreterCode(code, language, cwd, home string, maskInert bool) (
 	}
 	for _, location := range unprovenWriter.FindAllStringIndex(scan, -1) {
 		if (language == "python" || strings.HasPrefix(language, "python3")) &&
-			scan != code && !pythonExecutableCodePosition(code, location[0]) {
+			scan != code && !python.at(location[0]) {
 			continue
 		}
 		call, ok := literalBoundedCall(code, location[1]-1)

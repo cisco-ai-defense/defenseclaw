@@ -38,6 +38,33 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- end -}}
 
+{{/* The skill scanner sidecar's image (gateway.skillScanner.image). */}}
+{{- define "dc.scannerImage" -}}
+{{- $img := .Values.gateway.skillScanner.image -}}
+{{- if $img.digest -}}
+{{- if not (regexMatch "^sha256:[a-f0-9]{64}$" $img.digest) -}}
+{{- fail "gateway.skillScanner.image.digest must be sha256:<64 hex>" -}}
+{{- end -}}
+{{ $img.repository }}@{{ $img.digest }}
+{{- else -}}
+{{ $img.repository }}:{{ $img.tag | default .Chart.AppVersion }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The skill scanner sidecar's uid and gid: the gateway's, from
+podSecurityContext (GAP-0876). The jobs folder (0700) and the worker's
+socket (0600) belong to the one user both containers run as; a sidecar of
+another user could not read the gateway's jobs, and scanning would be off.
+*/}}
+{{- define "dc.scannerUser" -}}
+{{- $id := index .Values.podSecurityContext .field -}}
+{{- if or (not $id) (eq (int64 $id) 0) -}}
+{{- fail (printf "gateway.skillScanner needs podSecurityContext.%s set to a non-root id: the scanner sidecar runs as the gateway's user" .field) -}}
+{{- end -}}
+{{ int64 $id }}
+{{- end -}}
+
 {{/* The pod-identity SPIFFE ID of a component's ServiceAccount. */}}
 {{- define "dc.spiffe" -}}spiffe://cluster.local/ns/{{ .ctx.Release.Namespace }}/sa/defenseclaw-{{ .component }}{{- end -}}
 
@@ -92,6 +119,15 @@ name this release's Services and the Substrate API filled in.
 {{- $cfg := deepCopy .Values.config -}}
 {{- $sub := get $cfg "substrate" | default dict -}}
 {{- $_ := set $sub "enabled" (ternary true $sub.enabled (not (hasKey $sub "enabled"))) -}}
+{{- /* No scanner sidecar: the gateway does not scan skills (B5.4), so the
+fail mode decides (managed installs refuse new skills). */ -}}
+{{- if not .Values.gateway.skillScanner.enabled -}}
+{{- $sk := get $sub "skills" | default dict -}}
+{{- $sc := get $sk "scan" | default dict -}}
+{{- $_ := set $sc "enabled" false -}}
+{{- $_ := set $sk "scan" $sc -}}
+{{- $_ := set $sub "skills" $sk -}}
+{{- end -}}
 {{- if not (hasKey $sub "services") -}}
 {{- $_ := set $sub "services" (dict "actor" (include "dc.actorHost" .) "admin" (include "dc.adminHost" .)) -}}
 {{- end -}}
@@ -117,6 +153,21 @@ unless config names a file. */ -}}
 {{- if and .Values.bundles.enabled (not (hasKey $sub "bundles")) -}}
 {{- $_ := set $sub "bundles" (dict "enabled" true "anchors_file" "/etc/defenseclaw-substrate/bundle-anchors/bundle-anchors.json" "inbox" .Values.bundles.inbox) -}}
 {{- end -}}
+{{- /* OCI bundle source (GAP-0437, Preview): the chart values render
+substrate.bundles.oci unless config sets it. The mounts below give the
+credentials and CA paths. */ -}}
+{{- if and .Values.bundles.enabled .Values.bundles.oci.enabled -}}
+{{- $b := get $sub "bundles" | default dict -}}
+{{- if not (hasKey $b "oci") -}}
+{{- $o := dict "enabled" true "stages" .Values.bundles.oci.stages -}}
+{{- if .Values.bundles.oci.timeout }}{{ $_ := set $o "timeout" .Values.bundles.oci.timeout }}{{ end -}}
+{{- if .Values.bundles.oci.authHosts }}{{ $_ := set $o "auth_hosts" .Values.bundles.oci.authHosts }}{{ end -}}
+{{- if .Values.bundles.oci.credentialsSecret }}{{ $_ := set $o "credentials_file" (include "dc.bundleOCIAuthFile" .) }}{{ end -}}
+{{- if or .Values.bundles.oci.ca.configMap .Values.bundles.oci.ca.secret }}{{ $_ := set $o "ca_file" (include "dc.bundleOCICAFile" .) }}{{ end -}}
+{{- $_ := set $b "oci" $o -}}
+{{- $_ := set $sub "bundles" $b -}}
+{{- end -}}
+{{- end -}}
 {{- /* The actor token key set (GAP-0194): chart values fill
 identity.keys_url and keys_ca_file unless config sets them. */ -}}
 {{- $keys := .Values.substrate.actorKeys | default dict -}}
@@ -126,6 +177,18 @@ identity.keys_url and keys_ca_file unless config sets them. */ -}}
 {{- if and $keys.caConfigMap (not (hasKey $id "keys_ca_file")) }}{{ $_ := set $id "keys_ca_file" "/etc/defenseclaw-substrate/actor-keys-ca/ca.crt" }}{{ end -}}
 {{- $_ := set $sub "identity" $id -}}
 {{- end -}}
+{{- /* Dedicated values for substrate.launcher, files and git. Each fills
+its config key unless config.substrate sets it: config stays the single
+source and wins. An unset value adds nothing; false is a value. */ -}}
+{{- $cv := .Values.substrate -}}
+{{- range $sect, $keys := dict "launcher" (dict "keyReplay" "key_replay") "files" (dict "push" "push" "sync" "sync") "git" (dict "httpsRewrite" "https_rewrite" "submodules" "submodules" "lfs" "lfs" "pushBranch" "push_branch") -}}
+{{- $have := get $cv $sect | default dict -}}
+{{- $target := get $sub $sect | default dict -}}
+{{- range $v, $k := $keys -}}
+{{- if and (hasKey $have $v) (not (hasKey $target $k)) }}{{ $_ := set $target $k (get $have $v) }}{{ end -}}
+{{- end -}}
+{{- if $target }}{{ $_ := set $sub $sect $target }}{{ end -}}
+{{- end -}}
 {{- $_ := set $cfg "substrate" $sub -}}
 {{- /* GAP-0426: redact before the gateway keeps or sends a record. The
 chart's profile is the observability default unless config names one. */ -}}
@@ -134,6 +197,19 @@ chart's profile is the observability default unless config names one. */ -}}
 {{- $obs := get $cfg "observability" | default dict -}}
 {{- $_ := set $obsDefaults "redaction_profile" .Values.observability.redactionProfile -}}
 {{- $_ := set $obs "defaults" $obsDefaults -}}
+{{- $_ := set $cfg "observability" $obs -}}
+{{- end -}}
+{{- /* Cost for budgets and usage: the gateway prices a call from
+observability.pricing and counts nothing without tokenomics, so the chart turns
+tokenomics on and seeds the reviewed price table unless config sets them. */ -}}
+{{- if .Values.observability.tokenomics.enabled -}}
+{{- $obs := get $cfg "observability" | default dict -}}
+{{- $tok := get $obs "tokenomics" | default dict -}}
+{{- if not (hasKey $tok "enabled") }}{{ $_ := set $tok "enabled" true }}{{ end -}}
+{{- $_ := set $obs "tokenomics" $tok -}}
+{{- if and .Values.observability.tokenomics.defaultPricing (not (hasKey $obs "pricing")) -}}
+{{- $_ := set $obs "pricing" (omit (.Files.Get "files/default-pricing.json" | fromJson) "_comment" "_sources") -}}
+{{- end -}}
 {{- $_ := set $cfg "observability" $obs -}}
 {{- end -}}
 {{- /* The local collector (observability.local.enabled) is the try-out
@@ -198,13 +274,14 @@ would never start.
 */}}
 {{/* "true" when the release runs in managed_enterprise (GAP-0135). */}}
 {{/* The gateway's Kubernetes sign-in is on (internal/cli substrateKubeSignIn):
-no substrate.identity.oidc.issuer, not a managed install, and not turned
-off with --no-kube-sign-in in custom gateway args. The flag is a Go bool:
+no substrate.identity.oidc.issuer, not a managed install, not turned off by
+substrate.identity.kube_sign_in false, and not turned off with
+--no-kube-sign-in in custom gateway args. The flag is a Go bool:
 --no-kube-sign-in and --no-kube-sign-in=<true value> turn it off, =false
 keeps it on, and the last one wins, as the gateway parses it. */}}
 {{- define "dc.kubeSignIn" -}}
 {{- $issuer := dig "substrate" "identity" "oidc" "issuer" "" (.Values.config | default dict) -}}
-{{- $off := false -}}
+{{- $off := eq (toString (dig "substrate" "identity" "kube_sign_in" "" (.Values.config | default dict))) "false" -}}
 {{- range (.Values.gateway.args | default list) -}}
 {{- $a := toString . -}}
 {{- if eq $a "--no-kube-sign-in" -}}
@@ -393,6 +470,31 @@ initContainers:
     secretName: {{ .ctx.Values.bundles.anchorsSecret }}
     defaultMode: 0444
 {{- end }}
+{{- if and .ctx.Values.bundles.enabled (eq .component "controller") }}
+{{- if .ctx.Values.bundles.oci.credentialsSecret }}
+- name: bundle-oci-auth
+  secret:
+    secretName: {{ .ctx.Values.bundles.oci.credentialsSecret }}
+    defaultMode: 0440
+    items:
+    - {key: .dockerconfigjson, path: config.json}
+{{- end }}
+{{- if .ctx.Values.bundles.oci.ca.configMap }}
+- name: bundle-oci-ca
+  configMap:
+    name: {{ .ctx.Values.bundles.oci.ca.configMap }}
+    defaultMode: 0444
+    items:
+    - {key: {{ .ctx.Values.bundles.oci.ca.key | quote }}, path: ca.crt}
+{{- else if .ctx.Values.bundles.oci.ca.secret }}
+- name: bundle-oci-ca
+  secret:
+    secretName: {{ .ctx.Values.bundles.oci.ca.secret }}
+    defaultMode: 0444
+    items:
+    - {key: {{ .ctx.Values.bundles.oci.ca.key | quote }}, path: ca.crt}
+{{- end }}
+{{- end }}
 {{- end -}}
 
 {{- define "dc.volumeMounts" -}}
@@ -436,6 +538,18 @@ initContainers:
   mountPath: /etc/defenseclaw-substrate/bundle-anchors
   readOnly: true
 {{- end }}
+{{- if and .ctx.Values.bundles.enabled (eq .component "controller") }}
+{{- if .ctx.Values.bundles.oci.credentialsSecret }}
+- name: bundle-oci-auth
+  mountPath: /etc/defenseclaw-substrate/bundle-oci-auth
+  readOnly: true
+{{- end }}
+{{- if or .ctx.Values.bundles.oci.ca.configMap .ctx.Values.bundles.oci.ca.secret }}
+- name: bundle-oci-ca
+  mountPath: /etc/defenseclaw-substrate/bundle-oci-ca
+  readOnly: true
+{{- end }}
+{{- end }}
 {{- end -}}
 
 {{- define "dc.env" -}}
@@ -476,9 +590,12 @@ checksum/config: {{ include "dc.config" .ctx | sha256sum }}
 {{- end -}}
 
 {{/* Leader RPC mTLS: the pod-identity bundle and the SPIFFE IDs that may call the leader (A2 serve flags). */}}
-{{/* Leader peers: gateway replicas may call every method; the callout
- only the egress chain check and the controller only registrations,
- lifecycle and activity (leader.Permissions, GAP-0094). */}}
+{{/* Leader peers: gateway replicas may call every method but the
+ controller's publish of its egress callout read (leader.NamedOnly,
+ GAP-0553); the callout only the egress chain check, the name lookup of a
+ registration and its egress decisions for the telemetry relay; the controller
+ only registrations, lifecycle, activity and that publish
+ (leader.Permissions, GAP-0094, GAP-0505). */}}
 {{- define "dc.peerFlags" -}}
 - --peer-bundle=/var/run/ate/credential-bundle.pem
 - --peer-trust=/var/run/ate/podidentity-ca.crt
@@ -517,6 +634,9 @@ the leader. */}}
 - name: relay-session
   mountPath: /var/run/secrets/defenseclaw-relay-session
   readOnly: true
+- name: relay-ca
+  mountPath: /var/run/secrets/defenseclaw-relay-ca
+  readOnly: true
 - name: llm-credentials
   mountPath: /var/run/secrets/defenseclaw-llm
   readOnly: true
@@ -538,6 +658,11 @@ the leader. */}}
 - name: relay-session
   secret:
     secretName: {{ .Values.gateway.relaySessionSecret }}
+    optional: true
+    defaultMode: 0440
+- name: relay-ca
+  secret:
+    secretName: {{ .Values.gateway.relayCASecret }}
     optional: true
     defaultMode: 0440
 - name: llm-credentials
@@ -600,6 +725,10 @@ kubernetes.io/dockerconfigjson Secret): mounted read-only in the controller
 and the gateway, the two readers of attestations (GAP-0190). The file is
 re-read when the Secret changes.
 */}}
+{{/* The OCI bundle source's mounted files (bundles.oci), controller only. */}}
+{{- define "dc.bundleOCIAuthFile" -}}/etc/defenseclaw-substrate/bundle-oci-auth/config.json{{- end -}}
+{{- define "dc.bundleOCICAFile" -}}/etc/defenseclaw-substrate/bundle-oci-ca/ca.crt{{- end -}}
+
 {{- define "dc.templateRegistryFile" -}}/etc/defenseclaw/substrate/registry-auth/config.json{{- end -}}
 
 {{- define "dc.templateRegistryMount" -}}
@@ -647,4 +776,18 @@ certificates.
 {{- end }}
 - --relay-port={{ $r.relayPort }}
 {{- end -}}
+{{- end -}}
+
+{{/* The self-service secrets namespace (config.substrate.self_service_secrets.namespace),
+or "" when self_service_secrets.mode is off. */}}
+{{- define "dc.userSecretsNs" -}}
+{{- $ss := dig "substrate" "self_service_secrets" dict (.Values.config | default dict) -}}
+{{- if ne (toString (dig "mode" "bindings" $ss)) "off" -}}
+{{- dig "namespace" "defenseclaw-user-secrets" $ss -}}
+{{- end -}}
+{{- end -}}
+
+{{/* The self-service secrets namespace whatever the mode (the hooks revoke its grants when off). */}}
+{{- define "dc.userSecretsNsName" -}}
+{{- dig "substrate" "self_service_secrets" "namespace" "defenseclaw-user-secrets" (.Values.config | default dict) -}}
 {{- end -}}

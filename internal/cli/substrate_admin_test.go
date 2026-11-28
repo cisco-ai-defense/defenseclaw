@@ -57,6 +57,14 @@ type subAdminFake struct {
 	statusBody   string
 	// actorsBody is the list answer (default: one agent, a1/n1).
 	actorsBody string
+	// infoBody is the /info answer ("" answers 404, an older gateway).
+	infoBody string
+	// actorsReason is the reason of a refused list (default token_invalid).
+	actorsReason string
+	// doctorStatus and doctorBody are the gateway doctor's answer (default:
+	// 200 with a passing substrate.signin_revocation row).
+	doctorStatus int
+	doctorBody   string
 
 	bundleBody     []byte
 	bundleQuery    url.Values
@@ -82,7 +90,11 @@ func newSubAdminFake(t *testing.T) *subAdminFake {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/substrate/actors", func(w http.ResponseWriter, r *http.Request) {
 		if f.actorsStatus != 200 {
-			writeJSONStatus(w, f.actorsStatus, `{"error":"x","reason":"token_invalid"}`)
+			reason := f.actorsReason
+			if reason == "" {
+				reason = "token_invalid"
+			}
+			writeJSONStatus(w, f.actorsStatus, `{"error":"x","reason":"`+reason+`"}`)
 			return
 		}
 		body := f.actorsBody
@@ -124,6 +136,23 @@ func newSubAdminFake(t *testing.T) *subAdminFake {
 			return
 		}
 		writeJSONStatus(w, 200, f.statusBody)
+	})
+	mux.HandleFunc("/api/v1/substrate/info", func(w http.ResponseWriter, r *http.Request) {
+		if f.infoBody == "" {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSONStatus(w, 200, f.infoBody)
+	})
+	mux.HandleFunc("/api/v1/substrate/doctor", func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case f.doctorStatus != 0 && f.doctorStatus != 200:
+			writeJSONStatus(w, f.doctorStatus, `{"error":"x","reason":"`+f.doctorBody+`"}`)
+		case f.doctorBody != "":
+			writeJSONStatus(w, 200, f.doctorBody)
+		default:
+			writeJSONStatus(w, 200, `{"checks":[{"id":"substrate.signin_revocation","status":"pass","detail":"on: 0 person-wide end(s) active, list read 2s ago"}]}`)
+		}
 	})
 	mux.HandleFunc("/realms/x/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, 200, `{"issuer":"`+f.issuerAnswer+`"}`)
@@ -214,13 +243,13 @@ func TestSubstrate_Admin_Doctor(t *testing.T) {
 			// The cluster checks read the cluster with kubectl only.
 			name:    "--cluster without the install file says what is missing",
 			args:    []string{"--cluster"},
-			want:    []string{"skip  cluster", "give --install-file FILE", "ready for agents"},
+			want:    []string{"skip  cluster", "give --install-file FILE", "cluster components were not checked"},
 			notWant: []string{"cluster.issuer"},
 		},
 		{
 			name:   "warnings do not block",
 			mutate: func(f *subAdminFake, c *auth.Context) { f.attachStatus = 501 },
-			want:   []string{"warn  attach", "does not offer attach", "to fix:", "ready for agents"},
+			want:   []string{"warn  attach", "does not offer attach", "to fix:", "cluster components were not checked"},
 		},
 		{
 			name:     "not signed in to the cluster",
@@ -268,7 +297,7 @@ func TestSubstrate_Admin_Doctor(t *testing.T) {
 		{
 			name:   "attach is not allowed for that agent",
 			mutate: func(f *subAdminFake, c *auth.Context) { f.attachStatus = 403 },
-			want:   []string{"warn  attach", "would not let you reach a1/n1", "ready for agents"},
+			want:   []string{"warn  attach", "would not let you reach a1/n1", "cluster components were not checked"},
 		},
 		{
 			name:     "token store unusable",
@@ -311,11 +340,13 @@ func TestSubstrate_Admin_Doctor(t *testing.T) {
 				}
 			}
 			trimmed := strings.TrimSpace(out)
-			if tc.wantExit == 0 && !strings.HasSuffix(trimmed, "ready for agents") {
-				t.Errorf("the last line is not 'ready for agents':\n%s", out)
+			// Without --install-file doctor has not read the cluster's
+			// components, so it never says "ready for agents" (GAP-0593).
+			if tc.wantExit == 0 && !strings.HasSuffix(trimmed, "the cluster components were not checked (an administrator runs defenseclaw substrate doctor --install-file FILE)") {
+				t.Errorf("the last line does not say what was checked:\n%s", out)
 			}
-			if tc.wantExit != 0 && strings.Contains(out, "ready for agents") {
-				t.Errorf("a failed doctor says it is ready:\n%s", out)
+			if strings.Contains(out, "ready for agents") {
+				t.Errorf("a doctor without --install-file says it is ready for agents:\n%s", out)
 			}
 			if strings.Contains(out, "test-bearer") {
 				t.Errorf("the token is in the output:\n%s", out)
@@ -580,5 +611,67 @@ func TestDoctorConvertFleetNamesTheFix(t *testing.T) {
 		!strings.Contains(rows[0].Fix, "turn on encryption and block public access") || rows[1].Status != doctorWarn ||
 		rows[1].Fix == "" || rows[2].Status != doctorOK || rows[2].Fix != "" {
 		t.Fatalf("rows = %+v", rows)
+	}
+}
+
+// GAP-0593, GAP-0608: doctor --install-file exits 1 and names the
+// component when one of the four has no ready pod: not ready, scaled to 0
+// (the J46 shape: desired 0), not deployed, or none in the namespace. With
+// every component up the row is ok.
+func TestSubstrate_Admin_Doctor_ComponentsDown(t *testing.T) {
+	const (
+		gw     = `{"metadata":{"name":"defenseclaw-gateway"},"spec":{"replicas":2},"status":{"readyReplicas":2}}`
+		leader = `{"metadata":{"name":"defenseclaw-gateway-leader"},"spec":{"replicas":1},"status":{"readyReplicas":1}}`
+		ctrl   = `{"metadata":{"name":"defenseclaw-controller"},"spec":{"replicas":1},"status":{"readyReplicas":1}}`
+		callUp = `{"metadata":{"name":"defenseclaw-callout"},"spec":{"replicas":2},"status":{"readyReplicas":2}}`
+	)
+	for _, tc := range []struct {
+		name  string
+		items []string
+		want  []string // nil: the row is ok
+	}{
+		{"callout not ready", []string{gw, leader, ctrl, `{"metadata":{"name":"defenseclaw-callout"},"spec":{"replicas":2},"status":{}}`},
+			[]string{"callout has 0 of 2 pods ready"}},
+		{"callout scaled to 0", []string{gw, leader, ctrl, `{"metadata":{"name":"defenseclaw-callout"},"spec":{"replicas":0},"status":{}}`},
+			[]string{"callout has no pod (scaled to 0 or not deployed)"}},
+		{"callout not deployed", []string{gw, leader, ctrl},
+			[]string{"callout has no pod (scaled to 0 or not deployed)"}},
+		{"none of the four", nil,
+			[]string{"gateway has no pod", "leader has no pod", "controller has no pod", "callout has no pod"}},
+		{"all up", []string{gw, leader, ctrl, callUp}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSubAdminFake(t)
+			c := f.context()
+			subAdminSeams(t, func() (*substrateSession, error) { return f.session(t, c), nil }, nil)
+			fakeKubectl(t, nil)
+			base := substrateKubectl
+			t.Cleanup(func() { substrateKubectl = base })
+			loads := `{"items":[` + strings.Join(tc.items, ",") + `]}`
+			substrateKubectl = func(ctx context.Context, kf *substrateClusterFlags, args ...string) ([]byte, error) {
+				if strings.HasPrefix(strings.Join(args, " "), "get deployments,statefulsets -n defenseclaw-system") {
+					return []byte(loads), nil
+				}
+				return base(ctx, kf, args...)
+			}
+			out, _, err := runSubAdmin(newSubstrateDoctorCmd(), "--install-file", writeInstall(t, fleetInstallOK))
+			if tc.want == nil {
+				if !strings.Contains(out, "ok    cluster.components ") || !strings.Contains(out, "ready pods: gateway 2/2, leader 1/1, controller 1/1, callout 2/2") {
+					t.Errorf("components row not ok:\n%s", out)
+				}
+				return
+			}
+			if got := cliusage.ExitCode(err); err == nil || got != 1 {
+				t.Fatalf("exit %d (err %v), want 1\n%s", got, err, out)
+			}
+			for _, w := range append([]string{"fail  cluster.components", "cluster.components: kubectl -n defenseclaw-system"}, tc.want...) {
+				if !strings.Contains(out, w) {
+					t.Errorf("output lacks %q:\n%s", w, out)
+				}
+			}
+			if strings.Contains(out, "ready for agents") {
+				t.Errorf("a doctor with a component down says it is ready:\n%s", out)
+			}
+		})
 	}
 }

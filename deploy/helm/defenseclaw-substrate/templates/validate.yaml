@@ -6,6 +6,12 @@
 {{- if and (has $mode (list "managed" "managed_enterprise" "managed-enterprise")) (eq $fail "open") -}}
 {{- fail "config.substrate.extproc.failure_mode open is not allowed with deployment_mode managed_enterprise: the callout always fails closed there" -}}
 {{- end -}}
+{{- /* Budgets on a cluster are counted by the leader (substrate.usage). The
+fleet budget store is for managed devices: a replica that wrote its own store
+file would count a pod's spend and lose it on restart. */ -}}
+{{- if dig "routing" "admin" "budget_store" nil $cfg -}}
+{{- fail "config.routing.admin.budget_store is not used on a cluster: the leader counts budgets (substrate.usage); remove it" -}}
+{{- end -}}
 {{- /* The chain egress action is one config key the gateway and the leader
 read. A pre-release build had a gateway flag for it, which never reached the
 leader; the flag is gone, and setting it here is a clear error (GAP-0250). */ -}}
@@ -24,6 +30,19 @@ leader; the flag is gone, and setting it here is a clear error (GAP-0250). */ -}
 {{- if eq .Values.substrate.credentialProvider.secretsNamespace .Values.substrate.namespace -}}
 {{- fail "substrate.credentialProvider.secretsNamespace must not be the Substrate namespace" -}}
 {{- end -}}
+{{- $userNs := include "dc.userSecretsNsName" . -}}
+{{- if or (eq $userNs .Release.Namespace) (eq $userNs .Values.substrate.namespace) -}}
+{{- fail "config.substrate.self_service_secrets.namespace must not be the release or Substrate namespace: the credential provider would hand those Secrets to actors" -}}
+{{- end -}}
+{{- if has $userNs (list "default" "kube-system" "kube-public" "kube-node-lease") -}}
+{{- fail "config.substrate.self_service_secrets.namespace must not be a Kubernetes system namespace: the gateway could read and change every Secret there" -}}
+{{- end -}}
+{{- if has $userNs (include "dc.writableAtespaces" . | fromJsonArray) -}}
+{{- fail "config.substrate.self_service_secrets.namespace must not be a launcher or managed atespace: the gateway could read and change every Secret in a namespace where actors run" -}}
+{{- end -}}
+{{- if eq $userNs .Values.substrate.credentialProvider.secretsNamespace -}}
+{{- fail "config.substrate.self_service_secrets.namespace must not be substrate.credentialProvider.secretsNamespace: people's values and the admin secrets need separate namespaces" -}}
+{{- end -}}
 {{- if has $mode (list "managed" "managed_enterprise" "managed-enterprise") -}}
 {{- if eq (toString (dig "require_attested_templates" true $sub)) "false" -}}
 {{- fail "config.substrate.require_attested_templates false is not allowed with deployment_mode managed_enterprise" -}}
@@ -33,6 +52,31 @@ leader; the flag is gone, and setting it here is a clear error (GAP-0250). */ -}
 {{- end -}}
 {{- end -}}
 
+{{- /* The OCI bundle source (Preview): the chart values need bundle mode, a
+stage and at most one CA source, and the mounts need bundle mode. */ -}}
+{{- $oci := .Values.bundles.oci -}}
+{{- if and $oci.enabled (not .Values.bundles.enabled) -}}
+{{- fail "bundles.oci.enabled needs bundles.enabled=true (the signed bundle store and the anchors Secret)" -}}
+{{- end -}}
+{{- if and $oci.enabled (not $oci.stages) (not (dig "bundles" "oci" "" $sub)) -}}
+{{- fail "bundles.oci.enabled needs bundles.oci.stages (a stage and a ref by digest), or config.substrate.bundles.oci" -}}
+{{- end -}}
+{{- if and (or $oci.credentialsSecret $oci.ca.configMap $oci.ca.secret) (not .Values.bundles.enabled) -}}
+{{- fail "bundles.oci.credentialsSecret and bundles.oci.ca need bundles.enabled=true" -}}
+{{- end -}}
+{{- if $oci.timeout -}}
+{{- /* The schema allows N[.N]s or N[.N]m; the controller refuses a pull
+timeout outside 5s to 2m, so the chart does too. */ -}}
+{{- $t := toString $oci.timeout -}}
+{{- $n := float64 (regexFind "^[0-9]+(\\.[0-9]+)?" $t) -}}
+{{- $secs := ternary (mulf $n 60.0) $n (hasSuffix "m" $t) -}}
+{{- if or (lt $secs 5.0) (gt $secs 120.0) -}}
+{{- fail (printf "bundles.oci.timeout %q must be a duration from 5s to 2m" $t) -}}
+{{- end -}}
+{{- end -}}
+{{- if and $oci.ca.configMap $oci.ca.secret -}}
+{{- fail "bundles.oci.ca: set configMap or secret, not both" -}}
+{{- end -}}
 {{- range (dig "secrets" list $sub) -}}
 {{- $src := toString (.source | default "") -}}
 {{- if hasPrefix "ate-secret://k8s.io/" $src -}}
@@ -43,8 +87,9 @@ leader; the flag is gone, and setting it here is a clear error (GAP-0250). */ -}
 {{- end -}}
 {{- end -}}
 {{- /* GAP-0402: the volume of the local audit store (the managed data volume,
-else the home volume) holds the store's size cap twice over (retention never
-deletes the last hour) plus 256 MiB, the audit write-ahead log's flood
+else the home volume) holds the store's size cap twice over (a capped pass starts
+at nine tenths of the cap, a 30-second check lets in about 40 MiB at 50 hook
+posts a second, and the file keeps its freed pages) plus 256 MiB, the audit write-ahead log's flood
 ceiling. A 256 MiB volume filled under about 15 actors, and every hook then
 failed closed. */ -}}
 {{- $capMB := int (dig "observability" "local" "max_store_mb" 0 $cfg) -}}
@@ -62,10 +107,14 @@ pages count against the memory limit of the container that writes them, so
 the store would grow into an OOM kill (and the tmpfs outlives the restart: a
 crash loop) instead of a full store. Every pod that mounts it (gateway,
 leader, controller, callout) needs a memory limit that holds the whole
-volume plus the process: limits.memory >= homeSizeLimit + requests.memory,
-the container's own declared need being the process headroom. The managed
-data volume is always a disk volume. */ -}}
+volume plus the process: limits.memory >= homeSizeLimit + headroom. The
+headroom is the container's own requests.memory, but never less than the
+chart's default request of that pod, the process's measured need: a tiny
+request must not pass with a limit that cannot hold the process and a full
+tmpfs (substrate-1:GAP-0578 f). The managed data volume is always a disk
+volume. */ -}}
 {{- if and (empty (include "dc.managed" .)) (empty (include "dc.homeOnDisk" .)) -}}
+{{- $floors := dict "gateway" 256 "leader" 512 "controller" 128 "callout" 128 -}}
 {{- range $pod := list "gateway" "leader" "controller" "callout" -}}
 {{- $res := (index $.Values $pod).resources | default dict -}}
 {{- $lim := toString (dig "limits" "memory" "" $res) -}}
@@ -75,10 +124,12 @@ data volume is always a disk volume. */ -}}
 {{- end -}}
 {{- $limMB := atoi (include "dc.mib" (list $lim (printf "%s.resources.limits.memory" $pod) "down")) -}}
 {{- $reqMB := atoi (include "dc.mib" (list $req (printf "%s.resources.requests.memory" $pod) "up")) -}}
-{{- if lt $limMB (add $sizeMB $reqMB) -}}
-{{- $fitCap := div (sub (sub $limMB $reqMB) 256) 2 -}}
-{{- $fit := ternary (printf ", or lower homeSizeLimit to at most %dMi with config.observability.local.max_store_mb at most %d" (sub $limMB $reqMB) $fitCap) "" (ge $fitCap 64) -}}
-{{- fail (printf "%s.resources.limits.memory %s is too small for homeMedium Memory with homeSizeLimit %s: a memory home volume counts against the container's memory limit, so the limit must be at least %dMi (homeSizeLimit plus %s.resources.requests.memory %s for the process), or the audit store grows into an OOM kill instead of a full store (GAP-0537). Raise %s.resources.limits.memory to %dMi%s, or use the disk volume (homeMedium \"\")" $pod $lim $size (add $sizeMB $reqMB) $pod $req $pod (add $sizeMB $reqMB) $fit) -}}
+{{- $floorMB := index $floors $pod -}}
+{{- $headMB := max $reqMB $floorMB | int -}}
+{{- if lt $limMB (add $sizeMB $headMB) -}}
+{{- $fitCap := div (sub (sub $limMB $headMB) 256) 2 -}}
+{{- $fit := ternary (printf ", or lower homeSizeLimit to at most %dMi with config.observability.local.max_store_mb at most %d" (sub $limMB $headMB) $fitCap) "" (ge $fitCap 64) -}}
+{{- fail (printf "%s.resources.limits.memory %s is too small for homeMedium Memory with homeSizeLimit %s: a memory home volume counts against the container's memory limit, so the limit must be at least %dMi (homeSizeLimit plus %dMi for the process: %s.resources.requests.memory %s, and never less than the chart default %dMi), or the audit store grows into an OOM kill instead of a full store (GAP-0537). Raise %s.resources.limits.memory to %dMi%s, or use the disk volume (homeMedium \"\")" $pod $lim $size (add $sizeMB $headMB) $headMB $pod $req $floorMB $pod (add $sizeMB $headMB) $fit) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

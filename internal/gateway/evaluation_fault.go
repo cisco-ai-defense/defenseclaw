@@ -29,6 +29,11 @@ var evaluatorFaults atomic.Int64
 // evaluation fail. Production never sets it.
 var trustedActionFaultHook func(trustedActionRequest)
 
+// trustedToolLaneFaultHook is a test-only seam: when non-nil it runs at the
+// start of every trustedToolCallLaneFindings, after the dispatch and outside
+// its recovery, so a test can make a lane fail. Production never sets it.
+var trustedToolLaneFaultHook func(trustedActionRequest)
+
 // acpEvaluateFaultHook is a test-only seam: when non-nil it runs at the start
 // of every ACP frame evaluation (handleACPEvaluate), inside its recovery, so
 // a route test can make it fail. Production never sets it.
@@ -48,7 +53,7 @@ const evaluatorFaultTitle = "The command could not be checked safely (internal e
 func evaluationFaultFindings(title string, enforcementCapable bool) []RuleFinding {
 	finding := RuleFinding{
 		RuleID: parseFailureRuleID, Title: title, Severity: "CRITICAL", Confidence: 1,
-		enforcement: findingEnforcementAllowed, evaluationFault: true,
+		evaluationFault: true,
 	}.withTrustedActionProof(newEvaluationFailureFindingProof(parseFailureRuleID))
 	return applyTrustedActionProofBoundary([]RuleFinding{finding}, enforcementCapable)
 }
@@ -56,10 +61,17 @@ func evaluationFaultFindings(title string, enforcementCapable bool) []RuleFindin
 // withParserFaultFinding puts the parser-fault finding first in findings
 // (its title is the call's reason) and keeps every other reader's finding.
 func withParserFaultFinding(findings []RuleFinding, enforcementCapable bool) []RuleFinding {
+	return withEvaluationFaultFinding(findings, parserFaultTitle, enforcementCapable)
+}
+
+// withEvaluationFaultFinding puts the evaluation-fault finding with title
+// first in findings and keeps every other reader's finding; findings that
+// already hold one are returned as they are.
+func withEvaluationFaultFinding(findings []RuleFinding, title string, enforcementCapable bool) []RuleFinding {
 	if slices.ContainsFunc(findings, func(finding RuleFinding) bool { return finding.evaluationFault }) {
 		return findings
 	}
-	return append(evaluationFaultFindings(parserFaultTitle, enforcementCapable), findings...)
+	return append(evaluationFaultFindings(title, enforcementCapable), findings...)
 }
 
 // hasEvaluationFault reports an enforceable evaluation-fault finding.

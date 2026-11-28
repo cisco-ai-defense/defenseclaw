@@ -22,15 +22,25 @@ import Foundation
 import Security
 
 extension GatewayAdminAgentConfigRepair {
-    /// Runs after a listed file passed its checks, before it is opened
-    /// (main.swift calls it in GATEWAY_ADMIN_HELPER_TESTING builds only).
+    /// Runs after a listed file passed its checks, before it is moved into
+    /// the holding folder (main.swift calls it in GATEWAY_ADMIN_HELPER_TESTING builds only).
     static var fileCheckedForTesting: ((String) -> Void)?
 }
 
 extension GatewayAdminOwnershipRepair {
-    /// Runs after a walked file passed its checks, before it is opened
-    /// (main.swift calls it in GATEWAY_ADMIN_HELPER_TESTING builds only).
+    /// Runs after a walked file passed its checks, before it is moved into
+    /// the holding folder (main.swift calls it in GATEWAY_ADMIN_HELPER_TESTING builds only).
     static var walkFileCheckedForTesting: ((String) -> Void)?
+}
+
+extension GatewayAdminHandover {
+    /// Runs after a file to hand over was opened, before its descriptor is
+    /// checked (main.swift calls it in GATEWAY_ADMIN_HELPER_TESTING builds
+    /// only), with the name the walk shows.
+    static var openedForTesting: ((String) -> Void)?
+    /// Runs right after a file was moved into the holding folder; true
+    /// stops the repair there, as if the helper died (GAP-1972).
+    static var movedForTesting: ((String) -> Bool)?
 }
 
 @main
@@ -57,6 +67,12 @@ private enum GatewayAdminHelperTests {
         }
         let account = try InvokingAccount(uid: getuid())
         let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+        // The holding folder's parent: a private folder of this account
+        // reached without a link (the helper's is /private/var/db).
+        let holdingParent = root.resolvingSymlinksInPath().appendingPathComponent("var-db", isDirectory: true)
+        try FileManager.default.createDirectory(at: holdingParent, withIntermediateDirectories: false,
+                                               attributes: [.posixPermissions: NSNumber(value: 0o700)])
+        GatewayAdminHandover.holdingParent = holdingParent.path
         let home = root.appendingPathComponent("home", isDirectory: true)
         let config = home.appendingPathComponent("config.yaml")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: false,
@@ -192,6 +208,8 @@ private enum GatewayAdminHelperTests {
         try testAgentConfigRepair(root: root, account: account)
         try testAgentConfigFolderRules(root: root)
         try testAgentConfigFileEdgeCases(root: root)
+        try testHardLinkUnlinkedAtOpen(root: root)
+        try testHeldFileRecovery(root: root)
         try testAgentConfigFolderWalkSwap(root: root)
         try testRepairOrder()
         try testRootProcessRecord(root: root)
@@ -335,6 +353,27 @@ private enum GatewayAdminHelperTests {
             home: installation.descriptor, from: getuid(), to: (getuid(), getgid()), maximumEntries: 2,
             change: { _, _ in 0 })
         check(bounded.incomplete, "A walk over its entry budget must report itself incomplete")
+        // GAP-2003: a walk past its deadline stops where it is and says to
+        // repair again, so the helper answers inside the app's reply budget;
+        // the next repair returns the rest.
+        let late = try GatewayAdminOwnershipRepair.restore(
+            home: installation.descriptor, from: getuid(), to: (getuid(), getgid()), until: ContinuousClock.now,
+            change: { _, relative in fatalError("A walk past its deadline changed \(relative)") })
+        check(late.unfinished && late.incomplete && late.restored.isEmpty,
+              "A walk past its deadline must stop before it changes anything and report itself unfinished")
+        check(late.summary.contains("repair again"), "An unfinished repair must say to repair again: \(late.summary)")
+        let resumed = try GatewayAdminOwnershipRepair.restore(
+            home: installation.descriptor, from: getuid(), to: (getuid(), getgid()),
+            until: ContinuousClock.now.advanced(by: .seconds(60)), change: { _, _ in 0 })
+        check(!resumed.unfinished && !resumed.incomplete && resumed.restored.count == changed.count,
+              "A walk inside its deadline returns everything: \(resumed.restored)")
+        let lateConfig = GatewayAdminAgentConfigRepair.restore(
+            home: installation.descriptor, from: getuid(), to: (getuid(), getgid()), paths: ["hooks/nested/state.json"],
+            until: ContinuousClock.now, change: { _, relative in fatalError("A late agent config walk changed \(relative)") })
+        check(lateConfig.restored.isEmpty, "An agent config repair past its deadline changes nothing")
+        check(GatewayAdminPolicy.repairWalkSeconds > 0
+              && GatewayAdminPolicy.repairWalkSeconds + 30 <= GatewayAdminPolicy.repairReplySeconds,
+              "The helper's walk deadline must leave the reply time inside the app's budget")
         let untouched = try GatewayAdminOwnershipRepair.restore(
             home: installation.descriptor, from: getuid() &+ 1, to: (getuid(), getgid()),
             change: { _, relative in fatalError("A file of another owner was changed: \(relative)") })
@@ -577,6 +616,254 @@ private enum GatewayAdminHelperTests {
         }
     }
 
+    /// GAP-1964: the race of testAgentConfigFolderWalkSwap at the exact
+    /// window, every time. A root file outside the account's folder (this
+    /// account stands in for root) has its only name in the folder when the
+    /// walk inspects it (one link), gets its outside name back before the
+    /// open, and the folder name is unlinked right after the open: the opened
+    /// file is that inode and reads one link again, yet it is the outside
+    /// file. Before the fix the walk handed it over (both the folder walk and
+    /// a listed file); now the file is held in the helper's own folder before
+    /// the descriptor check, so it reads two links and stays as it is.
+    private static func testHardLinkUnlinkedAtOpen(root: URL) throws {
+        let home = root.appendingPathComponent("open-window-home", isDirectory: true)
+        let outside = root.appendingPathComponent("open-window-outside", isDirectory: true)
+        try makeFolders(home, ["", ".claude", ".kiro", ".kiro/agents"])
+        try makeFolders(outside, [""])
+        try makeFile(home.appendingPathComponent(".kiro/agents/defenseclaw.json"))
+        let descriptor = try GatewayAdminAgentConfigRepair.openAccountHome(home.path, uid: getuid())
+        defer { close(descriptor) }
+        // (listed path, name in the folder, the label the walk shows, the
+        // account the files go to): a root-owned folder walked whole, then a
+        // listed file in the account's own folder.
+        let cases: [(String, String, String, uid_t)] = [
+            (".kiro/agents/defenseclaw.json", ".kiro/window.json", "window.json", getuid() &+ 1),
+            (".claude/settings.json", ".claude/settings.json", "~/.claude/settings.json", getuid()),
+        ]
+        for (path, inFolder, label, account) in cases {
+            let secret = outside.appendingPathComponent("system-file").path
+            let linked = home.appendingPathComponent(inFolder).path
+            try makeFile(URL(fileURLWithPath: secret))
+            var secretStatus = stat()
+            check(lstat(secret, &secretStatus) == 0, "Could not inspect the outside fixture")
+            check(rename(secret, linked) == 0, "Could not move the outside fixture into the folder")
+            var reachedCheck = false
+            var reachedOpen = false
+            GatewayAdminOwnershipRepair.walkFileCheckedForTesting = { relative in
+                guard relative == label else { return }
+                reachedCheck = true
+                guard link(linked, secret) == 0 else { fatalError("Could not give the outside file its name back") }
+            }
+            GatewayAdminAgentConfigRepair.fileCheckedForTesting = GatewayAdminOwnershipRepair.walkFileCheckedForTesting
+            GatewayAdminHandover.openedForTesting = { shown in
+                guard shown == label else { return }
+                reachedOpen = true
+                _ = unlink(linked)
+            }
+            var handed: [String] = []
+            let outcome = GatewayAdminAgentConfigRepair.restore(
+                home: descriptor, from: getuid(), to: (account, getgid()), paths: [path],
+                change: { file, shown in
+                    var status = stat()
+                    if fstat(file, &status) == 0, status.st_ino == secretStatus.st_ino, status.st_dev == secretStatus.st_dev {
+                        handed.append(shown)
+                    }
+                    return 0
+                })
+            GatewayAdminOwnershipRepair.walkFileCheckedForTesting = nil
+            GatewayAdminAgentConfigRepair.fileCheckedForTesting = nil
+            GatewayAdminHandover.openedForTesting = nil
+            check(reachedCheck && reachedOpen, "The repair must reach both ends of the open window for \(inFolder)")
+            check(handed.isEmpty, "A hard link unlinked right after the open handed a file outside the folder over: "
+                + "\(handed) \(outcome)")
+            check(outcome.skipped == ["~/" + inFolder],
+                  "The held file with a second name is reported and left as it is: \(outcome)")
+            var after = stat()
+            check(lstat(secret, &after) == 0 && after.st_ino == secretStatus.st_ino,
+                  "The outside file keeps its own name")
+            check(lstat(linked, &after) == 0 && after.st_ino == secretStatus.st_ino,
+                  "The folder name is moved back: \(inFolder)")
+            check(unlink(linked) == 0 && unlink(secret) == 0, "Could not remove the open-window fixture")
+            check(GatewayAdminDirectory.names(of: descriptor)?.contains { $0.hasPrefix(".defenseclaw-handover-") } == false,
+                  "The holding folder is removed after the repair")
+        }
+    }
+
+    /// GAP-1972, GAP-1973: a held file sits in no folder the account can
+    /// write (there the account could rename a leftover holding folder and
+    /// swap it in for a later one); a repair stopped right after the move, or
+    /// a file whose name and kept name were both taken, is returned by the
+    /// next repair; a file put back next to a new file at its name is reported
+    /// as returned there and the repair is complete. GATEWAY_ADMIN_HELD_CASE
+    /// runs one case (fail-before runs).
+    private static func testHeldFileRecovery(root: URL) throws {
+        let only = ProcessInfo.processInfo.environment["GATEWAY_ADMIN_HELD_CASE"]
+        func wanted(_ name: String) -> Bool { only == nil || only == name }
+        let home = root.appendingPathComponent("held-home", isDirectory: true)
+        try makeFolders(home, ["", ".claude"])
+        let listed = home.appendingPathComponent(".claude/settings.json").path
+        let kept = listed + ".defenseclaw-kept"
+        let shown = "~/.claude/settings.json"
+        let descriptor = try GatewayAdminAgentConfigRepair.openAccountHome(home.path, uid: getuid())
+        defer { close(descriptor) }
+        var changed: [String] = []
+        func repair() -> GatewayAdminOwnershipRepair.Outcome {
+            GatewayAdminAgentConfigRepair.restore(
+                home: descriptor, from: getuid(), to: (getuid(), getgid()), paths: [".claude/settings.json"],
+                change: { _, name in changed.append(name); return 0 })
+        }
+        func exists(_ path: String) -> Bool {
+            var status = stat()
+            return lstat(path, &status) == 0
+        }
+        func holdingFolder() -> [String] {
+            (try? FileManager.default.contentsOfDirectory(atPath: GatewayAdminHandover.holdingPath)) ?? []
+        }
+
+        if wanted("placement") {
+            try makeFile(URL(fileURLWithPath: listed))
+            var original = stat()
+            check(lstat(listed, &original) == 0, "Could not inspect the held fixture")
+            var inAccountTree: [String] = []
+            var inHoldingFolder = false
+            GatewayAdminHandover.openedForTesting = { name in
+                guard name == shown else { return }
+                if let items = FileManager.default.enumerator(atPath: home.path) {
+                    for case let item as String in items {
+                        var status = stat()
+                        if lstat(home.appendingPathComponent(item).path, &status) == 0,
+                           status.st_ino == original.st_ino, status.st_dev == original.st_dev {
+                            inAccountTree.append(item)
+                        }
+                    }
+                }
+                inHoldingFolder = holdingFolder().contains { $0.hasSuffix(".held") }
+            }
+            let outcome = repair()
+            GatewayAdminHandover.openedForTesting = nil
+            check(inAccountTree.isEmpty && inHoldingFolder, "A held file must sit in no folder the account can write, "
+                + "where it can rename a leftover holding folder and swap it in for a later one: \(inAccountTree)")
+            check(outcome.restored == [shown] && exists(listed) && !outcome.incomplete, "The held file goes back: \(outcome)")
+            check(unlink(listed) == 0, "Could not remove the held fixture")
+        }
+        if wanted("stopped") {
+            try makeFile(URL(fileURLWithPath: listed))
+            GatewayAdminHandover.movedForTesting = { $0 == shown }
+            _ = repair()
+            GatewayAdminHandover.movedForTesting = nil
+            check(!exists(listed), "The stopped repair must hold the file")
+            changed = []
+            let next = repair()
+            check(exists(listed) && next.restored == [shown] && changed == [shown] && !next.incomplete,
+                  "The next repair must return a file a repair stopped right after the move left held: \(next)")
+            check(unlink(listed) == 0, "Could not remove the held fixture")
+        }
+        if wanted("taken") {
+            try makeFile(URL(fileURLWithPath: listed))
+            GatewayAdminHandover.openedForTesting = { name in
+                guard name == shown else { return }
+                if !exists(listed) { try? makeFile(URL(fileURLWithPath: listed)) }
+                if !exists(kept) { try? makeFile(URL(fileURLWithPath: kept)) }
+            }
+            let blocked = repair()
+            GatewayAdminHandover.openedForTesting = nil
+            check(blocked.incomplete && blocked.restored.isEmpty && blocked.summary.contains(GatewayAdminHandover.holdingPath)
+                  && blocked.summary.contains(shown),
+                  "A file whose name and kept name were both taken stays held and is reported: \(blocked.summary)")
+            check(unlink(listed) == 0 && unlink(kept) == 0, "Could not remove the blocking names")
+            let freed = repair()
+            check(exists(listed) && freed.restored == [shown] && !freed.incomplete,
+                  "The next repair must return a held file once its name is free: \(freed)")
+            check(unlink(listed) == 0, "Could not remove the held fixture")
+        }
+        if wanted("kept") {
+            try makeFile(URL(fileURLWithPath: listed))
+            GatewayAdminHandover.openedForTesting = { name in
+                guard name == shown, !exists(listed) else { return }
+                try? makeFile(URL(fileURLWithPath: listed))
+            }
+            let fallback = repair()
+            GatewayAdminHandover.openedForTesting = nil
+            check(!fallback.incomplete && fallback.restored == [shown + ".defenseclaw-kept"] && exists(kept)
+                  && fallback.summary.contains(shown + ".defenseclaw-kept") && !fallback.summary.contains("left root-owned"),
+                  "A file put back next to a new file at its name is reported as returned there: \(fallback)")
+            check(unlink(listed) == 0 && unlink(kept) == 0, "Could not remove the kept fixtures")
+        }
+        if wanted("resumed") {
+            // A repair that stopped after it changed the owner: the held file
+            // is the account's already, though its record names root.
+            try makeFile(URL(fileURLWithPath: listed))
+            GatewayAdminHandover.movedForTesting = { $0 == shown }
+            _ = repair()
+            GatewayAdminHandover.movedForTesting = nil
+            let records = holdingFolder().filter { $0.hasSuffix(".record") }
+            check(records.count == 1, "The stopped repair must leave one record: \(holdingFolder())")
+            let recordPath = GatewayAdminHandover.holdingPath + "/" + (records.first ?? "")
+            if let data = FileManager.default.contents(atPath: recordPath),
+               var record = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                record["owner"] = 4242
+                try JSONSerialization.data(withJSONObject: record).write(to: URL(fileURLWithPath: recordPath))
+            }
+            let next = repair()
+            check(exists(listed) && next.restored == [shown] && !next.incomplete && holdingFolder().isEmpty,
+                  "A file whose owner already changed goes back to the account's folder: \(next)")
+            check(unlink(listed) == 0, "Could not remove the held fixture")
+        }
+        if wanted("unclaimed") {
+            // The folder a repair stopped in moved or was removed: the held file is
+            // reported by its shown name, and returned once its folder is repaired again.
+            try makeFile(URL(fileURLWithPath: listed))
+            GatewayAdminHandover.movedForTesting = { $0 == shown }
+            _ = repair()
+            GatewayAdminHandover.movedForTesting = nil
+            let elsewhere = root.appendingPathComponent("held-elsewhere", isDirectory: true)
+            try makeFolders(elsewhere, [""])
+            let other = open(elsewhere.path, O_RDONLY | O_DIRECTORY)
+            defer { close(other) }
+            check(GatewayAdminHandover.unclaimed(account: getuid(), roots: [other]) == [shown],
+                  "A held file of a folder that is no longer repaired is reported")
+            check(GatewayAdminHandover.unclaimed(account: getuid(), roots: [descriptor, other]).isEmpty,
+                  "A held file of a folder still repaired is not reported as unclaimed")
+            check(GatewayAdminHandover.unclaimed(account: getuid() &+ 1, roots: [other]).isEmpty,
+                  "Another account's held files are not reported")
+            let next = repair()
+            check(exists(listed) && next.restored == [shown] && !next.incomplete && holdingFolder().isEmpty,
+                  "The held file goes back at the next repair of its folder: \(next)")
+            check(unlink(listed) == 0, "Could not remove the held fixture")
+        }
+        if wanted("defenseclaw-home") {
+            // The DefenseClaw home is walked without a shared handover: its own held
+            // files come back at the end of the next walk of that folder.
+            let dcHome = root.appendingPathComponent("held-dc-home", isDirectory: true)
+            try makeFolders(dcHome, [""])
+            let config = dcHome.appendingPathComponent("config.yaml")
+            try makeFile(config)
+            let fd = open(dcHome.path, O_RDONLY | O_DIRECTORY)
+            defer { close(fd) }
+            GatewayAdminHandover.movedForTesting = { $0 == "config.yaml" }
+            _ = try GatewayAdminOwnershipRepair.restore(home: fd, from: getuid(), to: (getuid(), getgid()))
+            GatewayAdminHandover.movedForTesting = nil
+            check(!exists(config.path), "The stopped walk must hold the file")
+            let next = try GatewayAdminOwnershipRepair.restore(home: fd, from: getuid(), to: (getuid(), getgid()))
+            check(exists(config.path) && next.restored.contains("config.yaml") && !next.incomplete && holdingFolder().isEmpty,
+                  "The next walk of the DefenseClaw home returns what the stopped one held: \(next)")
+        }
+        check(holdingFolder().isEmpty, "Every held file went back and its record was removed: \(holdingFolder())")
+        if wanted("placement") {
+            // Empty, the holding folder goes; with a file held in it, it stays.
+            GatewayAdminHandover.movedForTesting = { $0 == shown }
+            try makeFile(URL(fileURLWithPath: listed))
+            _ = repair()
+            GatewayAdminHandover.movedForTesting = nil
+            check(!GatewayAdminHandover.removeEmptyHoldingFolder() && exists(GatewayAdminHandover.holdingPath),
+                  "A holding folder with a held file stays")
+            _ = repair()
+            check(unlink(listed) == 0, "Could not remove the held fixture")
+        }
+        check(GatewayAdminHandover.removeEmptyHoldingFolder() && !exists(GatewayAdminHandover.holdingPath),
+              "An empty holding folder is removed")
+    }
+
     /// GAP-0141 review: a file inside a root-owned agent config folder that
     /// the walk returns is changed only when it had one link when inspected
     /// and the opened file is that inode. Before, the walk checked the link
@@ -630,9 +917,10 @@ private enum GatewayAdminHelperTests {
         // The attack itself, with no test hook (run first, so it decides a
         // run of the helper before this fix): another thread hard-links the
         // file outside the folder into it and unlinks the link again while the
-        // walk runs. Before the fix the walk opened the link and, when the
-        // unlink landed before its fstat, read one link and handed the file
-        // over; now the inspected entry has two links and is never opened.
+        // walk runs. A link count read in the folder can show one link for
+        // that link (GAP-1964, CI walk 18938), so the walk moves a file into
+        // its holding folder before the descriptor check: held, the outside
+        // file reads two links and is never handed over.
         let race = home.appendingPathComponent(".kiro/race.json").path
         let secretPath = secret.path
         let finished = DispatchSemaphore(value: 0)
@@ -646,7 +934,8 @@ private enum GatewayAdminHelperTests {
         toggler.start()
         var handedOver = 0
         var walks = 0
-        while walks < 20_000 && handedOver == 0 {
+        let maximumWalks = ProcessInfo.processInfo.environment["GATEWAY_ADMIN_RACE_WALKS"].flatMap { Int($0) } ?? 20_000
+        while walks < maximumWalks && handedOver == 0 {
             walks += 1
             _ = GatewayAdminAgentConfigRepair.restore(
                 home: descriptor, from: getuid(), to: (getuid() &+ 1, getgid()), paths: [".kiro/agents/defenseclaw.json"],
@@ -658,6 +947,9 @@ private enum GatewayAdminHelperTests {
         toggler.cancel()
         finished.wait()
         _ = unlink(race)
+        // A link the toggler made while the walk held the file is kept next
+        // to it, never replaced.
+        _ = unlink(race + ".defenseclaw-kept")
         check(handedOver == 0, "A hard link unlinked between the open and the fstat handed a file outside the folder over "
             + "(walk \(walks))")
 
@@ -785,6 +1077,19 @@ private enum GatewayAdminHelperTests {
         calls = []; found = GatewayAdminRootProcess.Found()
         result = try perform()
         check(result.0 == 0 && calls == ["live?", "restore", "remove"], "Leftover root files are returned when nothing runs")
+
+        // GAP-2003: a walk that stopped at its deadline has its own exit code,
+        // so the app offers the repair again; other incomplete outcomes keep 1.
+        for (outcome, code) in [
+            (GatewayAdminOwnershipRepair.Outcome(incomplete: true, unfinished: true), GatewayAdminPolicy.repairUnfinishedExitCode),
+            (GatewayAdminOwnershipRepair.Outcome(incomplete: true), 1),
+            (GatewayAdminOwnershipRepair.Outcome(restored: ["gateway.pid"]), 0),
+        ] {
+            let reply = try GatewayAdminRepair.perform(
+                liveRootProcesses: { GatewayAdminRootProcess.Found() }, stop: { _ in true },
+                restoreOwnership: { outcome }, removeStagedGateway: {})
+            check(reply.0 == code, "A repair outcome must answer \(code), not \(reply.0): \(outcome)")
+        }
     }
 
     private static func testRootProcessRecord(root: URL) throws {

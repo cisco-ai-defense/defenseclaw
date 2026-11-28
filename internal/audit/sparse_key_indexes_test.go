@@ -44,7 +44,7 @@ func TestSparseKeyIndexesUpgradeFromEarlierStores(t *testing.T) {
 	} {
 		t.Run(release.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "audit.db")
-			store, err := NewStore(path)
+			store, err := NewStore(realMigrationPath(path))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -81,7 +81,7 @@ func TestSparseKeyIndexesUpgradeFromEarlierStores(t *testing.T) {
 				t.Fatalf("pending migrations = %d, want %d", pending, want)
 			}
 
-			store, err = NewStore(path)
+			store, err = NewStore(realMigrationPath(path))
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -889,7 +889,7 @@ var builtinHookContracts = map[string][]HookContract{
 			SupportsTraceparent: true,
 			ToolCallLifecycle:   copilotToolCallLifecycle(),
 			Notes: []string{
-				"Current GitHub Copilot CLI documentation includes the mutation-only userPromptTransformed event; DefenseClaw returns no modification, except that the Secure Client profile on Windows and macOS replaces a prompt the guardrail blocks.",
+				"Current GitHub Copilot CLI documentation includes the mutation-only userPromptTransformed event; DefenseClaw returns no modification, except that an action-mode block replaces the prompt with DefenseClaw's notice on every profile.",
 				"GitHub Copilot CLI 1.0.76 is the conservative reviewed floor for this current 14-event contract.",
 				"Copilot CLI can ask on preToolUse, but its hook input does not prove prompt availability; DefenseClaw denies confirms there until the vendor exposes it.",
 				"postToolUseFailure is advisory-only and can provide recovery additionalContext; it cannot block the failed tool.",
@@ -950,7 +950,7 @@ var builtinHookContracts = map[string][]HookContract{
 		Events: []string{
 			"defenseclaw.plugin.loaded",
 			"session.created", "session.status", "session.idle",
-			"session.error", "session.deleted",
+			"session.error", "session.deleted", "session.prompt",
 			"tool.execute.before", "tool.execute.after",
 		},
 		AIDSurfaces: []string{"tool_call", "tool_result"},

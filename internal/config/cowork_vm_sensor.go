@@ -14,12 +14,20 @@ import (
 )
 
 var (
-	coworkIDPattern        = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
-	coworkVendorPattern    = lazyregexp.New(`^[a-z][a-z0-9_-]*$`)
-	coworkCollectorPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9.-]*:[0-9]{1,5}$`)
+	coworkIDPattern     = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	coworkVendorPattern = lazyregexp.New(`^[a-z][a-z0-9_-]*$`)
+	// The host starts and ends with a letter or digit, as the VM's install.sh
+	// requires (GAP-1736): a host ending in '-' or '.' would validate here and
+	// then fail every VM start with exit 14.
+	coworkCollectorPattern = lazyregexp.New(`^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?:[0-9]{1,5}$`)
 	// Anthropic's v1.7 install-arguments grammar, including the 256-byte cap.
 	coworkArgsPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:=,-]{0,255}$`)
 )
+
+// coworkCollectorMaxLen is the VM install.sh cap on an install argument value
+// (1-200 characters): a longer collector would validate here and then fail
+// every VM start with exit 13 (rel-1-0-10:GAP-1741).
+const coworkCollectorMaxLen = 200
 
 // CoworkDerivedDeviceMaxLen bounds a device ID derived from the host. Both
 // sources are 36-character UUIDs; validation reserves this length for an
@@ -150,7 +158,7 @@ func validateCoworkVMSensorSource(source string, root *yaml.Node) error {
 		case "tenant", "device":
 			valid = len(value.Value) <= 128 && coworkIDPattern.MatchString(value.Value)
 		case "collector":
-			valid = len(value.Value) <= 253 && coworkCollectorPattern.MatchString(value.Value)
+			valid = len(value.Value) <= coworkCollectorMaxLen && coworkCollectorPattern.MatchString(value.Value)
 		case "vendor":
 			valid = len(value.Value) <= 64 && coworkVendorPattern.MatchString(value.Value)
 		case "source_dir":
@@ -182,7 +190,7 @@ func (c EnterpriseCoworkVMSensorConfig) InstallArguments(hostDevice string) (str
 	if !coworkIDPattern.MatchString(c.Tenant) || len(c.Tenant) > 128 || !coworkIDPattern.MatchString(device) || len(device) > limit {
 		return "", fmt.Errorf("config: enterprise.cowork_vm_sensor tenant and device must be nonempty ASCII identifiers of at most 128 characters")
 	}
-	if !coworkCollectorPattern.MatchString(c.Collector) || len(c.Collector) > 253 {
+	if !coworkCollectorPattern.MatchString(c.Collector) || len(c.Collector) > coworkCollectorMaxLen {
 		return "", fmt.Errorf("config: enterprise.cowork_vm_sensor.collector must be a host:port without spaces or secrets")
 	}
 	port, err := strconv.Atoi(c.Collector[strings.LastIndexByte(c.Collector, ':')+1:])

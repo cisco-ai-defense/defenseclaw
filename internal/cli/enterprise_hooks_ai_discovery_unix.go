@@ -49,7 +49,44 @@ var enterpriseHookAIDiscoveryState struct {
 	running     bool
 	last        time.Time
 	fingerprint string
+	// retriesSpent is set when a pass and its quick retries still left a
+	// skill folder unreadable; the passes after it do not retry again until
+	// one finds none (a folder that can never be read is not scanned over
+	// and over).
+	retriesSpent bool
 }
+
+// A skill folder whose files changed while the scan read them is reported
+// unreadable (GAP-2002), and that record stays at the gateway until the next
+// pass writes another. So a pass that leaves a skill unreadable is repeated
+// after these delays, at most once each, and the first pass that reads it
+// replaces the record (GAP-2034). All are shorter than the shortest scan
+// interval (a minute).
+var enterpriseHookAIDiscoveryRetryDelays = []time.Duration{10 * time.Second, 20 * time.Second, 40 * time.Second}
+
+// enterpriseHookAIDiscoveryTickSlack is how early before the interval a
+// reconcile tick still starts a pass. The passes follow the watch ticker, and
+// each reconcile takes a little different time before it reaches this code,
+// so a tick that came a few milliseconds short of the interval left the
+// pass to the next tick and made it every other minute.
+const enterpriseHookAIDiscoveryTickSlack = 5 * time.Second
+
+// enterpriseHookAIDiscoveryNow and enterpriseHookAIDiscoveryWait are the clock
+// and the pause between retries; tests replace them. The wait reports false
+// when ctx ended first.
+var (
+	enterpriseHookAIDiscoveryNow  = time.Now
+	enterpriseHookAIDiscoveryWait = func(ctx context.Context, d time.Duration) bool {
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+)
 
 // enterpriseHookAIDiscoveryBreaker pauses the scans of an account whose
 // worker failed three passes in a row (timed out, ended at its memory
@@ -252,10 +289,10 @@ func startEnterpriseHookAIDiscovery(ctx context.Context, stderr io.Writer, run e
 		interval = 5 * time.Minute
 	}
 	fingerprint := enterpriseHookAIDiscoveryFingerprint(run.Rows)
-	now := time.Now()
+	now := enterpriseHookAIDiscoveryNow()
 	state := &enterpriseHookAIDiscoveryState
 	state.Lock()
-	due := !state.running && (fingerprint != state.fingerprint || now.Sub(state.last) >= interval)
+	due := !state.running && (fingerprint != state.fingerprint || now.Sub(state.last) >= interval-enterpriseHookAIDiscoveryTickSlack)
 	if due {
 		state.running, state.last, state.fingerprint = true, now, fingerprint
 	}
@@ -270,8 +307,65 @@ func startEnterpriseHookAIDiscovery(ctx context.Context, stderr io.Writer, run e
 			state.running = false
 			state.Unlock()
 		}()
-		runEnterpriseHookAIDiscoveryPass(ctx, stderr, dir, rows)
+		for retry := 0; ; retry++ {
+			unreadable := runEnterpriseHookAIDiscoveryPass(ctx, stderr, dir, rows)
+			state.Lock()
+			again := unreadable && !state.retriesSpent && retry < len(enterpriseHookAIDiscoveryRetryDelays)
+			state.retriesSpent = unreadable && !again
+			state.Unlock()
+			if !again || !enterpriseHookAIDiscoveryWait(ctx, enterpriseHookAIDiscoveryRetryDelays[retry]) {
+				return
+			}
+			state.Lock()
+			state.last = enterpriseHookAIDiscoveryNow()
+			state.Unlock()
+			rows = enterpriseHookAIDiscoveryRetryRows(ctx, stderr, run, rows)
+		}
 	}()
+}
+
+// enterpriseHookAIDiscoveryRetryRows is rows without the accounts that are
+// left out now. A retry runs up to about 70 s after its pass started, with the
+// rows copied then; an account that exclude_users or exempt_users has named
+// since, or that eligible-accounts.json no longer lists (a row that no hook row
+// stands behind, added by enterpriseHookEnrolledAccountRows), was scanned again
+// and got a fresh spool record. The retry pass drops it and its record goes with
+// the next prune. The other accounts are scanned and kept as before
+// (rel-1-0-10:GAP-2103).
+func enterpriseHookAIDiscoveryRetryRows(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun, rows []enterpriseHookReconcileRow) []enterpriseHookReconcileRow {
+	leftOut := enterpriseHookEnrollmentLeftOut(ctx, enterpriseHookIdentitySpoolDirForConfig())
+	var eligible map[int]bool
+	if manifest := strings.TrimSpace(run.Manifest); manifest != "" && !enterpriseHookManifestEnrollment() {
+		if accounts, err := enterpriseHookLoadEligibleAccounts(enterprisehooks.UnixEligibleAccountsPath(manifest)); err == nil {
+			eligible = map[int]bool{}
+			for _, account := range accounts {
+				eligible[account.UID] = true
+			}
+		} else {
+			fmt.Fprintf(stderr, "[hook-guardian] eligible accounts: %v\n", err)
+		}
+	}
+	kept := make([]enterpriseHookReconcileRow, 0, len(rows))
+	for _, row := range rows {
+		if leftOut.has(row.UID, row.User) || (eligible != nil && row.Connector == "" && !eligible[row.UID]) {
+			continue
+		}
+		kept = append(kept, row)
+	}
+	return kept
+}
+
+// enterpriseHookAIDiscoveryUnreadable reports whether report lists a skill
+// folder the scan could not read.
+func enterpriseHookAIDiscoveryUnreadable(report inventory.AIDiscoveryReport) bool {
+	for _, signal := range report.Signals {
+		for _, evidence := range signal.Evidence {
+			if evidence.Skill != nil && evidence.Skill.ContentStatus == inventory.SkillContentUnreadable {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func enterpriseHookAIDiscoveryFingerprint(rows []enterpriseHookReconcileRow) string {
@@ -287,8 +381,9 @@ func enterpriseHookAIDiscoveryFingerprint(rows []enterpriseHookReconcileRow) str
 
 // runEnterpriseHookAIDiscoveryPass scans every enrolled account whose home is
 // available and keeps the records of enrolled accounts only: a pending home
-// keeps its last record until the gateway ages it out.
-func runEnterpriseHookAIDiscoveryPass(ctx context.Context, stderr io.Writer, dir string, rows []enterpriseHookReconcileRow) {
+// keeps its last record until the gateway ages it out. It reports whether a
+// record it wrote lists an unreadable skill folder.
+func runEnterpriseHookAIDiscoveryPass(ctx context.Context, stderr io.Writer, dir string, rows []enterpriseHookReconcileRow) (unreadable bool) {
 	if err := ensureEnterpriseHookStandaloneAuthDir(dir); err != nil {
 		fmt.Fprintf(stderr, "[hook-guardian] ai discovery spool: %v\n", err)
 		return
@@ -391,6 +486,7 @@ func runEnterpriseHookAIDiscoveryPass(ctx context.Context, stderr io.Writer, dir
 			report := *outcome.Response.AIDiscovery
 			if err = inventory.SanitizeUserScanReport(&report, catalog, options.StoreRawLocalPaths, options.IncludeUserEmail); err == nil {
 				err = writeEnterpriseHookAIDiscoveryRecord(dir, outcome.Job.Account, recordHolder, report, time.Now())
+				unreadable = unreadable || err == nil && enterpriseHookAIDiscoveryUnreadable(report)
 			}
 			// A connector account file the scan could not use is named,
 			// not silently left out (GAP-0961).
@@ -402,6 +498,7 @@ func runEnterpriseHookAIDiscoveryPass(ctx context.Context, stderr io.Writer, dir
 			fmt.Fprintf(stderr, "[hook-guardian] ai discovery for %s: %s\n", outcome.Job.Account.User, boundedString(err.Error(), 512))
 		}
 	}
+	return unreadable
 }
 
 // enterpriseHookAIDiscoveryRecordReader reads a spool record with the

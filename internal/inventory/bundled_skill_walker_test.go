@@ -228,15 +228,16 @@ func TestSignalFromDirectoryChildrenExpandsHermesNestedSkillsWithProvenance(t *t
 }
 
 // TestSignalFromDirectoryChildrenNonSkillDetectorTreatsSystemLiterally
-// asserts the .system special-case is scoped to detector="skill". A
-// plugin or rule directory named .system stays as a plain child so we
-// don't accidentally reshape unrelated walkers.
+// asserts the .system special-case is scoped to detector="skill". The
+// plugin walker never expands a .system folder into its children; as a
+// hidden folder it is the agent's own working state and is left out
+// like any other hidden folder beside the plugins.
 func TestSignalFromDirectoryChildrenNonSkillDetectorTreatsSystemLiterally(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
 	pluginRoot := filepath.Join(root, "plugins")
-	if err := os.MkdirAll(filepath.Join(pluginRoot, ".system"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(pluginRoot, ".system", "inner-plugin"), 0o755); err != nil {
 		t.Fatalf("prepare plugin .system: %v", err)
 	}
 	if err := os.MkdirAll(filepath.Join(pluginRoot, "user-plugin"), 0o755); err != nil {
@@ -253,8 +254,11 @@ func TestSignalFromDirectoryChildrenNonSkillDetectorTreatsSystemLiterally(t *tes
 			seen[ev.Basename] = true
 		}
 	}
-	if !seen[".system"] {
-		t.Fatalf("plugin detector should emit `.system` as an ordinary plugin_entry; got %v", seen)
+	if seen[".system"] {
+		t.Fatalf("plugin detector must leave the hidden `.system` folder out; got %v", seen)
+	}
+	if seen["inner-plugin"] {
+		t.Fatalf("plugin detector must not expand `.system` like the skill walker; got %v", seen)
 	}
 	if !seen["user-plugin"] {
 		t.Fatalf("plugin detector missed user-plugin; got %v", seen)

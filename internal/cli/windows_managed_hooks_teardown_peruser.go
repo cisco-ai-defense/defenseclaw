@@ -352,7 +352,8 @@ func windowsManagedHooksStandalonePerUserTarget(connectorName string) bool {
 
 // windowsManagedHooksStandalonePerUserExpected is the enrollment an
 // activated deployment carries: every activated, non-pending target of each
-// hook-binary per-user connector.
+// hook-binary per-user connector, less the failed targets the Guardian never
+// enrolled (GAP-1892).
 func windowsManagedHooksStandalonePerUserExpected(
 	identity windowsManagedHooksTeardownJournal,
 ) map[string][]enterprisehooks.WindowsPerUserManagedEnrollmentTarget {
@@ -363,7 +364,8 @@ func windowsManagedHooksStandalonePerUserExpected(
 			continue
 		}
 		expected[target.Connector] = expected[target.Connector]
-		if !windowsManagedHooksTeardownSelectorExpected(target, identity.PendingTargets, identity.ActivationState) {
+		if !windowsManagedHooksTeardownSelectorExpected(target, identity.PendingTargets, identity.ActivationState) ||
+			windowsManagedHooksTeardownTargetIn(target, identity.unenrolled) {
 			continue
 		}
 		expected[target.Connector] = append(expected[target.Connector],
@@ -385,7 +387,7 @@ func validateWindowsManagedHooksStandalonePerUserEnrollment(identity windowsMana
 		if err != nil {
 			return err
 		}
-		if exists != (len(want) != 0) || !equalWindowsPerUserEnrollmentTargets(current, want) {
+		if !windowsPerUserEnrollmentMatchesTeardown(connectorName, current, exists, want, identity.FailedTargets) {
 			return fmt.Errorf("%s machine enrollment does not match the authenticated activation state", connectorName)
 		}
 	}

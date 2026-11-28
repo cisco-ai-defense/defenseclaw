@@ -106,6 +106,10 @@ type KitInfo struct {
 	LayerDiffID string `json:"layerDiffID"`
 	// LayerIndex is the layer's position in the image manifest.
 	LayerIndex int `json:"layerIndex"`
+	// RelayStreams are the relay features the kit was built with ("tls":
+	// the relay serves TLS). Signed, so the gateway's dial choice cannot be
+	// downgraded by anything on the cluster network.
+	RelayStreams []string `json:"relayStreams,omitempty"`
 }
 
 // HookChecks is the result of the file and switch checks of the build.

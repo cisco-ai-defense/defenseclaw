@@ -31,6 +31,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1769,6 +1770,15 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		// --- Non-streaming: buffer response, inspect, then forward ---
 		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 		if readErr != nil {
+			// The upstream answered, then its body broke off: the usage
+			// record keeps the upstream status and ends as an upstream
+			// error, so the call is of unknown cost (GAP-1112).
+			if r.Context().Err() != nil {
+				setUsageEndErr(w, fmt.Errorf("%w: %v", modelusage.ErrClientGone, readErr))
+			} else {
+				setUsageEndErr(w, readErr)
+			}
+			setUsageUpstreamStatus(w, resp.StatusCode, resp.Header)
 			writeOpenAIError(w, http.StatusBadGateway, "failed to read upstream response")
 			return
 		}
@@ -1824,8 +1834,9 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		if content != "" {
 			postCtx, postCancel := p.postCallContext(r.Context())
 			t0 := time.Now()
-			respMessages := []ChatMessage{{Role: "assistant", Content: content}}
-			verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, label, mode)
+			checkContent := passthroughReplyCheckText(inspectBody, provider, scan.Segments)
+			respMessages := []ChatMessage{{Role: "assistant", Content: checkContent}}
+			verdict := p.inspector.Inspect(postCtx, "completion", checkContent, respMessages, label, mode)
 			postCancel()
 			p.resolveConfirm(r.Context(), r, verdict, "completion", label, mode)
 			elapsed := time.Since(t0)
@@ -1889,16 +1900,36 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 // empty and skips the completion check, so every provider the proxy
 // recognises (inferProviderFromURL) has a branch here.
 func extractPassthroughResponseContent(body []byte, provider string) string {
+	return extractPassthroughResponseContentMode(body, provider, false)
+}
+
+func extractPassthroughResponseCheckContent(body []byte, provider string) string {
+	return extractPassthroughResponseContentMode(body, provider, true)
+}
+
+func extractPassthroughResponseContentMode(body []byte, provider string, check bool) string {
+	textOf := func(r *responseText) string {
+		if check {
+			return r.CheckTextNonStream()
+		}
+		return r.String()
+	}
+	piecesOf := func(ps []responsePiece) string {
+		if check {
+			return responsePiecesCheckText(ps)
+		}
+		return responsePiecesText(ps)
+	}
 	switch provider {
 	case "anthropic":
 		pieces, _ := anthropicContentPieces(body)
-		return responsePiecesText(pieces)
+		return piecesOf(pieces)
 
 	case "gemini":
-		return responsePiecesText(geminiPieces(body, false))
+		return piecesOf(geminiPieces(body, false))
 
 	case "ollama":
-		return responsePiecesText(ollamaPieces(body, false))
+		return piecesOf(ollamaPieces(body, false))
 
 	case "bedrock":
 		// Bedrock Converse: {"output":{"message":{"content":[{"text"} |
@@ -1924,7 +1955,7 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 				r.Add(reasoningPiece(0, c.ReasoningContent.ReasoningText.Text))
 			}
 			if r.Len() > 0 {
-				return r.String()
+				return textOf(&r)
 			}
 		}
 		// InvokeModel answers in the model family's own shape (GAP-0098).
@@ -1960,8 +1991,8 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 					continue
 				}
 				if o.Type == "reasoning" {
-					for _, s := range o.Summary {
-						r.Add(responsePiece{lane: responseLane{field: responseFieldReasoning, part: i}, text: s.Text})
+					for _, summary := range o.Summary {
+						r.Add(summaryPiece(0, i, summary.Text))
 					}
 					for _, c := range o.Content {
 						r.Add(responsePiece{lane: responseLane{field: responseFieldReasoning, part: i}, text: c.Text})
@@ -1977,7 +2008,7 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 				}
 			}
 			if r.Len() > 0 {
-				return r.String()
+				return textOf(&r)
 			}
 		}
 
@@ -1987,7 +2018,7 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 			Choices []chatShapeChoice `json:"choices"`
 		}
 		if json.Unmarshal(body, &respCC) == nil && len(respCC.Choices) > 0 {
-			return responsePiecesText(chatChoicesPieces(respCC.Choices, false))
+			return piecesOf(chatChoicesPieces(respCC.Choices, false))
 		}
 	}
 	return ""
@@ -2140,12 +2171,25 @@ func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
 				Type      string          `json:"type"`
 				Name      string          `json:"name"`
 				Arguments json.RawMessage `json:"arguments"`
+				Input     json.RawMessage `json:"input"`
+				Action    json.RawMessage `json:"action"`
 			} `json:"output"`
 		}
 		if json.Unmarshal(body, &respAPI) == nil {
 			for _, o := range respAPI.Output {
-				if o.Type == "function_call" {
+				switch o.Type {
+				case "function_call":
 					addCall(o.Name, o.Arguments)
+				case "custom_tool_call":
+					// A custom (free-form) tool's input is the tool's one
+					// argument, plain text: a shell command for a shell
+					// tool. Judged as that tool's call, as the stream judges
+					// its custom_tool_call_input (rel-1-0-10:GAP-2144).
+					addCall(o.Name, respJSONString(o.Input))
+				case "local_shell_call":
+					// The built-in local shell's exec action, named as the
+					// stream names it (sseToolCalls.judgeTexts).
+					addCall("local_shell", o.Action)
 				}
 			}
 		}
@@ -3580,6 +3624,16 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	// That header is the gateway's own, sent before the provider is called:
+	// the usage record counts the provider as answered when the adapter says
+	// the provider answered and with what status (markUpstreamAnswered), or
+	// from its first chunk or its answer, never from this header
+	// (rel-1-0-10:GAP-2233).
+	usageAnswer := usageOwnHeader(w)
+	var answerOnce sync.Once
+	answered := func(status int) {
+		answerOnce.Do(func() { usageAnswer.upstreamAnswered(status) })
+	}
 	w.WriteHeader(http.StatusOK)
 	// The headers carry no model text: the client has them at once, also
 	// while the initial buffer waits (GAP-0628).
@@ -3648,6 +3702,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	var accumulated responseText
 	var tcAcc toolCallAccumulator
 	var bufferedTCChunks [][]byte // tool-call chunks held until post-stream inspection
+	// The mid-stream checks of this stream share what they read of the
+	// text so far (midStreamScanState, GAP-0515).
+	midCtx := withMidStreamScanState(llmCtx, newMidStreamScanState())
 	bufferedTCSize := 0
 	lastScanLen := 0
 	streamFinishReasons := []string{}
@@ -3664,6 +3721,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		streamBufSize = p.cfg.StreamBufferBytes
 	}
 	var initialChunkBuf [][]byte
+	var initialMarks []int    // the text length once each buffered chunk was read (GAP-1306)
 	var lastChunkAt time.Time // when the provider last sent a chunk
 	initialBufFlushed := mode != "action"
 	// In action mode the chunks after the initial buffer wait in hold until
@@ -3684,7 +3742,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	// check, or (full false) the check of a hold due by age only
 	// (inspectStreamText). False: it blocked; the stream is cut.
 	scanMid := func(full bool) bool {
-		midVerdict, ranFull := p.inspectStreamText(llmCtx, accumulated.String(), aliasModel, mode, full)
+		midVerdict, ranFull := p.inspectStreamText(midCtx, accumulated.CheckText(), aliasModel, mode, full)
 		p.resolveConfirm(r.Context(), r, midVerdict, "completion", aliasModel, mode)
 		if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 			fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s (%d bytes held back)\n",
@@ -3714,12 +3772,14 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	// secretBound decides an open secret at a hold bound: TRUNCATED, the
 	// unknown tier of the pack, once the full check passed the text read so
 	// far. False: it blocked; the stream is cut.
-	secretBound := func(c bounded.Cap, why string) bool {
+	streamBound := func(c bounded.Cap, why string, release bool) bool {
 		if accumulated.Len() > lastScanLen && !scanMid(true) {
 			return false
 		}
-		accumulated.ReleaseOpenSecret()
-		secretOpen, secretKey = false, false
+		if release {
+			accumulated.ReleaseOpenSecret()
+			secretOpen, secretKey = false, false
+		}
 		tv := p.streamTailTruncatedVerdict(llmCtx, c, why)
 		overlay := p.recordTelemetry(llmCtx, "completion", aliasModel, tv, 0, mode, tv.Action == "block")
 		modelTrace.AddGuardrailOverlay(overlay)
@@ -3733,9 +3793,46 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		fmt.Fprintf(os.Stderr, "[guardrail] STREAM-TRUNCATED %s: forwarded with an alert\n", logDisplayReason(tv.Reason))
 		return true
 	}
+	secretBound := func(c bounded.Cap, why string) bool { return streamBound(c, why, true) }
+	// runHeldBound decides the held bound behind an open token or digit run
+	// once per call (rel-1-0-10:GAP-1767, LEAD ruling 2026-11-26 21:00Z): past
+	// streamSecretMaxHeld the text read so far is checked and the unknown tier
+	// of the pack decides, so a reply that keeps a run open at every piece end
+	// (a numeric table, GAP-1265) gets the TRUNCATED verdict, never none.
+	// release: the pieces from the first byte of the run are over the bound
+	// themselves, so the run is given up and goes out once decided; otherwise
+	// the pieces before it go out and the run stays held for its own check
+	// (GAP-1306). A later pass of the same call is not decided again.
+	runHeldHit := false
+	runHeldBound := func(release bool) bool {
+		if runHeldHit {
+			// Not decided again, but a run given up still gets the full
+			// check of the text read so far before it goes out, as at the
+			// parent (CHK-RF-1478B N1).
+			if accumulated.Len() > lastScanLen && !scanMid(true) {
+				return false
+			}
+			if release {
+				accumulated.ReleaseOpenSecret()
+				secretOpen, secretKey = false, false
+			}
+			return true
+		}
+		runHeldHit = true
+		return streamBound(bounded.Bytes, streamRunHeldWhy, release)
+	}
+	// pastRun: the held bound behind an open token or digit run was passed;
+	// runFrom is the reply text offset of the run's first byte (GAP-1306);
+	// pastParked: only reasoning runs parked by the switch to the answer
+	// are open (GAP-2170), so the bound lets all go with no verdict, as rel
+	// does (no GAP-1767 cut; a block-end or tool-switch park keeps it,
+	// GAP-2218); pastParkedAny: every open run is parked (any park), so the
+	// chunks before it go out with no verdict, as at the parent (GAP-2224).
+	pastRun, pastParked, pastParkedAny, runFrom := false, false, false, -1
 	// secretHeld reports that nothing may be sent now: the text ends inside
 	// an open secret, or a bound on it blocked.
 	secretHeld := func(held int) bool {
+		pastRun, pastParked, pastParkedAny, runFrom = false, false, false, -1
 		if !holding {
 			return false
 		}
@@ -3749,23 +3846,39 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		case held > streamSecretMaxHeld && o.pem:
 			return !secretBound(bounded.Bytes, fmt.Sprintf("over %d reply stream bytes held behind an open secret", streamSecretMaxHeld))
 		case held > streamSecretMaxHeld:
-			// Only a token or a digit run is open (GAP-1265): what is held
-			// goes out once the check has read it, with no verdict, and
-			// what comes next is held behind it again.
+			// Only a token or a digit run is open (GAP-1265): the bound
+			// decides it once (runHeldBound, GAP-1767), then what is held
+			// before the chunk with the run's first byte goes out once the
+			// check has read it and the run stays held (GAP-1306). When the
+			// chunks from the run's first byte are over the bound
+			// themselves, the run goes out once decided.
+			pastRun, pastParked, pastParkedAny, runFrom = true, o.answerParkedOnly, o.parkedOnly, accumulated.OpenRunFrom()
 			return false
 		}
 		return true
 	}
 	// releaseHeld sends the held chunks after a check (full, or the one due
-	// by age) has read their text and it ends inside no open secret.
+	// by age) has read their text and it ends inside no open secret; past
+	// the held bound, the chunks before the open run (GAP-1306).
 	releaseHeld := func(full bool) bool {
 		if secretHeld(len(hold.buf)) {
 			return !streamBlocked
 		}
+		cut := len(hold.buf)
+		if pastRun {
+			if k := hold.beforeRun(runFrom); runFrom >= 0 && len(hold.buf)-k <= streamSecretMaxHeld {
+				if !pastParkedAny && !runHeldBound(false) {
+					return false
+				}
+				cut = k
+			} else if !pastParked && !runHeldBound(true) {
+				return false
+			}
+		}
 		if accumulated.Len() > lastScanLen && !scanMid(full) {
 			return false
 		}
-		if b := hold.take(len(hold.buf), time.Now()); len(b) > 0 {
+		if b := hold.take(cut, time.Now()); len(b) > 0 {
 			_, _ = w.Write(b)
 			flusher.Flush()
 		}
@@ -3780,14 +3893,31 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		if secretHeld(bufferedBytes(initialChunkBuf)) {
 			return
 		}
+		// Past the held bound, the chunks from the one with the open run's
+		// first byte join the hold (GAP-1306); over the bound themselves,
+		// the bound decides the run (GAP-1767).
+		cut := len(initialChunkBuf)
+		if pastRun {
+			if k := heldBeforeRun(initialMarks, runFrom); runFrom >= 0 && bufferedBytes(initialChunkBuf[k:]) <= streamSecretMaxHeld {
+				if !pastParkedAny && !runHeldBound(false) {
+					return
+				}
+				cut = k
+			} else if !pastParked && !runHeldBound(true) {
+				return
+			}
+		}
 		if accumulated.Len() > lastScanLen && !scanMid(true) {
 			return
 		}
-		for _, buffered := range initialChunkBuf {
+		for _, buffered := range initialChunkBuf[:cut] {
 			fmt.Fprintf(w, "data: %s\n\n", buffered)
 		}
 		flusher.Flush()
-		initialChunkBuf = nil
+		for i, buffered := range initialChunkBuf[cut:] {
+			hold.add([]byte("data: "+string(buffered)+"\n\n"), time.Now(), initialMarks[cut+i])
+		}
+		initialChunkBuf, initialMarks = nil, nil
 		initialBufFlushed = true
 	}
 
@@ -3817,6 +3947,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 				}
 			}
 			if c.FinishReason != nil && *c.FinishReason != "" {
+				accumulated.Add(messageEndPiece(c.Index)) // GAP-2154
 				streamFinishReasons = append(streamFinishReasons, *c.FinishReason)
 				isToolCallFinish = isToolCallFinish || *c.FinishReason == "tool_calls"
 			}
@@ -3847,6 +3978,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 
 		if !initialBufFlushed {
 			initialChunkBuf = append(initialChunkBuf, data)
+			initialMarks = append(initialMarks, accumulated.Len())
 			if accumulated.Len() >= streamBufSize {
 				sendInitial()
 			} else if secretOpen {
@@ -3864,7 +3996,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			return
 		}
 		now := time.Now()
-		hold.add([]byte("data: "+string(data)+"\n\n"), now)
+		hold.add([]byte("data: "+string(data)+"\n\n"), now, accumulated.Len())
 		if full := len(hold.buf) >= streamHoldMaxBytes; accumulated.Len() == lastScanLen || full || hold.due(now) || secretOpen {
 			releaseHeld(full)
 		}
@@ -3876,10 +4008,15 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	var err error
 	var streamPanic any
 	chunks := make(chan StreamChunk)
+	providerCtx := streamCtx
+	if usageAnswer != nil {
+		providerCtx = withUpstreamAnswered(streamCtx, answered)
+	}
 	go func() {
 		defer close(chunks)
 		defer func() { streamPanic = recover() }()
-		usage, err = upstream.ChatCompletionStream(streamCtx, req, func(chunk StreamChunk) {
+		usage, err = upstream.ChatCompletionStream(providerCtx, req, func(chunk StreamChunk) {
+			answered(http.StatusOK)
 			select {
 			case chunks <- chunk:
 			case <-streamCtx.Done():
@@ -3949,6 +4086,13 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	if streamPanic != nil {
 		panic(streamPanic)
 	}
+	// An adapter that returned without an error, or with the provider's
+	// usage, had the provider's answer even with no chunk (GAP-2233). With
+	// the first chunk, this backs up adapters that do not call
+	// markUpstreamAnswered.
+	if err == nil || usage != nil {
+		answered(http.StatusOK)
+	}
 	// Bifrost parsed the usage (it always asks for include_usage): hand it
 	// to the usage record of this call.
 	recordChatUsage(w, usage)
@@ -3957,8 +4101,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	// reaching the buffer threshold) joins the hold after a guardrail check.
 	if !initialBufFlushed && !streamBlocked && len(initialChunkBuf) > 0 {
 		if accumulated.Len() > 0 && mode == "action" {
-			initVerdict := p.inspector.InspectMidStream(llmCtx, "completion", accumulated.String(),
-				[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, aliasModel, mode)
+			checkContent := accumulated.CheckText()
+			initVerdict := p.inspector.InspectMidStream(midCtx, "completion", checkContent,
+				[]ChatMessage{{Role: "assistant", Content: checkContent}}, aliasModel, mode)
 			p.resolveConfirm(r.Context(), r, initVerdict, "completion", aliasModel, mode)
 			if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
 				fmt.Fprintf(os.Stderr, "[guardrail] STREAM-PREBLOCK severity=%s %s\n",
@@ -3973,8 +4118,8 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			// That check read the whole text: the tail needs no other
 			// mid-stream check (GAP-0625).
 			lastScanLen, lastFullScanLen = accumulated.Len(), accumulated.Len()
-			for _, buffered := range initialChunkBuf {
-				hold.add([]byte("data: "+string(buffered)+"\n\n"), time.Now())
+			for i, buffered := range initialChunkBuf {
+				hold.add([]byte("data: "+string(buffered)+"\n\n"), time.Now(), initialMarks[i])
 			}
 			initialBufFlushed = true
 		}
@@ -3994,8 +4139,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		t0 := time.Now()
 
 		postCtx, postCancel := p.postCallContext(llmCtx)
-		respMessages := []ChatMessage{{Role: "assistant", Content: content}}
-		verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, aliasModel, mode)
+		checkContent := accumulated.CheckText()
+		respMessages := []ChatMessage{{Role: "assistant", Content: checkContent}}
+		verdict := p.inspector.Inspect(postCtx, "completion", checkContent, respMessages, aliasModel, mode)
 		postCancel()
 		p.resolveConfirm(r.Context(), r, verdict, "completion", aliasModel, mode)
 		elapsed := time.Since(t0)
@@ -4033,6 +4179,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	streamFailureLifecycle := ""
 	if streamFailed {
 		failureOutcome, technicalFailure, lifecycleOutcome := proxyV8FailureClassification(err)
+		setUsageEndErr(w, err)
 		streamFailureLifecycle = lifecycleOutcome
 		*traceResult = proxyV8TraceResult{
 			Outcome: failureOutcome, ErrorType: "upstream_error",
@@ -4072,6 +4219,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		blockedMeta.ResponseID = firstNonEmpty(streamResponseID, stableLLMEventID("response", blockedMeta.Source, blockedMeta.SessionID, blockedMeta.RequestID, req.Model, "blocked"))
 		blockedMeta.ResponseIDReported = strings.TrimSpace(streamResponseID) != ""
 		p.emitLLMResponseEventV8(llmCtx, blockedMeta, "", "", append(streamFinishReasons, "blocked"))
+		// The gateway ended the provider's stream: without the provider's
+		// final usage the call is of unknown cost (substrate-1:GAP-1119).
+		usageStreamBlocked(w)
 		msg := blockMessage(customBlockMsg, "completion", "content blocked mid-stream by guardrail")
 		blockChunk := StreamChunk{
 			ID: "chatcmpl-blocked", Object: "chat.completion.chunk",
@@ -4404,10 +4554,21 @@ func (p *GuardrailProxy) writeBlockedChatReply(w http.ResponseWriter, model stri
 // writeBlockedResponseGemini returns a blocked response in Gemini
 // generateContent API format (non-streaming).
 func (p *GuardrailProxy) writeBlockedResponseGemini(w http.ResponseWriter, msg string) {
-	resp := map[string]interface{}{
-		"candidates": []map[string]interface{}{{
-			"content": map[string]interface{}{
-				"parts": []map[string]interface{}{
+	resp := geminiBlockFrame(msg)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-DefenseClaw-Blocked", "true")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// geminiBlockFrame is the block as one Gemini candidates envelope: the whole
+// non-stream reply, one frame of a stream, or the last frame of a stream
+// the agent already got part of (GAP-1206).
+func geminiBlockFrame(msg string) map[string]any {
+	return map[string]any{
+		"candidates": []map[string]any{{
+			"content": map[string]any{
+				"parts": []map[string]any{
 					{"text": msg},
 				},
 				"role": "model",
@@ -4418,10 +4579,6 @@ func (p *GuardrailProxy) writeBlockedResponseGemini(w http.ResponseWriter, msg s
 		"defenseclaw_blocked": true,
 		"defenseclaw_reason":  msg,
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-DefenseClaw-Blocked", "true")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // writeBlockedStreamGemini returns a blocked response as a Gemini
@@ -4447,21 +4604,7 @@ func (p *GuardrailProxy) writeBlockedStreamGemini(w http.ResponseWriter, msg str
 	w.Header().Set("X-DefenseClaw-Blocked", "true")
 	w.WriteHeader(http.StatusOK)
 
-	frame := map[string]interface{}{
-		"candidates": []map[string]interface{}{{
-			"content": map[string]interface{}{
-				"parts": []map[string]interface{}{
-					{"text": msg},
-				},
-				"role": "model",
-			},
-			"finishReason": "SAFETY",
-			"index":        0,
-		}},
-		"defenseclaw_blocked": true,
-		"defenseclaw_reason":  msg,
-	}
-	data, _ := json.Marshal(frame)
+	data, _ := json.Marshal(geminiBlockFrame(msg))
 	fmt.Fprintf(w, "data: %s\n\n", data)
 	flusher.Flush()
 }
@@ -5697,14 +5840,17 @@ func injectNotificationForPassthrough(raw json.RawMessage, content, path string)
 // relative target resolves in an empty directory (proxyNeutralCWD).
 func (p *GuardrailProxy) toolCallAction(ctx context.Context, toolName, args string) trustedActionRequest {
 	connectorName := p.connectorName()
-	trusted, toolCWD := agentHookTrustedActionArgs(connectorName, toolName, json.RawMessage(args))
+	trusted, toolCWD := agentHookTrustedActionArgs(connectorName, toolName, proxyFreeformToolArgs(toolName, args))
 	actionTool, trusted := agentHookNativeFileView(agentHookTrustedActionTool(connectorName, toolName, runtime.GOOS), trusted)
 	cfg := proxyDecisionConfig(ctx)
+	proxyTier, proxyTiers := p.toolCallTierTable(ctx, cfg)
+	cwd, standIn := proxyToolCallCWD(toolCWD)
 	action := trustedActionRequest{
 		Input: actionfacts.Input{
 			Tool:            actionTool,
 			Args:            trusted,
-			CWD:             proxyToolCallCWD(toolCWD),
+			CWD:             cwd,
+			StandInCWD:      standIn,
 			ActiveHome:      hookActiveHome(ctx),
 			WindowsHookHost: windowsHookHost() && !p.toolCallSecureClient(ctx),
 		},
@@ -5712,6 +5858,8 @@ func (p *GuardrailProxy) toolCallAction(ctx context.Context, toolName, args stri
 		Connector:          connectorName,
 		EnforcementCapable: true,
 		StrictPolicy:       p.toolCallStrictTier(ctx, cfg),
+		PolicyTier:         proxyTier,
+		Tiers:              proxyTiers,
 		ManagedInstall:     cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode),
 		recordTelemetry: func(observation trustedActionTelemetry) {
 			p.recordParserUncertaintyMetricV8(
@@ -5724,33 +5872,96 @@ func (p *GuardrailProxy) toolCallAction(ctx context.Context, toolName, args stri
 	return action
 }
 
+// proxyFreeformToolArgs is the argument object of a tool call whose
+// arguments are not a JSON object: a Responses custom (free-form) tool's
+// input is plain text, the tool's one argument. A shell execution tool's
+// text is its command ({"command": text}); any other tool's is {"input":
+// text}, the field the patch and content readers take a free-form input
+// from. Without it the text reached no command rule: a destructive or
+// exfiltrating command in a custom_tool_call was forwarded where the same
+// command as a function_call was blocked (rel-1-0-10:GAP-2144). An object,
+// and an empty argument, are returned as they are.
+func proxyFreeformToolArgs(toolName, args string) json.RawMessage {
+	text := strings.TrimSpace(args)
+	if text == "" || (strings.HasPrefix(text, "{") && json.Valid([]byte(text))) {
+		return json.RawMessage(args)
+	}
+	key := "input"
+	if actionfacts.IsImmediateShellExecutionTool(strings.TrimSpace(toolName)) {
+		key = "command"
+	}
+	wrapped, err := json.Marshal(map[string]string{key: args})
+	if err != nil {
+		return json.RawMessage(args)
+	}
+	return wrapped
+}
+
 // proxyToolCallCWD is the directory a tool call names for its command when
 // it is absolute, else proxyNeutralCWD: a model reply carries no session
 // directory. Judged with none, or with a directory that does not exist, a
 // shell call got no command reading that needs a directory, so an awk
 // system() or a PowerShell Add-Content that writes ~/.ssh/authorized_keys
 // raised no finding on the proxy where every hook connector blocks it
-// (rel-1-0-10:GAP-0782).
-func proxyToolCallCWD(toolCWD string) string {
+// (rel-1-0-10:GAP-0782). standIn is the neutral folder when cwd is it: it is
+// no folder of the caller, so a wrapper's folder relative to the caller's is
+// not placed from it (actionfacts.Input.StandInCWD, rel-1-0-10:GAP-2188).
+func proxyToolCallCWD(toolCWD string) (cwd, standIn string) {
 	if cwd := inspectToolTrustedShellCWD(toolCWD); cwd != "" {
-		return cwd
+		return cwd, ""
 	}
-	return proxyNeutralCWD()
+	cwd = proxyNeutralCWD()
+	return cwd, cwd
 }
 
-// proxyNeutralCWD is an empty private directory the gateway creates once
-// (os.MkdirTemp, mode 0700): absolute and ~ operands are judged as on the
-// hook routes, and a relative one resolves to a file that does not exist,
-// as in a fresh project, never to a real file the call did not name. ""
-// when it cannot be created (the call is then judged without one, as
-// before).
-var proxyNeutralCWD = sync.OnceValue(func() string {
+// proxyNeutralCWD is an empty private directory of the gateway (os.MkdirTemp,
+// mode 0700): absolute and ~ operands are judged as on the hook routes, and a
+// relative one resolves to a file that does not exist, as in a fresh project,
+// never to a real file the call did not name. "" when it cannot be created
+// (the call is then judged without one, as before).
+//
+// It is checked on every call and made again when it is gone or no longer an
+// empty folder: it was made once per process, and the temp folder is cleaned
+// under a running gateway (systemd-tmpfiles ages, a disk guard that sweeps
+// empty folders), after which every later call was judged against a folder
+// that does not exist and the verdict changed with it (rel-1-0-10:GAP-2113:
+// block to allow on attack calls, allow to block on benign ones). A folder
+// that is not empty any more is left as it is and a fresh one is used.
+func proxyNeutralCWD() string {
+	proxyNeutralDir.mu.Lock()
+	defer proxyNeutralDir.mu.Unlock()
+	if dir := proxyNeutralDir.path; dir != "" && proxyNeutralDirEmpty(dir) {
+		return dir
+	}
 	dir, err := os.MkdirTemp("", "defenseclaw-proxy-cwd-")
 	if err != nil {
+		proxyNeutralDir.path = ""
 		return ""
 	}
+	proxyNeutralDir.path = dir
 	return dir
-})
+}
+
+var proxyNeutralDir struct {
+	mu   sync.Mutex
+	path string
+}
+
+// proxyNeutralDirEmpty reports that dir is still a folder (not a link) with
+// nothing in it.
+func proxyNeutralDirEmpty(dir string) bool {
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	f, err := os.Open(dir)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	names, err := f.Readdirnames(1)
+	return len(names) == 0 && errors.Is(err, io.EOF)
+}
 
 // toolCallCodeGuardFindings is CodeGuard over a write call's content
 // (codeGuardScanWriteArgs), as inspectTrustedToolPolicyCtx scans it for the
@@ -5759,12 +5970,13 @@ func (p *GuardrailProxy) toolCallCodeGuardFindings(ctx context.Context, action t
 	if p.toolCallSecureClient(ctx) || ManagedEnterpriseActive() {
 		return nil
 	}
-	tool, args, partial := action.Input.Tool, action.Input.Args, false
+	tool, args := action.Input.Tool, action.Input.Args
+	var shown json.RawMessage
 	if !codeGuardWriteTool(tool) {
-		// A shell here-document patch (rel-1-0-10:GAP-1635), as the hook
-		// routes read it (codeGuardWriteRequest).
+		// A shell here-document patch or file write (rel-1-0-10:GAP-1635,
+		// GAP-1640), as the hook routes read it (codeGuardWriteRequest).
 		var ok bool
-		if args, partial, ok = codeGuardShellPatchArgs(action.Input); !ok {
+		if args, shown, ok = codeGuardShellPatchArgs(action.Input); !ok {
 			return nil
 		}
 		tool = "apply_patch"
@@ -5773,9 +5985,7 @@ func (p *GuardrailProxy) toolCallCodeGuardFindings(ctx context.Context, action t
 	if cfg := proxyDecisionConfig(ctx); cfg != nil {
 		rulesDir = cfg.Scanners.CodeGuard
 	}
-	scan := codeGuardScanWriteArgs(rulesDir, tool, args)
-	scan.complete = scan.complete && !partial
-	return codeGuardRuleFindings(scan, true, action.EnforcementCapable)
+	return codeGuardRuleFindings(codeGuardScanShellView(rulesDir, tool, args, shown), true, action.EnforcementCapable)
 }
 
 // proxyBareReading is a tool call as the proxy read it before it was built
@@ -5802,6 +6012,45 @@ func proxyPOSIXReading(action trustedActionRequest) (trustedActionRequest, bool)
 	action.Input.DialectHint = ""
 	action.windowsShellDialect, action.windowsDialectReadings, action.windowsPowerShellReading = false, false, nil
 	return action, true
+}
+
+// proxyWindowsPathReading is a file tool call that names an absolute Windows
+// drive path, judged with the root of that drive as its working folder. A
+// model reply carries no session directory, and on a POSIX gateway the
+// neutral one (proxyNeutralCWD) is a POSIX folder, so the call's Windows path
+// got the POSIX reading: a credential file under a Windows home was read
+// MEDIUM in every tier where the Claude Code hook, asked from a Windows
+// folder, blocks it in strict and managed (rel-1-0-10:GAP-0909). The drive
+// root names no file of a POSIX gateway, so a relative operand still names no
+// real file. ok is false for a shell call (its Windows readings are the
+// dialect ones), a call already judged in a Windows folder, and a call that
+// names no absolute drive path.
+func proxyWindowsPathReading(action trustedActionRequest) (trustedActionRequest, bool) {
+	if trustedBashExecutionTool(action.Input.Tool) || trustedPowerShellExecutionTool(action.Input.Tool) ||
+		action.Input.Command != "" || !strings.HasPrefix(action.Input.CWD, "/") {
+		return action, false
+	}
+	var args map[string]any
+	if json.Unmarshal(action.Input.Args, &args) != nil {
+		return action, false
+	}
+	keys := make([]string, 0, len(args))
+	for key := range args {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	for _, key := range keys {
+		value, _ := args[key].(string)
+		if len(value) >= 3 && asciiDriveLetter(value[0]) && value[1] == ':' && (value[2] == '\\' || value[2] == '/') {
+			action.Input.CWD = value[:1] + `:\`
+			return action, true
+		}
+	}
+	return action, false
+}
+
+func asciiDriveLetter(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 
 // toolCallStrictTier reports whether the proxy judges its connector's tool
@@ -5870,6 +6119,12 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 		if posix, ok := proxyPOSIXReading(action); ok {
 			findings = mergeBoundedFindings(findings, trustedToolCallFindings(ctx, posix, "", p.toolCallSecureClient(ctx)))
 		}
+		// A file call naming a Windows drive path is also judged from a
+		// Windows folder, as the hook route judges it on a Windows session;
+		// the stronger is kept (rel-1-0-10:GAP-0909).
+		if windows, ok := proxyWindowsPathReading(action); ok {
+			findings = mergeBoundedFindings(findings, trustedToolCallFindings(ctx, windows, "", p.toolCallSecureClient(ctx)))
+		}
 		// The reading the proxy made before it built the hook request (the
 		// tool name and arguments as the reply carries them: no projection,
 		// working folder or home) is judged too, and the stronger is kept, so
@@ -5877,6 +6132,9 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 		// than the hook projection does (a Windows-spelled home file, a
 		// credential path of another account's home; rel-1-0-10:GAP-0872).
 		findings = mergeBoundedFindings(findings, dispatchTrustedAction(ctx, proxyBareReading(p.connectorName(), toolName, args)))
+		// Each reading merged above joined its own effect findings: one that a
+		// 1.0.10 finding of another reading names folds into it.
+		findings = withEffectsFoldedIntoCall(findings)
 		// CodeGuard reads the file content a write call carries, as on the
 		// hook routes (rel-1-0-10:GAP-0776: the proxy never ran it).
 		findings = append(findings, p.toolCallCodeGuardFindings(ctx, action)...)
@@ -6129,6 +6387,9 @@ func (s *sseByteMeter) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// Unwrap lets the usage record find its writer under the meter.
+func (s *sseByteMeter) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
 func (s *sseByteMeter) Flush() {
 	if f, ok := s.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
@@ -6291,8 +6552,9 @@ func (p *GuardrailProxy) rawForwardChatCompletion(
 		defer postCancel()
 
 		postStart := time.Now()
-		respMessages := []ChatMessage{{Role: "assistant", Content: completion}}
-		verdict := p.inspector.Inspect(postCtx, "completion", completion, respMessages, req.Model, mode)
+		checkCompletion := extractRawForwardCheckCompletion(respBody)
+		respMessages := []ChatMessage{{Role: "assistant", Content: checkCompletion}}
+		verdict := p.inspector.Inspect(postCtx, "completion", checkCompletion, respMessages, req.Model, mode)
 		p.logPostCall(req.Model, completion, verdict, time.Since(postStart), usage)
 		overlay := p.recordTelemetry(llmCtx, "completion", req.Model, verdict, time.Since(postStart), mode,
 			verdict != nil && verdict.Action == "block" && mode == "action")
@@ -6454,6 +6716,9 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 	var accumulated responseText
 	var tcAcc toolCallAccumulator
 	var bufferedTCFrames [][]byte
+	// The mid-stream checks of this stream share what they read of the
+	// text so far (midStreamScanState, GAP-0515).
+	midCtx := withMidStreamScanState(llmCtx, newMidStreamScanState())
 	bufferedTCSize := 0
 	streamBlocked := false
 	streamResponseID := ""
@@ -6469,6 +6734,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 
 	blockStream := func(reason string) {
 		streamBlocked = true
+		usageStreamBlocked(w) // substrate-1:GAP-1119
 		sseOutcome = "blocked"
 		sseMetricOutcome = observability.OutcomeBlocked
 		msg := blockMessage(customBlockMsg, "completion", reason)
@@ -6479,10 +6745,10 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 			return true
 		}
 		finalTextInspected = true
-		content := accumulated.String()
 		postCtx, postCancel := p.postCallContext(llmCtx)
-		verdict := p.inspector.Inspect(postCtx, "completion", content,
-			[]ChatMessage{{Role: "assistant", Content: content}}, req.Model, mode)
+		checkContent := accumulated.CheckText()
+		verdict := p.inspector.Inspect(postCtx, "completion", checkContent,
+			[]ChatMessage{{Role: "assistant", Content: checkContent}}, req.Model, mode)
 		postCancel()
 		p.resolveConfirm(r.Context(), r, verdict, "completion", req.Model, mode)
 		enforced := verdict != nil && verdict.Action == "block" && mode == "action"
@@ -6529,22 +6795,32 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 	// client gets an SSE comment line every streamKeepAliveAfter (GAP-1307):
 	// heldAt is when the hold began, keepAt the last keep-alive.
 	var heldFrames [][]byte
+	var heldMarks []int                 // the text length once each held frame was read (GAP-1306)
+	maskedReasoning := map[int][2]int{} // unresolved reasoning bytes already sent masked (GAP-2170)
 	heldSize := 0
 	var heldAt, keepAt time.Time
-	flushHeldFrames := func() {
-		for _, frame := range heldFrames {
+	// sendHeld sends the first n held frames; the rest stays held.
+	sendHeld := func(n int) {
+		for _, frame := range heldFrames[:n] {
 			_, _ = w.Write(frame)
+			heldSize -= len(frame)
 		}
-		if len(heldFrames) > 0 {
+		if n > 0 {
 			flusher.Flush()
 		}
-		heldFrames, heldSize = nil, 0
+		heldFrames, heldMarks = heldFrames[n:], heldMarks[n:]
+		if len(heldFrames) == 0 {
+			heldFrames, heldMarks, heldSize = nil, nil, 0
+		}
 	}
+	flushHeldFrames := func() { sendHeld(len(heldFrames)) }
 	// secretBound decides an open secret at a hold bound: TRUNCATED, the
 	// unknown tier of the pack. Every frame's text was checked. False: it
 	// blocked.
-	secretBound := func(c bounded.Cap, why string) bool {
-		accumulated.ReleaseOpenSecret()
+	streamBound := func(c bounded.Cap, why string, release bool) bool {
+		if release {
+			accumulated.ReleaseOpenSecret()
+		}
 		tv := p.streamTailTruncatedVerdict(llmCtx, c, why)
 		overlay := p.recordTelemetry(llmCtx, "completion", req.Model, tv, 0, mode, tv.Action == "block")
 		modelTrace.AddGuardrailOverlay(overlay)
@@ -6557,13 +6833,48 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 		fmt.Fprintf(os.Stderr, "[guardrail] STREAM-TRUNCATED %s: forwarded with an alert\n", logDisplayReason(tv.Reason))
 		return true
 	}
+	secretBound := func(c bounded.Cap, why string) bool { return streamBound(c, why, true) }
+	// runHeldBound decides the held bound behind an open token or digit run
+	// once per call (rel-1-0-10:GAP-1767, LEAD ruling 2026-11-26 21:00Z): past
+	// streamSecretMaxHeld the text read so far is checked and the unknown tier
+	// of the pack decides, so a reply that keeps a run open at every piece end
+	// (a numeric table, GAP-1265) gets the TRUNCATED verdict, never none.
+	// release: the pieces from the first byte of the run are over the bound
+	// themselves, so the run is given up and goes out once decided; otherwise
+	// the pieces before it go out and the run stays held for its own check
+	// (GAP-1306). A later pass of the same call is not decided again.
+	runHeldHit := false
+	runHeldBound := func(release bool) bool {
+		if runHeldHit {
+			if release {
+				accumulated.ReleaseOpenSecret()
+			}
+			return true
+		}
+		runHeldHit = true
+		return streamBound(bounded.Bytes, streamRunHeldWhy, release)
+	}
 	// secretWait reports that the next frame (next bytes) must wait; ok is
 	// false when a bound blocked.
-	secretWait := func(next int) (wait, ok bool) {
+	secretWait := func(frame *[]byte) (wait, ok bool) {
+		next := len(*frame)
 		if mode != "action" {
 			return false, true
 		}
 		o := accumulated.OpenSecret()
+		if o.reasoningOnly {
+			runs := accumulated.ParkedReasoningRuns()
+			frames := append(append([][]byte(nil), heldFrames...), *frame)
+			if masked, ok := maskRawForwardReasoning(frames, runs, maskedReasoning); ok {
+				heldFrames = masked[:len(masked)-1]
+				heldSize = bufferedBytes(heldFrames)
+				*frame = masked[len(masked)-1]
+				for _, run := range runs {
+					maskedReasoning[run.lane] = [2]int{run.start, run.start + len(run.text)}
+				}
+				return false, true
+			}
+		}
 		switch {
 		case !o.open:
 			return false, true
@@ -6572,10 +6883,36 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 		case heldSize+next > streamSecretMaxHeld && o.pem:
 			return false, secretBound(bounded.Bytes, fmt.Sprintf("over %d reply stream bytes held behind an open secret", streamSecretMaxHeld))
 		case heldSize+next > streamSecretMaxHeld:
-			// Only a token or a digit run is open (GAP-1265): the held
-			// frames, every one checked, go out with no verdict, and the
-			// next ones are held behind it again.
-			return false, true
+			// Only a token or a digit run is open (GAP-1265): the bound
+			// decides it once (runHeldBound, GAP-1767), then the held frames
+			// before the one with the run's first byte, every one checked,
+			// go out and the run stays held with the next frame (GAP-1306).
+			// When the frames from the run's first byte are over the bound
+			// themselves, the run goes out once decided. When only reasoning runs parked
+			// by the switch to the answer are open (o.answerParkedOnly,
+			// GAP-2170: parked until the message ends while the answer
+			// streams behind it), all go out as rel does, with no verdict: a
+			// benign answer over the bound after thinking that ends in a
+			// number is not cut. A run parked at a block end or a tool switch
+			// keeps the verdict (GAP-2218).
+			k := heldBeforeRun(heldMarks, accumulated.OpenRunFrom())
+			rest := heldSize + next
+			for _, f := range heldFrames[:k] {
+				rest -= len(f)
+			}
+			if k == 0 || rest > streamSecretMaxHeld {
+				if o.answerParkedOnly {
+					return false, true
+				}
+				return false, runHeldBound(true)
+			}
+			// A parked run keeps the parent's release with no verdict
+			// (GAP-2170, GAP-2224).
+			if !o.parkedOnly && !runHeldBound(false) {
+				return false, false
+			}
+			sendHeld(k)
+			heldAt = time.Now()
 		}
 		return true, true
 	}
@@ -6644,8 +6981,8 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 		}
 
 		if mode == "action" && frameHasText {
-			content := accumulated.String()
-			verdict := p.inspector.InspectMidStream(llmCtx, "completion", content,
+			content := accumulated.CheckText()
+			verdict := p.inspector.InspectMidStream(midCtx, "completion", content,
 				[]ChatMessage{{Role: "assistant", Content: content}}, req.Model, mode)
 			p.resolveConfirm(r.Context(), r, verdict, "completion", req.Model, mode)
 			if verdict != nil && verdict.Action == "block" {
@@ -6692,13 +7029,14 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 				return true
 			}
 		}
-		if wait, ok := secretWait(len(frame)); !ok {
+		if wait, ok := secretWait(&frame); !ok {
 			return false
 		} else if wait {
 			if len(heldFrames) == 0 {
 				heldAt = time.Now()
 			}
 			heldFrames = append(heldFrames, append([]byte(nil), frame...))
+			heldMarks = append(heldMarks, accumulated.Len())
 			heldSize += len(frame)
 			return true
 		}
@@ -6802,6 +7140,7 @@ scan:
 			cause = resp.Request.Context().Err()
 		}
 		failureOutcome, technicalFailure, lifecycleOutcome := proxyV8FailureClassification(cause)
+		setUsageEndErr(w, cause)
 		failedResult := proxyV8TraceResult{
 			Outcome: failureOutcome, ErrorType: "upstream_stream_read",
 			TechnicalFailure: technicalFailure, OutputText: accumulated.String(), ToolCalls: tcAcc.JSON(),
@@ -7008,6 +7347,16 @@ func extractRawForwardCompletion(respBody []byte, stream bool) (string, *ChatUsa
 		out.AddAll(pieces)
 	}
 	return out.String(), nil
+}
+
+func extractRawForwardCheckCompletion(respBody []byte) string {
+	var parsed struct {
+		Choices []chatShapeChoice `json:"choices"`
+	}
+	if json.Unmarshal(respBody, &parsed) != nil {
+		return ""
+	}
+	return responsePiecesCheckText(chatChoicesPieces(parsed.Choices, false))
 }
 
 func extractRawForwardToolCalls(respBody []byte, stream bool) json.RawMessage {

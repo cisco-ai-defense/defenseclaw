@@ -18,6 +18,8 @@ package gateway
 
 import (
 	"context"
+	"fmt"
+	"math/rand/v2"
 	"net"
 	"os"
 	"path/filepath"
@@ -52,15 +54,35 @@ func TestIsAddrInUse(t *testing.T) {
 	}
 }
 
+// listenOnOwnLoopbackAddress listens on a port of a loopback address picked at
+// random from 127.0.0.0/8 (all of it is loopback on Linux), so the port the
+// test frees and then expects to re-bind can only be taken by a socket bound to
+// the same address. On 127.0.0.1 the kernel hands the same freed port to any
+// other process of a busy box (another test binary's listener, or the source
+// port of an outgoing connection), which holds it past the retry budget
+// (GAP-2061). Where the address cannot be bound (macOS only has 127.0.0.1) it
+// listens on 127.0.0.1.
+func listenOnOwnLoopbackAddress(t *testing.T) net.Listener {
+	t.Helper()
+	for range 20 {
+		host := fmt.Sprintf("127.%d.%d.%d", 1+rand.IntN(254), rand.IntN(256), 1+rand.IntN(254))
+		if ln, err := net.Listen("tcp", host+":0"); err == nil {
+			return ln
+		}
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	return ln
+}
+
 // TestListenWithRetryReclaimsPort mirrors the setup --restart window: the port
 // is held when the new gateway starts binding, then released shortly after.
 // listenWithRetry must keep retrying and succeed once the port frees, instead
 // of failing the way a bare net.Listen would.
 func TestListenWithRetryReclaimsPort(t *testing.T) {
-	occupier, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	occupier := listenOnOwnLoopbackAddress(t)
 	addr := occupier.Addr().String()
 
 	// Release the port mid-flight, like the prior gateway exiting during a

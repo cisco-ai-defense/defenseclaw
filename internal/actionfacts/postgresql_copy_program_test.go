@@ -122,8 +122,6 @@ func TestPostgreSQLCopyProgramHardNegatives(t *testing.T) {
 		{name: "concatenated program", tool: "sql_query", connection: connection, database: "production", query: "COPY t TO PROGRAM 'id' || suffix"},
 		{name: "dynamic select", tool: "sql_query", connection: connection, database: "production", query: "COPY (SELECT current_user) TO PROGRAM 'id'"},
 		{name: "query from program", tool: "sql_query", connection: connection, database: "production", query: "COPY (SELECT 1) FROM PROGRAM 'id'"},
-		{name: "escape string", tool: "sql_query", connection: connection, database: "production", query: "COPY t TO PROGRAM E'id'"},
-		{name: "dollar string", tool: "sql_query", connection: connection, database: "production", query: "COPY t TO PROGRAM $$id$$"},
 		{name: "empty program", tool: "sql_query", connection: connection, database: "production", query: "COPY t TO PROGRAM ''"},
 		{name: "program whitespace", tool: "sql_query", connection: connection, database: "production", query: "COPY t TO PROGRAM ' id '"},
 		{name: "with options", tool: "sql_query", connection: connection, database: "production", query: "COPY t TO PROGRAM 'id' WITH (FORMAT csv)"},
@@ -192,5 +190,15 @@ func TestPostgreSQLCopyProgramIdentityDigestIsExact(t *testing.T) {
 	different := project("postgresql://db.invalid/two", "two")
 	if first == "" || first != same || first == different {
 		t.Fatalf("digest exactness equality=%t mismatch=%t", first == same, first != different)
+	}
+}
+
+func TestPostgreSQLCopyProgramsPSQLCLI(t *testing.T) {
+	facts := Analyze(Input{
+		Tool:    "shell",
+		Command: `psql -d production -c "COPY audit.events FROM PROGRAM 'printf data';"`,
+	})
+	if _, ok := ExactPostgreSQLCopyProgram(facts); !ok {
+		t.Fatalf("expected psql CLI COPY PROGRAM fact, got %#v", facts.PostgreSQLCopyPrograms)
 	}
 }

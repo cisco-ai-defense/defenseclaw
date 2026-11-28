@@ -301,13 +301,19 @@ func TestR103B36HeaderlessManagedShellCallFailsClosed(t *testing.T) {
 // command-hook shell calls: evidence that is present, a non-shell tool, a
 // per-user request and a sandbox request are unchanged.
 func TestCommandHookResolvedWritesScope(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the managed hook client sends no header on Windows")
-	}
 	shell := actionfacts.Input{Tool: "Bash", Args: json.RawMessage(`{"command":"echo hi > a.txt"}`)}
 	managed := withManagedHookPeer(context.Background(), managedHookPeer{Home: "/home/alice"})
-	if got := commandHookResolvedWrites(managed, &config.Config{}, shell); got[hookpaths.TruncatedKey] != "1" || len(got) != 1 {
-		t.Fatalf("headerless managed shell call = %v, want the truncation marker only", got)
+	headerless := commandHookResolvedWrites(managed, &config.Config{}, shell)
+	if runtime.GOOS == "windows" {
+		// The Windows managed hook client resolves no write and sends no
+		// header, so a headerless call is not a failed client resolver: no
+		// truncation marker is added and the gateway places every write
+		// itself.
+		if len(headerless) != 0 {
+			t.Fatalf("headerless managed Windows shell call = %v, want no client evidence", headerless)
+		}
+	} else if headerless[hookpaths.TruncatedKey] != "1" || len(headerless) != 1 {
+		t.Fatalf("headerless managed shell call = %v, want the truncation marker only", headerless)
 	}
 	sent := map[string]string{hookpaths.CWDKey: "/home/alice"}
 	if got := commandHookResolvedWrites(context.WithValue(managed, resolvedWritesContextKey{}, sent), nil, shell); len(got) != 1 || got[hookpaths.CWDKey] == "" {

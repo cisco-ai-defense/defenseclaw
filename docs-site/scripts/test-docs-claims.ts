@@ -2002,7 +2002,7 @@ const r105Rows: DocRow[] = [
   // pod docs it3 (2026-10-28)
   { gap: "GAP-2264", page: "hitl.mdx", has: ["Outside Manual mode Claude Code cannot ask, so the call is blocked and its row shows `decision=blocked` in the list and `blocked` on the `Decision` line of `--show`."], lacks: ["Outside Manual mode, the decision is `block`."] },
   { gap: "GAP-2264", page: "stories/hitl-approvals.mdx", has: ["Outside Manual mode Claude Code cannot ask, so the call is blocked and its row shows `decision=blocked` in the list and `blocked` on the `Decision` line of `--show`."], lacks: ["Outside Manual mode, the decision is `block`."] },
-  { gap: "GAP-2260", page: "routing/semantic-routing.mdx", has: ["On native Windows `defenseclaw setup routing` says so and refuses `--enable`; `--disable` still turns off a routing block copied from another machine."] },
+  { gap: "GAP-2260", page: "routing/semantic-routing.mdx", has: ["On native Windows `defenseclaw setup routing --enable` says so and refuses while the classifier is `vllm_sr`, pointing to `defenseclaw routing setup --classifier rules`; `--disable` still turns off a routing block copied from another machine."] },
   { gap: "GAP-2334", page: "enterprise/mdm/linux-config-management.mdx", section: "Check health", has: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` (exit `1`, or `unhealthy` with `--format value`, when `verify` reports a problem, `coverage_complete` is `false`, or `security_complete` is `false` for any reason other than `hook_process_fail_open`, `unprivileged_user_namespaces` and `unprivileged_ptrace`; a host with only those warnings passes and gets them on standard error). Add `--require-security-complete` to fail on incomplete security too |"], lacks: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` |", "a host whose `verify` passes with incomplete security still fails it", "a host whose `verify` passes with only incomplete security passes"] },
   // pod docs r105 loop i1 (2026-10-28)
   { gap: "GAP-2411", page: "enterprise/troubleshooting.mdx", has: ["On Linux and macOS `status` warns `policy_not_applied` with `policy.applied: false` and `security_complete: false`, and `verify` reports it as an error and exits `1`."], lacks: ["`policy.applied: false` and do not warn"] },
@@ -2020,6 +2020,52 @@ const r105Rows: DocRow[] = [
   { gap: "sidecar-aispg-retest GAP-0015", page: "enterprise/lifecycle.mdx", section: "What uninstall keeps", has: ["`retained-state.json`, the root-only record of the state folders the uninstall kept", "a root-only `.defenseclaw-retained` marker"] },
   { gap: "sidecar-aispg-retest GAP-0015", page: "enterprise/linux.mdx", section: "Remove", has: ["`/var/lib/defenseclaw-enterprise/retained-state.json`", "`/var/lib/defenseclaw/.defenseclaw-retained`"] },
   { gap: "sidecar-aispg-retest GAP-0015", page: "enterprise/macos.mdx", section: "Remove", has: ["`/opt/cisco/defenseclaw/lifecycle/retained-state.json`", "`/opt/cisco/defenseclaw/runtime/.defenseclaw-retained`"] },
+  // Perl hook-file write readings (substrate-1 GAP-1139, GAP-1146, GAP-1147) and a skill added during a folder move (rel-1-0-10 GAP-2039): the pages state these limits.
+  { gap: "substrate-1 GAP-1139, GAP-1146, GAP-1147", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["DefenseClaw reads the inline Perl program only; a file the program loads with `require` or `do` can change values the hook cannot see, so an open of a hook file whose mode depends on such a file is reported as an unproven write.", "Subroutine and constant definitions made inside a string `eval` are not evaluated; an affected open of a hook file is reported as an unproven write.", "A Perl open mode changed by anything other than a plain assignment is not computed; the open of a hook file is reported as an unproven write.", "The hook reports the unproven write and asks for a literal path or a command split into simpler steps."] },
+  { gap: "rel-1-0-10 GAP-2039", page: "ai-discovery.mdx", section: "Skill inventory", has: ["A skill added at the same moment its folder is moved or re-linked can appear one scan later than other skills."] },
+  // Documented limits the owner approved (rel-1-0-10 GAP-0009, GAP-0011, GAP-2293): the support matrix states them.
+  { gap: "rel-1-0-10 GAP-0009, GAP-0011", page: "support-matrix.mdx", section: "Hook sizing", has: ["the rates in this table are the 1.0.10 rates. In 1.0.11 a sustained burst of hook calls for one user above about 80 calls a second on a 4 vCPU Linux host, or about 30 on Windows, is answered late, even on a host with free CPU", "A call past its answer budget follows the configured fail mode", "Each hook call adds about 20 KB to the local audit store."], lacks: ["or dropped on a small host"] },
+  { gap: "rel-1-0-10 GAP-2293", page: "support-matrix.mdx", section: "Platforms", has: ["On Windows, `defenseclaw-hook.exe` is about 53 MiB in the 1.0.10 release, because the OpenClaw extension bundle is built into it."], lacks: ["against about 41 MiB without it"] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-1639): a credentials file passed by name to a script is not tracked as a read.
+  { gap: "rel-1-0-10 GAP-1639", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["A credentials file passed by name to a script (for example a Python or Node script) is not tracked as a read; DefenseClaw does not read the script's code."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-0898): a find -exec reader over another account's home outside the home roots is not tracked as a read.
+  { gap: "rel-1-0-10 GAP-0898", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["A find -exec reader over another account's home outside /home and /Users is not raised as a read of that account's credentials; use file permissions for shared or mounted homes."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-2149): Removing hooks on Windows
+  { gap: "rel-1-0-10 GAP-2149", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["On Windows, removing DefenseClaw hooks from an agent with many configured hook entries can take up to about 30 seconds."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-1535): A Git Bash file reached through the working folder
+  { gap: "rel-1-0-10 GAP-1535", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["On Windows, a Git Bash command that reaches a file through the shell's working folder ($(pwd)/, ~+/, or a HOME set from it at run time) is not judged as that file; name the file directly."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-1588): A command joined to other statements
+  { gap: "rel-1-0-10 GAP-1588", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["On Windows, a command joined to other statements in some list forms (a background &, a subshell, or a here-document on the same line) may be judged without the context of the other statements."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0260): outbound requests after a credentials read
+  { gap: "substrate-1 GAP-0260", page: "substrate/threat-model.mdx", section: "Known limits", has: ["After a credentials read, the Substrate callout refuses outbound requests for the rest of the chain window, including hosts on the egress allowlist."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0636): npx MCP server programs
+  { gap: "substrate-1 GAP-0636", page: "substrate/threat-model.mdx", section: "Known limits", has: ["An npx MCP server's own programs are attested from the actor's npx cache; tools the server starts through PATH and a package's first, uncached run are not."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0710): commands DefenseClaw cannot fully read
+  { gap: "substrate-1 GAP-0710", page: "substrate/threat-model.mdx", section: "Known limits", has: ["A command that DefenseClaw cannot fully read and that touches hundreds of files takes up to about twice the time of its plainly written form."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0886): very long commands
+  { gap: "substrate-1 GAP-0886", page: "substrate/threat-model.mdx", section: "Known limits", has: ["On very long commands the laptop may alert at its evaluation limit where a Substrate actor blocks a private-key read."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0555): Claude settings edits in a sandbox without the kit
+  { gap: "substrate-1 GAP-0555", page: "substrate/threat-model.mdx", section: "Known limits", has: ["In a sandbox without the DefenseClaw kit, edits of Claude settings files are refused; full rewrites that keep DefenseClaw hooks and new files are judged."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0705): files changed by inline interpreter code
+  { gap: "substrate-1 GAP-0705", page: "substrate/threat-model.mdx", section: "Known limits", has: ["Files changed by inline interpreter code (perl -pi, python -c) are judged by the interpreter rules, not by file path."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0700): a home file spelled with a drive letter in Git Bash text
+  { gap: "substrate-1 GAP-0700", page: "substrate/threat-model.mdx", section: "Known limits", has: ["On Windows, a home file spelled with a drive letter in Git Bash text is judged by the Windows path rules."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-2169): Windows hook binary size in 1.0.11
+  { gap: "rel-1-0-10 GAP-2169", page: "support-matrix.mdx", section: "Platforms", has: ["The Windows hook binary is about 44 MB in 1.0.11; the added size is the command parsers that read what each tool call does."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-0929): a here-document and a command chosen at run time
+  { gap: "rel-1-0-10 GAP-0929", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["A command that feeds a here-document to a data reader and also runs a command chosen at run time, or has more statements after the reader, is judged at the unknown tier (an alert in default) even when the here-document holds only data."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-1324): a write target that needs many folder reads
+  { gap: "rel-1-0-10 GAP-1324", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["When a write target pattern needs more folder reads to expand than DefenseClaw allows, the write keeps the protected-target verdict (a block), as in 1.0.10, even when the pattern would reach only ordinary files."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-0350): a write target from an unset variable or substitution
+  { gap: "rel-1-0-10 GAP-0350", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["A write whose target comes from an unset variable, a command substitution or a default expansion is judged by what DefenseClaw can resolve; when that reaches no protected file, the write is allowed."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-0018): routine administration that is also an attack step
+  { gap: "rel-1-0-10 GAP-0018", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["DefenseClaw alerts, without blocking, on some routine administration that is also a known attack step: granting file capabilities or making files world-writable, reading a process environment, destructive SQL statements, and in strict mode reading .env files. Review these alerts in the context of the task."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-0609): deeply encoded powershell
+  { gap: "rel-1-0-10 GAP-0609", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["A PowerShell script that is encoded three or four times inside other encoded launchers is read, and its findings are recorded, but a finding that needs proof from the decoded script may alert rather than block; deeper nesting is blocked as over the evaluation limit."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0503): a read in the ssh folder after a shell function or cdpath move
+  { gap: "substrate-1 GAP-0503", page: "substrate/threat-model.mdx", section: "Known limits", has: ["A read inside the SSH folder after a move made by a shell function or a CDPATH prefix can also name the authorized-keys rule beside the read rule; the verdict is the same or stricter."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0990): a trap or alias from an unreadable command
+  { gap: "substrate-1 GAP-0990", page: "substrate/threat-model.mdx", section: "Known limits", has: ["A trap or alias installed by a command DefenseClaw cannot read statically is not followed into later functions."] },
 ];
 
 function pageSection(name: string, heading?: string): string {
@@ -2501,11 +2547,11 @@ describe('alerts decision label for a hook block matches the HITL pages (GAP-226
   });
 });
 
-// GAP-2260: setup routing refuses --enable on native Windows; semantic-routing.mdx says so.
+// GAP-2260 / GAP-1724 / GAP-1785: setup routing refuses --enable on native Windows only for the vllm_sr classifier; semantic-routing.mdx says so.
 describe('setup routing on native Windows matches semantic-routing.mdx (GAP-2260)', () => {
-  it('refuses --enable and names the reason on native Windows', () => {
+  it('refuses --enable for vllm_sr and names the reason on native Windows', () => {
     const py = source('cli/defenseclaw/commands/cmd_setup.py');
-    assert.ok(py.includes('if enable and _routing_unsupported_on_host():') && py.includes('"Semantic routing is not supported on native Windows: it routes OpenClaw and "'), 'setup routing no longer refuses --enable on native Windows: re-check semantic-routing.mdx Prerequisites');
+    assert.ok(py.includes('if enable and _routing_unsupported_on_host(app.cfg.routing):') && py.includes('return _native_windows() and routing_classifier(routing) == DEFAULT_CLASSIFIER') && py.includes('"The vllm_sr classifier is not available on native Windows: it needs Docker or a remote "') && py.includes('"defenseclaw routing setup --classifier rules"'), 'setup routing no longer refuses --enable on native Windows: re-check semantic-routing.mdx Prerequisites');
   });
 });
 
@@ -2553,7 +2599,7 @@ describe('policy test leaves unblocks out without --sandbox (GAP-2495)', () => {
 describe('a local credential read alerts, an SSH private key read is denied (GAP-2502)', () => {
   it('the gateway still makes a plain credential-path read an alert', () => {
     const disp = source('internal/gateway/trusted_action_context_disposition.go');
-    assert.ok(disp.includes('// A local read of a credential path is MEDIUM: alert, do not') && disp.includes('finding.enforcement = findingEnforcementAlertOnly') && disp.includes('trustedActionActiveSSHPrivateKeyContentRead(findingFacts)'), 'credential-read disposition changed: re-check segmentation.mdx Credential files (GAP-2502)');
+    assert.ok(disp.includes('// A local read of a credential path is MEDIUM: alert, do not') && disp.includes('finding.Proof = finding.Proof.Advise()') && disp.includes('trustedActionActiveSSHPrivateKeyContentRead(findingFacts)'), 'credential-read disposition changed: re-check segmentation.mdx Credential files (GAP-2502)');
   });
 });
 

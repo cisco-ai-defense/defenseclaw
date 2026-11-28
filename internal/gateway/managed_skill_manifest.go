@@ -128,6 +128,13 @@ func (cycle *managedInventoryPublishCycle) attachSkillManifests(components []end
 				continue
 			}
 		}
+		// Once part of the budget is spent, a one-part file the scan
+		// measured as larger than what is left is not read (it would not be
+		// sent): it waits for a later cycle.
+		if budget < skillManifestCycleBytes && c.skillManifestSize > int64(budget) &&
+			c.skillManifestSize <= skillManifestPartBytes {
+			continue
+		}
 		data, ok := read(hash)
 		if !ok {
 			continue

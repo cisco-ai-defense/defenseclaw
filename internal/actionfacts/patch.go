@@ -112,9 +112,12 @@ func isPatchFileHeader(line string) bool {
 // Claude Code Write or Edit of that name is a path fact as written, and the
 // patch of the same file must be judged as that write is
 // (rel-1-0-10:GAP-1052, GAP-0947). Home forms (~) are not, because the tool
-// does not expand them, nor are drive-relative paths (C:x), which name the
-// current directory of another drive: the tool writes a file no rule can
-// name, and the call is judged at the unknown tier (unplaced).
+// does not expand them, nor are drive-relative paths (C:x) on their own: C:x
+// names a file of the current folder of drive C, which only the working
+// folder of the call tells (patchDriveRelativePlaced places it there when
+// that folder is on C:, rel-1-0-10:GAP-1078). Another drive's current folder
+// is not known: the tool writes a file no rule can name, and the call is
+// judged at the unknown tier (unplaced).
 //
 // The drive and backslash forms are read so only where the patch tool runs on
 // Windows (patchTargetsAreWindowsNames). On Linux and macOS a backslash is a
@@ -217,13 +220,13 @@ func patchDirectivePath(line, prefix string) string {
 	return PatchTargetName(strings.TrimPrefix(line, prefix))
 }
 
-func appendExtractedPatch(out *extractedInput, text string) {
+func appendExtractedPatch(out *extractedInput, text, cwd string) {
 	if out.patchSet {
 		out.mergeProblem(StatusAmbiguous, IssueConflictingSources)
 		return
 	}
 	out.patchSet = true
-	parsed := parsePatchEnvelope(text)
+	parsed := readPatchEnvelope(text, patchView{cwd: cwd})
 	if parsed.status != StatusComplete {
 		out.mergeProblem(parsed.status, parsed.issue)
 		return
@@ -233,8 +236,53 @@ func appendExtractedPatch(out *extractedInput, text string) {
 	out.markApplicable()
 }
 
-func parsePatchEnvelope(text string) patchEnvelopeResult {
-	return readPatchEnvelope(text, false)
+// patchView is how a reader reads the header names of an envelope: in the
+// text a shell shows of a here-document it expands (shellView), and with the
+// working folder of the call (cwd) that a drive-relative name is placed
+// against (patchDriveRelativePlaced). An empty cwd places no drive-relative
+// name.
+type patchView struct {
+	shellView bool
+	cwd       string
+}
+
+// patchCallCWD is the working folder of an apply_patch tool call on a host
+// whose patch tool reads Windows names: the hook's working folder, or the
+// call's own working-folder argument when the hook gives none (the folder
+// Analyze reads the call in). Elsewhere it is empty: no drive-relative names.
+func patchCallCWD(input Input) string {
+	if !patchTargetsAreWindowsNames || !isApplyPatchTool(input.Tool) {
+		return ""
+	}
+	if input.CWD != "" {
+		return input.CWD
+	}
+	return extractArgsForTool(input.Args, input.Tool).cwd
+}
+
+// patchDriveRelativePlaced places a drive-relative header name (C:name, no
+// separator after the colon) against cwd when cwd is a drive path on the
+// same drive: Win32 opens C:name in the current folder of drive C, which is
+// the working folder when that folder is on C: (rel-1-0-10:GAP-1078). The
+// rule hookpaths cmdMklinkDriveRelative applies to the target of cmd mklink.
+// A name on another drive, a bare C:, or no drive working folder is not placed.
+func patchDriveRelativePlaced(name, cwd string) (string, bool) {
+	if !patchTargetsAreWindowsNames || len(name) < 3 || !isASCIILetter(name[0]) || name[1] != ':' ||
+		name[2] == '/' || name[2] == '\\' {
+		return "", false
+	}
+	if len(cwd) < 3 || !isASCIILetter(cwd[0]) || cwd[1] != ':' || cwd[2] != '/' && cwd[2] != '\\' ||
+		!strings.EqualFold(cwd[:1], name[:1]) {
+		return "", false
+	}
+	return strings.TrimRight(cwd, `/\`) + `\` + name[2:], true
+}
+
+// PatchDriveRelativePlaced is patchDriveRelativePlaced for the hookpaths
+// write target readers, so a drive-relative header names the same file for
+// every reader of the envelope (rel-1-0-10:GAP-2283).
+func PatchDriveRelativePlaced(name, cwd string) (string, bool) {
+	return patchDriveRelativePlaced(name, cwd)
 }
 
 // patchNamePlaced reports a header name a reader places: one
@@ -243,8 +291,8 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 // expansion, no escape: posixHeredocLiteralEscapes). A name the shell expands
 // is a file the tool writes whose name no rule reads, as one no reader places
 // (rel-1-0-10:GAP-1077).
-func patchNamePlaced(name string, shellView bool) bool {
-	return isAcceptedPatchPath(name) && (!shellView || !posixHeredocLiteralEscapes(name))
+func patchNamePlaced(name string, view patchView) bool {
+	return isAcceptedPatchPath(name) && (!view.shellView || !posixHeredocLiteralEscapes(name))
 }
 
 // patchHomeMarker stands for a plain $HOME or ${HOME} in the text a shell
@@ -259,8 +307,10 @@ const patchHomeMarker = "\x01HOME\x01"
 // active home, "~/<name>", which the path facts resolve as they resolve a
 // shell operand $HOME (rel-1-0-10:GAP-1094). The envelope stays unplaced as
 // a whole (GAP-1093): this only adds the file the header names.
-func patchHeaderTarget(name string, shellView bool) (string, bool) {
-	if shellView {
+// A drive-relative name on the drive of the working folder is the file of
+// that folder (patchDriveRelativePlaced).
+func patchHeaderTarget(name string, view patchView) (string, bool) {
+	if view.shellView {
 		if rest, ok := strings.CutPrefix(name, patchHomeMarker+"/"); ok {
 			if rest == "" || strings.HasPrefix(rest, "/") || strings.HasPrefix(rest, "~") ||
 				strings.IndexByte(rest, patchHomeMarker[0]) >= 0 || posixHeredocLiteralEscapes(rest) ||
@@ -270,13 +320,17 @@ func patchHeaderTarget(name string, shellView bool) (string, bool) {
 			return "~/" + rest, true
 		}
 	}
-	return name, patchNamePlaced(name, shellView)
+	if placed, ok := patchDriveRelativePlaced(name, view.cwd); ok && !view.shellView {
+		return placed, true
+	}
+	return name, patchNamePlaced(name, view)
 }
 
-// readPatchEnvelope is parsePatchEnvelope for the text of the envelope, or
-// for the text a shell shows of a here-document it expands (shellView), whose
-// header names may change when the shell expands them (patchNamePlaced).
-func readPatchEnvelope(text string, shellView bool) patchEnvelopeResult {
+// readPatchEnvelope reads an apply_patch envelope as the tool reads it: the
+// text of the envelope, or the text a shell shows of a here-document it
+// expands (shellView), whose header names may change when the shell expands
+// them (patchNamePlaced).
+func readPatchEnvelope(text string, view patchView) patchEnvelopeResult {
 	fail := func(status ParseStatus, issue IssueCode) patchEnvelopeResult {
 		return patchEnvelopeResult{status: status, issue: issue}
 	}
@@ -390,7 +444,7 @@ func readPatchEnvelope(text string, shellView bool) patchEnvelopeResult {
 				break
 			}
 		}
-		target, placed := patchHeaderTarget(pathValue, shellView)
+		target, placed := patchHeaderTarget(pathValue, view)
 		if kind != "" && pathValue != "" && len(pathValue) <= maxScalarBytes &&
 			strings.IndexByte(pathValue, 0) < 0 &&
 			strings.TrimLeftFunc(pathValue, unicode.IsSpace) == pathValue &&
@@ -549,7 +603,7 @@ func classifyPOSIXApplyPatchStdin(out *parseOutput, command *CommandFact) {
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
-	patch := readPatchEnvelope(text, shellView)
+	patch := readPatchEnvelope(text, patchView{shellView: shellView})
 	// A header no reader places is a file the tool writes and no path rule
 	// can name: the command carries the mark, and the gateway judges it at
 	// the unknown tier at least (CommandPatchNamesUnplacedTarget), as it
@@ -595,21 +649,39 @@ const UnplacedPatchTargetReason = "patch_target_unplaced"
 // caller judges the call at the unknown tier of the pack, never as a clean
 // allow (rel-1-0-10:GAP-1052, GAP-0947). An envelope the tool rejects for its
 // syntax writes nothing and is not reported.
-func PatchNamesUnplacedTarget(tool string, args json.RawMessage) bool {
+func PatchNamesUnplacedTarget(input Input) bool {
+	tool, args := input.Tool, input.Args
 	if !isApplyPatchTool(tool) || len(args) == 0 || len(args) > maxArgsJSONBytes {
 		return false
 	}
+	view := patchView{cwd: patchCallCWD(input)}
 	var object map[string]any
 	if json.Unmarshal(args, &object) != nil {
 		return false
 	}
 	for key, value := range object {
 		text, ok := value.(string)
-		if ok && (isPatchInputField(key) || isPatchEnvelopeField(key, value)) && parsePatchEnvelope(text).unplaced {
+		if ok && (isPatchInputField(key) || isPatchEnvelopeField(key, value)) && readPatchEnvelope(text, view).unplaced {
 			return true
 		}
 	}
 	return false
+}
+
+// PatchPathIsUnplacedWindowsName reports a patch target the patch tool reads
+// as a Windows name that no reader places (isAcceptedPatchPath): a
+// drive-relative path (C:x), a device or namespace path, a share without a
+// file. False where the patch tool does not read Windows names
+// (patchTargetsAreWindowsNames) and for the home forms, which a tool that
+// expands them (Hermes) places. Hermes' V4A patch tool writes such a file as
+// apply_patch does, so the gateway judges that call at the unknown tier too
+// (rel-1-0-10:GAP-1057).
+func PatchPathIsUnplacedWindowsName(value string) bool {
+	if !patchTargetsAreWindowsNames || value == "" || value == "~" ||
+		strings.HasPrefix(value, "~/") || strings.HasPrefix(value, `~\`) {
+		return false
+	}
+	return !isAcceptedPatchPath(value)
 }
 
 // CommandPatchNamesUnplacedTarget reports a shell command of facts that feeds

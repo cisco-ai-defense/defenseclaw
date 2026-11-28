@@ -307,6 +307,21 @@ try {
             if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 2) {
                 $failures.Add("a link another principal owns refused adoption: $($adoption.reason)")
             }
+            # GAP-1733: a folder that holds a per-user DefenseClaw install is
+            # left untouched and fails only that account, counted the same way.
+            $perUserInstall = [pscustomobject]@{
+                user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'claudecode'; ok = $false
+                error = 'enterprise hooks: the account''s DefenseClaw folder holds a per-user DefenseClaw install; it was left untouched and the account is not protected until that install is removed'
+            }
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $perUserInstall) -AccountLinkFailures 1
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 2) {
+                $failures.Add("a per-user install folder refused adoption: $($adoption.reason)")
+            }
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $perUserInstall)
+            Assert-TestSyncRefuses 'per-user install without trusted count' 'failure-free reconcile'
             Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $foreignLink)
             Assert-TestSyncRefuses 'foreign link without trusted count' 'failure-free reconcile'
             Set-TestGuardian $false $republishedSHA256 3 2 -Results @($linkHealthy, $foreignLink, [pscustomobject]@{

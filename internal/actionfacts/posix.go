@@ -55,6 +55,16 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 	parsedSource := source
 	file, err := parser.Parse(shellparse.Reader(source), "")
 	if err != nil {
+		if rewritten, ok := normalizePOSIXFunctionKeyword(source); ok {
+			// function f { ...; } is the definition f() { ...; } in Bash and
+			// zsh: read it as that (substrate-1:GAP-0705).
+			parser = syntax.NewParser(syntax.Variant(syntax.LangPOSIX))
+			if parsed, rewrittenErr := parser.Parse(shellparse.Reader(rewritten), ""); rewrittenErr == nil {
+				file, err, parsedSource = parsed, nil, rewritten
+			}
+		}
+	}
+	if err != nil {
 		normalized, valid := normalizePOSIXAggregateRedirects(source, true)
 		if !valid {
 			out.markInvalid(IssueInvalidSyntax)
@@ -90,9 +100,10 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 		}
 
 		switch typed := node.(type) {
-		case *syntax.Redirect, *syntax.Assign, *syntax.ParamExp:
+		case *syntax.Redirect, *syntax.Assign, *syntax.WordIter, *syntax.ParamExp:
 			// The secret-read chain's evidence: input redirects, variable
-			// values and the variables a word expands (credentialPathRecord).
+			// values (for-loop words too) and the variables a word expands
+			// (credentialPathRecord).
 			captureCredentialPathWord(&out, typed, stack, statementIDs, &credentialArgIndexes)
 		case *syntax.FuncDecl:
 			// A definition is inert until invoked. Do not project its body as
@@ -139,6 +150,7 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 		for i := range out.commands {
 			for j := range out.commands[i].Arguments {
 				out.commands[i].Arguments[j].homeSpelling = ""
+				out.commands[i].Arguments[j].homeTilde = ""
 			}
 		}
 	}
@@ -199,6 +211,58 @@ func collectExactPOSIXAbsoluteCDFallback(
 	target := projectPOSIXWord(call.Args[1])
 	return !program.Expands && program.Value == "cd" &&
 		!target.Expands && strings.HasPrefix(target.Value, "/")
+}
+
+// normalizePOSIXFunctionKeyword rewrites each Bash and zsh definition that
+// starts with the function keyword (function f { ...; }, function f() ...)
+// into the POSIX definition of the same name and body (f() { ...; }), and
+// false when it has none. The rest of the source is kept byte for byte, so
+// other Bash-only syntax stays invalid; a source with an all-output redirect
+// (&> f, >& f), which POSIX reads as a background command, is left to
+// normalizePOSIXAggregateRedirects and stays invalid with the keyword.
+func normalizePOSIXFunctionKeyword(source string) (string, bool) {
+	if !strings.Contains(source, "function") {
+		return "", false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(source), "")
+	if err != nil {
+		return "", false
+	}
+	type replacement struct {
+		start, end int
+		value      string
+	}
+	var replacements []replacement
+	valid := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch typed := node.(type) {
+		case *syntax.Redirect:
+			switch typed.Op {
+			case syntax.RdrAll, syntax.RdrAllClob, syntax.AppAll, syntax.AppAllClob, syntax.DplOut:
+				valid = false
+			}
+		case *syntax.FuncDecl:
+			if !typed.RsrvWord || typed.Name == nil || typed.Body == nil {
+				return valid
+			}
+			start, end := int(typed.Pos().Offset()), int(typed.Body.Pos().Offset())
+			if start < 0 || end <= start || end > len(source) || !strings.HasPrefix(source[start:], "function") {
+				valid = false
+				return false
+			}
+			replacements = append(replacements, replacement{start, end, typed.Name.Value + "() "})
+		}
+		return valid
+	})
+	if !valid || len(replacements) == 0 {
+		return "", false
+	}
+	sort.Slice(replacements, func(i, j int) bool { return replacements[i].start > replacements[j].start })
+	result := source
+	for _, edit := range replacements {
+		result = result[:edit.start] + edit.value + result[edit.end:]
+	}
+	return result, true
 }
 
 // normalizePOSIXAggregateRedirects rewrites the Bash and zsh redirects of
@@ -614,6 +678,9 @@ func projectPOSIXWord(word *syntax.Word) ArgumentFact {
 	if result.Expands {
 		if !expands && unquotedExpansion && quote == QuoteNone {
 			result.StaticGlob = staticValue
+			if (staticValue == "~" || strings.HasPrefix(staticValue, "~/")) && !strings.ContainsAny(staticValue, "*?[\\") {
+				result.homeTilde = staticValue
+			}
 		}
 		result.Value = ""
 	} else {
@@ -1518,6 +1585,7 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 		}
 		program := commandProgram(command.Executable)
 		var child parseOutput
+		chdir := ""
 		switch posixStaticWrapperSwitchKey(program) {
 		case "bash", "sh", "zsh", "dash", "ksh", "mksh":
 			if structuralPOSIXPipelineStdinInterpreter(out, &command) ||
@@ -1592,7 +1660,15 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 			}
 			child = parsePOSIX(body, out.nextID, wrapperDepth+1)
 		case posixStaticWrapperKey:
-			nestedArgv, ok, uncertain := staticPOSIXWrapperArgv(command.Argv, program)
+			argv := command.Argv
+			if program == "env" {
+				// env -C DIR runs its program in DIR, as (cd DIR && program)
+				// does (substrate-1:GAP-0685).
+				if stripped, target, ok := posixEnvChdir(command); ok {
+					argv, chdir = stripped, target
+				}
+			}
+			nestedArgv, ok, uncertain := staticPOSIXWrapperArgv(argv, program)
 			if uncertain {
 				out.markPartial(IssueUnsupportedConstruct)
 			}
@@ -1617,13 +1693,18 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 		default:
 			continue
 		}
+		outer, outerMover := command.workFolders, command.moverUnreadOrFolders()
+		if chdir != "" {
+			outer, outerMover = outer.with(chdir), outerMover.with(chdir)
+		}
 		for i := range child.commands {
-			// The body of a wrapper starts in the folder its caller is in.
+			// The body of a wrapper starts in the folder its caller is in,
+			// or in the folder env -C names.
 			inner := &child.commands[i]
 			if inner.moverUnread || command.moverUnread {
-				inner.moverUnreadFolders, inner.moverUnread = inner.moverUnreadOrFolders().within(command.moverUnreadOrFolders()), true
+				inner.moverUnreadFolders, inner.moverUnread = inner.moverUnreadOrFolders().within(outerMover), true
 			}
-			inner.workFolders = inner.workFolders.within(command.workFolders)
+			inner.workFolders = inner.workFolders.within(outer)
 		}
 		mergeStaticPOSIXWrapperChild(out, command, child)
 	}
@@ -2053,6 +2134,95 @@ func staticPOSIXShellCommandArgv(argv []string) bool {
 func posixExecLoginOption(arg string) bool {
 	return len(arg) > 1 && arg[0] == '-' && arg[1] != '-' &&
 		strings.ContainsRune(arg[1:], 'l')
+}
+
+// posixEnvChdir reads the change of folder of an env call (-C DIR, -CDIR,
+// --chdir DIR, --chdir=DIR; substrate-1:GAP-0685): argv without those words,
+// which staticPOSIXWrapperArgv unwraps as any env, and the folder its
+// program starts in as a cd step (workFolders.with): an absolute folder, a
+// relative one from the folder env runs in ("./" first: env reads no
+// CDPATH), the home a ~ or $HOME spelling names, or "\x00" (a folder the
+// words do not give: an unresolved folder). The last one counts, as in GNU
+// env. ok is false when env changes no folder before its program, and for
+// an option this reading does not split (a -iC bundle), which
+// staticPOSIXWrapperArgv still reads as unsure.
+func posixEnvChdir(command CommandFact) (argv []string, target string, ok bool) {
+	words := command.Argv
+	drop := make(map[int]bool)
+	for i := 1; i < len(words); i++ {
+		arg := words[i]
+		switch {
+		case arg == "-C" || arg == "--chdir":
+			if i+1 >= len(words) {
+				return nil, "", false
+			}
+			drop[i], drop[i+1] = true, true
+			target = posixEnvChdirTarget(command, i+1, "")
+			ok = true
+			i++
+			continue
+		case strings.HasPrefix(arg, "--chdir="):
+			drop[i] = true
+			target = posixEnvChdirTarget(command, i, "--chdir=")
+			ok = true
+			continue
+		case len(arg) > len("-C") && strings.HasPrefix(arg, "-C"):
+			drop[i] = true
+			target = posixEnvChdirTarget(command, i, "-C")
+			ok = true
+			continue
+		}
+		if _, valued := posixEnvWrapperValueOptions[arg]; valued {
+			i++
+			continue
+		}
+		if _, flag := posixEnvWrapperSwitchOptions[arg]; flag || strings.HasPrefix(arg, "--unset=") {
+			continue
+		}
+		break
+	}
+	if !ok {
+		return nil, "", false
+	}
+	argv = make([]string, 0, len(words)-len(drop))
+	for i, word := range words {
+		if !drop[i] {
+			argv = append(argv, word)
+		}
+	}
+	return argv, target, true
+}
+
+// posixEnvChdirTarget is the cd step of the folder word at index of an env
+// call, after its option prefix ("" for a word of its own).
+func posixEnvChdirTarget(command CommandFact, index int, prefix string) string {
+	if index >= len(command.Arguments) || len(command.Arguments) != len(command.Argv) {
+		return "\x00"
+	}
+	argument := command.Arguments[index]
+	value := strings.TrimPrefix(command.Argv[index], prefix)
+	if argument.Expands {
+		home := argument.homeSpelling
+		if home == "" && prefix == "" {
+			home = argument.homeTilde
+		}
+		if home, cut := strings.CutPrefix(home, prefix); cut && (home == "~" || strings.HasPrefix(home, "~/")) {
+			return home
+		}
+		return "\x00"
+	}
+	switch {
+	case value == "" || strings.ContainsAny(value, "\x00\n"):
+		return "\x00"
+	case simplePathAbs(value):
+		// A native absolute folder (C:\Users\a on Windows, the folder Git
+		// Bash hands env) is that folder, as for cd; read as relative, it
+		// became ./C:\Users\a, a folder that does not exist, and a search
+		// walk there read no file (native Windows TestSubChainAReadForms
+		// E03 E05 E06 E07, TST-7957/7958).
+		return value
+	}
+	return "./" + value
 }
 
 func posixEnvChangesDirectory(arg string) bool {

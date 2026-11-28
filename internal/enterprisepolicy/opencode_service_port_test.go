@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestOpenCodeServicePortReadDistinguishesContentFromUnavailableFile(t *testing.T) {
@@ -64,19 +66,24 @@ func TestSetOpenCodeServicePort(t *testing.T) {
 	if err := json.Unmarshal(data, &doc); err != nil || doc["password"] != "p" || doc["port"] != float64(25001) {
 		t.Fatalf("rewritten service.json: %s %v", data, err)
 	}
-	for name, setup := range map[string]func(){
-		"not json": func() { _ = os.WriteFile(path, []byte("[1]"), 0o600) },
-		"link": func() {
+	// The link case needs the symlink privilege, which a standard Windows
+	// user does not hold: without a link the setter has nothing to refuse and
+	// the case would fail for the wrong reason (GAP-2240), so it skips there.
+	for name, setup := range map[string]func(*testing.T){
+		"not json": func(*testing.T) { _ = os.WriteFile(path, []byte("[1]"), 0o600) },
+		"link": func(t *testing.T) {
 			_ = os.Remove(path)
 			target := filepath.Join(home, "elsewhere.json")
 			_ = os.WriteFile(target, []byte("{}"), 0o600)
-			_ = os.Symlink(target, path)
+			testenv.Symlink(t, target, path)
 		},
 	} {
-		setup()
-		if result, err = SetOpenCodeServicePort(home, 25004); err == nil || result.Changed {
-			t.Fatalf("%s: %+v %v", name, result, err)
-		}
+		t.Run(name, func(t *testing.T) {
+			setup(t)
+			if result, err := SetOpenCodeServicePort(home, 25004); err == nil || result.Changed {
+				t.Fatalf("%s: %+v %v", name, result, err)
+			}
+		})
 	}
 }
 
@@ -150,9 +157,7 @@ func TestReadOpenCodeServicePortAsUserFollowsFinalLink(t *testing.T) {
 	if err := os.WriteFile(target, []byte(`{"port":25002}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, path); err != nil {
-		t.Skipf("service link unavailable: %v", err)
-	}
+	testenv.Symlink(t, target, path)
 	if port, err := ReadOpenCodeServicePortAsUser(home); err != nil || port != 25002 {
 		t.Fatalf("account port through final link: %d %v", port, err)
 	}

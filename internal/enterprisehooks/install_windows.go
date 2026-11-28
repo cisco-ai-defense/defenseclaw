@@ -2320,12 +2320,7 @@ func validateWindowsGenericRemovalFootprint(
 }
 
 func requireWindowsEnterpriseAdministrator() error {
-	token := windows.GetCurrentProcessToken()
-	if token.IsElevated() {
-		return nil
-	}
-	user, err := token.GetTokenUser()
-	if err == nil && user != nil && user.User.Sid != nil && user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
+	if privileged, _ := CurrentWindowsTokenAdminFacts().ElevatedOrSystem(); privileged {
 		return nil
 	}
 	return fmt.Errorf("enterprise hooks: native Windows managed policy install requires an elevated administrator or LocalSystem token")

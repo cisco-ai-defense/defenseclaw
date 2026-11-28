@@ -161,13 +161,56 @@ def test_no_release_floor_recovery_needs_a_signed_bundle() -> None:
     assert "Lower the release floor" not in _contract_text()
 
 
-def test_no_public_page_carries_a_signed_bundle_procedure() -> None:
+# GAP-1996: Agent Substrate policy bundles (`defenseclaw substrate bundle
+# apply FILE`) are a different feature from the held AI Defense signed-bundle
+# procedure. Their recovery steps live on exactly one page, which the guard
+# skips line by line; every other page, and any line of that page that
+# talks about AI Defense or the release floor, stays guarded.
+_SUBSTRATE_BUNDLE_PAGES = frozenset({"substrate/troubleshooting.mdx"})
+_AI_DEFENSE_OR_FLOOR = re.compile(r"ai defense|release floor|min_product_version|--min-product-version", re.IGNORECASE)
+
+
+def _bundle_procedure_hits(docs: Path) -> list[str]:
     hits = []
-    for page in sorted(DOCS.rglob("*.mdx")):
+    for page in sorted(docs.rglob("*.mdx")):
+        rel = page.relative_to(docs).as_posix()
         for number, line in enumerate(page.read_text(encoding="utf-8").splitlines(), 1):
-            if _BUNDLE_PROCEDURE.search(line):
-                hits.append(f"{page.relative_to(DOCS)}:{number}: {line.strip()}")
-    assert not hits, hits
+            if not _BUNDLE_PROCEDURE.search(line):
+                continue
+            if rel in _SUBSTRATE_BUNDLE_PAGES and not _AI_DEFENSE_OR_FLOOR.search(line):
+                continue
+            hits.append(f"{rel}:{number}: {line.strip()}")
+    return hits
+
+
+def test_no_public_page_carries_a_signed_bundle_procedure() -> None:
+    assert not _bundle_procedure_hits(DOCS)
+
+
+def test_substrate_bundle_page_exemption_is_exact_and_still_guards_ai_defense(tmp_path: Path) -> None:
+    procedure = "Deliver it with `defenseclaw bundle apply policy.bundle`.\n"
+    substrate = "Apply a bundle with `defenseclaw substrate bundle apply FILE`.\n"
+    for rel, text in {
+        "substrate/troubleshooting.mdx": substrate,
+        "enterprise/ai-defense-key.mdx": procedure,
+        "substrate/other.mdx": substrate,
+        "substrate/troubleshooting/extra.mdx": substrate,
+    }.items():
+        page = tmp_path / rel
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(text, encoding="utf-8")
+    hits = _bundle_procedure_hits(tmp_path)
+    assert [h.split(":")[0] for h in hits] == [
+        "enterprise/ai-defense-key.mdx",
+        "substrate/other.mdx",
+        "substrate/troubleshooting/extra.mdx",
+    ]
+    # An AI Defense or release-floor procedure on the exempt page is still a hit.
+    (tmp_path / "substrate/troubleshooting.mdx").write_text(
+        substrate + "After the release floor refuses, run `bundle apply FILE`.\n", encoding="utf-8"
+    )
+    assert [h.split(":")[0] for h in _bundle_procedure_hits(tmp_path)][0] == "enterprise/ai-defense-key.mdx"
+    assert any(h.startswith("substrate/troubleshooting.mdx:2:") for h in _bundle_procedure_hits(tmp_path))
 
 
 def test_ai_defense_key_rotation_leaves_bundle_steps_to_the_administrator() -> None:

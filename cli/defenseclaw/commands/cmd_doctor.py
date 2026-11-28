@@ -157,6 +157,10 @@ from defenseclaw.file_permissions import (
 )
 from defenseclaw.gateway import gateway_api_client_host
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
+from defenseclaw.notification_capabilities import (
+    desktop_notification_capability,
+    desktop_notifier_tool_missing,
+)
 from defenseclaw.openclaw_presence import (
     OPENCLAW_NOT_INSTALLED_DETAIL,
     openclaw_implied_but_not_installed,
@@ -302,6 +306,7 @@ class _DoctorResult:
         "gateway_holder",
         "sidecar_unverified",
         "gateway_start_waited",
+        "install_running",
     )
 
     def __init__(
@@ -343,6 +348,10 @@ class _DoctorResult:
         # True once a gateway row waited for the gateway start lock, so a
         # start, restart or stop that outlasts the wait is waited for once.
         self.gateway_start_waited = False
+        # The Install lock row's detail once it found a live installer
+        # (GAP-1068): rows after it report a failure as a warning, as the
+        # installer stops the gateway and starts it again.
+        self.install_running = ""
 
     @property
     def passive_reason(self) -> str:
@@ -559,6 +568,14 @@ def _emit(
 ) -> None:
     if label and _label_suffix:
         label = f"{label} {_label_suffix}"
+    if tag == "fail" and r is not None and r.install_running:
+        # GAP-1068: an install or upgrade stops the gateway and starts it
+        # again (on Windows for about a minute of its 2 to 5), so a gateway
+        # or hook row read meanwhile is its progress, not a fault, and its
+        # usual next step (start the gateway) would race the installer.
+        tag = "warn"
+        detail = f"{detail} ({_INSTALL_RUNNING_NOTE})" if detail else _INSTALL_RUNNING_NOTE
+        remediation = _INSTALL_RUNNING_NEXT
     if not _json_mode and not (r is not None and r.quiet):
         marker = _doctor_marker(tag)
         # Marker + label form the row's primary signal. We bold the
@@ -4095,6 +4112,24 @@ def _install_lock_state(folder: str, held: _HeldInstallLock | None = None) -> tu
     return ("held", f"an installer (pid {pid}) holds {lock}")
 
 
+_INSTALL_RUNNING_NOTE = "an upgrade is in progress, so this may be the installer at work"
+_INSTALL_RUNNING_NEXT = "wait for the installer to end, then run: defenseclaw doctor"
+
+
+def _install_lock_installer_pid(folder: str) -> int:
+    """The pid of the running installer a "held" lock names, or 0 (GAP-1068).
+
+    Of the "held" states of _install_lock_state, only the last has a valid
+    pid file whose process runs: the others name no pid or one that cannot
+    be read. So a "held" lock with such a pid is held by its live installer.
+    """
+    state, text = _install_lock_file(os.path.join(folder, ".install.lock"), "pid", 64)
+    pid = int(text) if state == "valid" and re.fullmatch(r"[1-9][0-9]{0,9}", text) else 0
+    if not pid or pid > 2_147_483_647 or pid == os.getpid():
+        return 0
+    return pid if _pid_running(pid) else 0
+
+
 def _install_lock_folders(cfg) -> list[str]:
     """The data directory and the installer's home, the folders the plugins check."""
     home = os.environ.get("DEFENSECLAW_HOME") or os.path.join(os.path.expanduser("~"), ".defenseclaw")
@@ -4154,6 +4189,25 @@ def _check_install_lock(cfg, r: _DoctorResult) -> None:
                 reason_code="install-lock-interrupted-install",
                 remediation="run the DefenseClaw installer again to finish or undo the interrupted install",
             )
+        elif _install_lock_installer_pid(folder):
+            # GAP-1068: `defenseclaw upgrade` on Windows ends while its
+            # installer still runs, so this is often the first doctor run
+            # of an upgrade in progress. Say so once, and read the rows after
+            # it as that (_emit).
+            running = (
+                f"an upgrade is in progress: {detail}; it stops the gateway and starts it again, "
+                "and hooks hold tool calls until it is done"
+            )
+            _emit(
+                "warn",
+                "Install lock",
+                running,
+                r=r,
+                check_id="doctor.install.lock",
+                reason_code="install-in-progress",
+                remediation=_INSTALL_RUNNING_NEXT,
+            )
+            r.install_running = running
         else:
             _emit(
                 "warn",
@@ -8053,6 +8107,53 @@ def _emit_hook_capacity_row(capacity, r: _DoctorResult) -> None:
     _emit("warn", "Hook capacity", detail, r=r)
 
 
+def _check_host_records(cfg, health: dict | None, r: _DoctorResult) -> None:
+    """The Host records row of a managed gateway (GAP-2042).
+
+    The managed gateway gives its administrator the count in /health, and
+    in its authenticated /status (read once per Doctor run). No row on a
+    per-user gateway, Secure Client or an older gateway.
+    """
+    records = health.get("host_records") if isinstance(health, dict) else None
+    if not isinstance(records, dict):
+        document, _problem, _checked = _authenticated_gateway_status_document(cfg)
+        records = document.get("host_records") if isinstance(document, dict) else None
+    _emit_host_records_row(records, r)
+
+
+def _emit_host_records_row(records, r: _DoctorResult) -> None:
+    """Host records: the managed hook's decisions taken without the gateway.
+
+    A managed hook that cannot get a gateway answer decides by its fail mode
+    and writes one record to the host log (journal, unified log or the
+    Windows Application event log). Those decisions are not in the audit
+    log. Blocks in the window while the gateway reports healthy now are the
+    case to look at: calls were blocked with no policy answer. The records are counted
+    only; any local account can write the same tag, so they are not proof.
+    """
+    from defenseclaw.commands.cmd_status import _host_records_status, _host_records_summary
+
+    status = _host_records_status({"host_records": records})
+    if status is None:
+        return
+    if not status["readable"]:
+        reason = status["reason"] or "unknown"
+        _emit("skip", "Host records", f"the host log was not read: {reason}", r=r)
+        return
+    detail = _host_records_summary(status)
+    if status["last_read"]:
+        detail += f" (last read {status['last_read']})"
+    if status["blocks"]:
+        detail += (
+            f". {status['blocks']} blocks in the last {status['window_hours']} h; the gateway reports healthy now. "
+            "A managed hook blocked those calls without a gateway answer; the decisions are in the host log, "
+            "not in the audit log"
+        )
+        _emit("warn", "Host records", detail, r=r)
+        return
+    _emit("pass", "Host records", detail, r=r)
+
+
 def _emit_route_peer_broker_row(broker, r: _DoctorResult) -> None:
     """Managed Windows route-only: the hook guardian peer SID broker.
 
@@ -9696,6 +9797,86 @@ def _codex_effective_config_path(cfg) -> str:
         if os.path.basename(path).lower() == "config.toml":
             return path
     return os.path.join(codex_home(), "config.toml")
+
+
+def _codex_app_server_processes() -> list[tuple[int, float]]:
+    """(PID, start time in epoch seconds) of each running `codex app-server` this account can see, or [].
+
+    Windows lists codex.exe through CIM, where a standard account sees the
+    command line of its own processes only; elsewhere `ps -u <uid>`. Any
+    failure is [] (the doctor row is advisory, GAP-1938).
+    """
+    import re
+    import subprocess
+    import time
+
+    pattern = re.compile(r"(^|[\\/\s])codex(\.js|\.exe)?\"?\s(.*\s)?app-server(\s|$)", re.IGNORECASE)
+    found: list[tuple[int, float]] = []
+    try:
+        if os.name == "nt":
+            powershell = os.path.join(
+                os.environ.get("SystemRoot", r"C:\Windows"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
+            )
+            script = (
+                "Get-CimInstance Win32_Process -Filter \"Name='codex.exe'\" | "
+                "Where-Object { $_.CommandLine } | ForEach-Object { '{0}|{1}|{2}' -f $_.ProcessId, "
+                "([DateTimeOffset]$_.CreationDate).ToUnixTimeSeconds(), $_.CommandLine }"
+            )
+            done = subprocess.run(
+                [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True, text=True, timeout=20, check=False, stdin=subprocess.DEVNULL,
+            )
+            for line in done.stdout.splitlines():
+                pid, started, command = (line.split("|", 2) + ["", ""])[:3]
+                if pid.strip().isdigit() and started.strip().isdigit() and pattern.search(command):
+                    found.append((int(pid), float(started)))
+            return found
+        done = subprocess.run(
+            ["ps", "-u", str(os.getuid()), "-o", "pid=,lstart=,args="],
+            capture_output=True, text=True, timeout=10, check=False, stdin=subprocess.DEVNULL,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+        for line in done.stdout.splitlines():
+            parts = line.split(None, 6)
+            if len(parts) < 7 or not parts[0].isdigit() or not pattern.search(parts[6]):
+                continue
+            started = time.mktime(time.strptime(" ".join(parts[1:6]), "%a %b %d %H:%M:%S %Y"))
+            found.append((int(parts[0]), started))
+    except (OSError, ValueError, subprocess.SubprocessError, OverflowError):
+        return []
+    return found
+
+
+def _check_codex_app_server_age(cfg, r: _DoctorResult) -> None:
+    """Name a codex app-server older than DefenseClaw's Codex token (GAP-1938).
+
+    The daemon outlives its sessions and keeps the credentials it started
+    with, so after a reinstall Codex can answer 401 until it restarts.
+    Advisory only: doctor never stops the process.
+    """
+    token = os.path.join(cfg.data_dir, "hooks", ".hook-codex.token")
+    try:
+        written = os.stat(token).st_mtime
+    except OSError:
+        return
+    stale = sorted((pid, started) for pid, started in _codex_app_server_processes() if started < written - 1)
+    if not stale:
+        return
+
+    def _utc(value: float) -> str:
+        return datetime.fromtimestamp(value, timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+
+    names = ", ".join(f"PID {pid} (started {_utc(started)})" for pid, started in stale)
+    pids = ", ".join(str(pid) for pid, _ in stale)
+    stop = f"Stop-Process -Id {pids}" if os.name == "nt" else f"kill {' '.join(str(pid) for pid, _ in stale)}"
+    _emit(
+        "warn",
+        "Codex app-server",
+        f"codex app-server {names} started before DefenseClaw last wrote its Codex token ({_utc(written)}); "
+        "it keeps the credentials it started with, so Codex can answer 401 until it restarts",
+        r=r,
+        remediation=f"run 'codex app-server daemon restart', or stop it ({stop}); DefenseClaw does not stop it for you",
+    )
 
 
 def _check_codex_hooks(
@@ -12894,6 +13075,7 @@ def _check_connector_hooks(cfg, connector: str, r: _DoctorResult) -> None:
         _check_claudecode_hooks(cfg, r)
     elif connector == "codex":
         _check_codex_hooks(cfg, r)
+        _check_codex_app_server_age(cfg, r)
     elif connector == "devin":
         _check_devin_hooks(cfg, r)
     elif connector == "hermes":
@@ -13680,6 +13862,35 @@ def _check_routing_policy(r: _DoctorResult) -> None:
     for status, detail in doctor_rows():
         remediation = "see defenseclaw routing rules list" if status == "warn" else ""
         _emit(status, "Routing policy", detail, remediation=remediation, r=r)
+
+
+def _check_routing_budget_keys(cfg, r: _DoctorResult) -> None:
+    """Actor and batch budgets whose retired keys pile up (GAP-0848): the
+    gateway's budget view, read with the administrator's token, names the
+    keys waiting to be stored; warn from half the bound."""
+    from defenseclaw.commands.cmd_routing import retired_key_rows
+
+    admin = getattr(getattr(cfg, "routing", None), "admin", None)
+    budgets = admin.get("budgets") if isinstance(admin, dict) else getattr(admin, "budgets", None)
+    scopes = {str(b.get("scope") if isinstance(b, dict) else getattr(b, "scope", "")) for b in budgets or []}
+    if not scopes & {"actor", "batch"} or r.gateway_down:
+        return
+    try:
+        token = cfg.gateway.resolved_token()
+        if not token:
+            return
+        from defenseclaw.gateway import OrchestratorClient
+
+        client = OrchestratorClient(host=_gateway_api_host(cfg), port=int(cfg.gateway.api_port), timeout=3, token=token)
+        try:
+            answer = client.routing_request("GET", "/api/v1/routing/budgets")
+        finally:
+            client.close()
+    except Exception:  # noqa: BLE001 - no token, no gateway, a refusal: the budget list says why
+        return
+    for status, detail in retired_key_rows((answer or {}).get("budgets") if isinstance(answer, dict) else None):
+        remedy = "defenseclaw routing budgets list; check the budget store or leader"
+        _emit(status, "Routing budget keys", detail, remediation=remedy, r=r)
 
 
 def routing_sensitive_row(cfg) -> tuple[str, str, str] | None:
@@ -16650,6 +16861,84 @@ def _endpoint_is_loopback(endpoint: str) -> bool:
     return endpoint_is_loopback(endpoint)
 
 
+def substrate_admin_notifications_off(value) -> bool:
+    """``substrate.activity.notifications`` is the administrator's ``off``.
+
+    Same test as Go ``SubstrateActivityConfig.NotificationsOn``: spaces
+    trimmed, case ignored (GAP-1020).
+    """
+    return str(value or "").strip().lower() == "off"
+
+
+def _substrate_notifier_applies(cfg) -> bool:
+    """Whether the notifier row belongs in this doctor run (GAP-1020).
+
+    ``substrate watch`` runs on a person's machine, where substrate.enabled
+    (a cluster-only key) is false: the row also shows when the launcher has
+    a context file (<DEFENSECLAW_HOME>/substrate/contexts.json, the same
+    path as Go ``auth.ContextsPath``).
+    """
+    if getattr(getattr(cfg, "substrate", None), "enabled", False):
+        return True
+    from defenseclaw.config import default_data_path
+
+    return (default_data_path() / "substrate" / "contexts.json").is_file()
+
+
+def _check_substrate_notifier(cfg, r: _DoctorResult, *, system: str | None = None, which=None) -> None:
+    """Doctor row for the desktop notifier ``substrate watch`` uses.
+
+    Mirrors the Go ``substrate doctor`` ``notifier`` row: off is a skip, a
+    missing tool is a warning with the way to install it, never a failure.
+    Go shows that row wherever the launcher runs ``substrate doctor``; here it
+    shows where the launcher is set up (a signed-in context file, where
+    ``substrate watch`` runs) or on a cluster (substrate.enabled), GAP-1020.
+    """
+    label = "Substrate notifier"
+    try:
+        applies = _substrate_notifier_applies(cfg)
+    except OSError:
+        # The launcher dir exists but cannot be searched (mode 000, a
+        # protected parent): Path.is_file() re-raises EACCES on Python
+        # 3.11-3.13. A plain row, never a doctor crash (GAP-1045).
+        _emit("skip", label, "not checked: the launcher folder cannot be read", r=r)
+        return
+    if not applies:
+        return
+    capab = desktop_notification_capability(system)
+    note = getattr(cfg, "notifications", None)
+    sub = getattr(note, "substrate", None)
+    if not capab.supported:
+        _emit("skip", label, f"not checked: {capab.unsupported_reason}", r=r)
+    elif substrate_admin_notifications_off(getattr(getattr(cfg.substrate, "activity", None), "notifications", "")):
+        _emit("skip", label, "an administrator turned notifications off (substrate.activity.notifications: off)", r=r)
+    elif not getattr(note, "enabled", False):
+        _emit(
+            "skip",
+            label,
+            "desktop notifications are off (notifications.enabled is false); substrate watch prints only",
+            r=r,
+        )
+    elif sub is not None and not (sub.asks or sub.task_end):
+        _emit("skip", label, "notifications.substrate.asks and notifications.substrate.task_end are both off", r=r)
+    else:
+        kwargs = {"which": which} if which is not None else {}
+        missing = desktop_notifier_tool_missing(system, **kwargs)
+        if not missing:
+            _emit("pass", label, f"desktop notifications can be shown with {capab.provider}", r=r)
+        else:
+            fix = f"install {missing}"
+            if capab.system == "linux":
+                fix = "install notify-send (Debian and Ubuntu: apt install libnotify-bin; RHEL: dnf install libnotify)"
+            _emit(
+                "warn",
+                label,
+                f"{missing} is not installed, so substrate watch cannot show desktop notifications",
+                r=r,
+                remediation=fix,
+            )
+
+
 def _check_webhooks(cfg, r: _DoctorResult) -> None:
     """Validate every entry in ``webhooks[]`` (notifier webhooks).
 
@@ -17281,6 +17570,7 @@ def doctor(
         _check_agent_identity_ledger(sidecar_health, r)
         _check_live_audit_store(sidecar_health, r)
         _check_hook_capacity(cfg, sidecar_health, r)
+        _check_host_records(cfg, sidecar_health, r)
     _check_policy_state(cfg, r, live_health=sidecar_health)
     _check_policy_evidence_files(cfg, r)
     _check_signature_packs(cfg, r)
@@ -17288,6 +17578,7 @@ def doctor(
     _check_semantic_routing(cfg, r, live_health=routing_health)
     _check_routing_aliases(cfg, r)
     _check_routing_policy(r)
+    _check_routing_budget_keys(cfg, r)
     _check_routing_sensitive(cfg, r)
     _check_routing_tokenomics(cfg, r)
     _check_route_only(cfg, r, live_health=routing_health)
@@ -17378,6 +17669,7 @@ def doctor(
         _doctor_subsection("Webhooks")
     r.set_section("webhooks")
     _check_webhooks(cfg, r)
+    _check_substrate_notifier(cfg, r)
     if not json_out:
         _doctor_subsection("Sandbox")
     r.set_section("sandbox")
@@ -17419,6 +17711,11 @@ def doctor(
         if r.skipped:
             parts.append(ux._style(f"{r.skipped} skipped", fg="bright_black"))
         ux.echo("  Health: " + ", ".join(parts))
+        if r.install_running:
+            ux.warn(
+                "An upgrade is in progress: run defenseclaw doctor again when the installer has ended",
+                indent="  ",
+            )
         if do_fix:
             repair_parts = []
             for state, count in r.repair_summary.to_dict().items():

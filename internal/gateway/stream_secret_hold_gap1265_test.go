@@ -27,7 +27,9 @@ import (
 // a card number or a token the upstream pauses inside still never reaches
 // the client in part (the GAP-1091 and GAP-0429 protection). Past
 // streamSecretMaxHeld bytes held behind open runs (a long numeric table) the
-// held bytes go out after the check, with no verdict.
+// bound decides once per call: the TRUNCATED verdict of the unknown tier
+// (rel-1-0-10:GAP-1767, LEAD ruling 2026-11-26 21:00Z), then the held bytes
+// before the run go out after the check and the run stays held (GAP-1306).
 
 // gap1265Pause is longer than the idle bound of the hold.
 const gap1265Pause = streamHoldMaxPartialAge + 700*time.Millisecond
@@ -51,8 +53,30 @@ type gap1265Row struct {
 type gap1265Result struct {
 	got     string // reply text the client got
 	before  int    // secret bytes the client had at the first check that read it whole or found anything
+	snapRaw string // the raw body the client had then (GAP-2154)
+	bodyRaw string // the raw body the client got
 	final   int    // secret bytes the client had at the end
 	blocked bool
+}
+
+// gap1265Choice1 starts a piece that the GAP-1265 upstreams send in choice 1,
+// a second lane of the reply (OpenAI chat shapes only; rel-1-0-10:GAP-1767).
+const gap1265Choice1 = "\x00choice1:"
+
+// gap1265Finish0 is a piece that finishes choice 0 (finish_reason; OpenAI
+// chat shapes); gap1265Raw starts a piece a passthrough upstream writes as
+// is (rel-1-0-10:GAP-2154).
+const (
+	gap1265Finish0 = "\x00finish0"
+	gap1265Raw     = "\x00raw:"
+)
+
+// gap1265Piece is the choice and text of a row piece.
+func gap1265Piece(p string) (int, string) {
+	if text, ok := strings.CutPrefix(p, gap1265Choice1); ok {
+		return 1, text
+	}
+	return 0, p
 }
 
 // gap1265Format is the passthrough stream format of a gap0429Path name.
@@ -96,10 +120,27 @@ func gap1265Upstream(t *testing.T, f streamTailFormat, raw bool, pieces []string
 			if i == at && pause > 0 && !idle() {
 				return
 			}
-			if raw {
-				write(`data: {"id":"r1","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"content":` + streamTailJSON(p) + `}}]}` + "\n\n")
-			} else {
-				write(f.delta(p))
+			if ev, ok := strings.CutPrefix(p, gap1265Raw); ok && !raw {
+				write(ev)
+				continue
+			}
+			if p == gap1265Finish0 {
+				if !raw && f.name != gap0429OpenAIChat.name {
+					t.Errorf("gap1265Upstream: format %s has no finish_reason piece", f.name)
+					return
+				}
+				write(`data: {"id":"r1","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n")
+				continue
+			}
+			choice, text := gap1265Piece(p)
+			switch {
+			case raw || (choice > 0 && f.name == gap0429OpenAIChat.name):
+				write(fmt.Sprintf(`data: {"id":"r1","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":%d,"delta":{"content":%s}}]}`, choice, streamTailJSON(text)) + "\n\n")
+			case choice > 0:
+				t.Errorf("gap1265Upstream: format %s has no choice %d", f.name, choice)
+				return
+			default:
+				write(f.delta(text))
 			}
 		}
 		if at == len(pieces) && pause > 0 && !idle() {
@@ -172,7 +213,7 @@ func gap1265Serve(t *testing.T, path gap0429Path, rows []gap1265Row) ([]gap1265R
 		switch path.name {
 		case "llm":
 			prov := &gap0429PausingProvider{chunks: gap0429Chunks(row.pieces), at: row.at, pause: row.pause}
-			proxy, req := newTestProxy(t, prov, w, "action"), chatReq("", row)
+			proxy, req := gap0429Proxy(t, prov, w), chatReq("", row)
 			serve = func() { proxy.handleChatCompletion(rec, req) }
 		case "raw-forward":
 			up := gap1265Upstream(t, streamTailFormat{}, true, row.pieces, row.at, row.pause)
@@ -180,12 +221,12 @@ func gap1265Serve(t *testing.T, path gap0429Path, rows []gap1265Row) ([]gap1265R
 				registerRawForwardProviderDomain(t, up.URL, "openai")
 				registered = true
 			}
-			proxy, req := newTestProxy(t, &mockProvider{}, w, "action"), chatReq(up.URL, row)
+			proxy, req := gap0429Proxy(t, &mockProvider{}, w), chatReq(up.URL, row)
 			serve = func() { proxy.handleChatCompletion(rec, req) }
 		default:
 			f := gap1265Format(t, path.name)
 			up := gap1265Upstream(t, f, false, row.pieces, row.at, row.pause)
-			proxy, req := newTestProxy(t, &mockProvider{}, w, "action"), streamTailWithTier(streamTailRequest(t, f, "", up.URL), row.pack, row.managed)
+			proxy, req := gap0429Proxy(t, &mockProvider{}, w), streamTailWithTier(streamTailRequest(t, f, "", up.URL), row.pack, row.managed)
 			serve = func() { proxy.handlePassthrough(rec, req) }
 		}
 		runs[i] = run{rec: rec, watch: w, serve: serve}
@@ -203,12 +244,13 @@ func gap1265Serve(t *testing.T, path gap0429Path, rows []gap1265Row) ([]gap1265R
 	})
 	out := make([]gap1265Result, len(rows))
 	for i, r := range runs {
-		res := gap1265Result{got: text(r.rec.Body.String()), blocked: r.watch.blocked}
+		res := gap1265Result{got: text(r.rec.Body.String()), blocked: r.watch.blocked, bodyRaw: r.rec.Body.String()}
 		if s := rows[i].secret; s.text != "" {
 			snap := r.watch.snap
 			if !r.watch.seen {
 				snap = r.rec.Body.String()
 			}
+			res.snapRaw = snap
 			res.before, res.final = gap0429Released(text(snap), s), gap0429Released(res.got, s)
 		}
 		out[i] = res
@@ -325,36 +367,49 @@ func TestGAP1265OpenRunIdleIsNotTruncated(t *testing.T) {
 func gap1265Table() []string {
 	var pieces []string
 	for i, n := 0, 0; n < streamSecretMaxHeld*5/4; i++ {
-		p := fmt.Sprintf(" step %d took %d", i%97, (i*37)%1000)
+		// A short piece ending in a digit: the bound counts stream bytes
+		// (the frame, at least 120 bytes), and every frame is checked over
+		// the whole reply text, which costs more than linearly in its length,
+		// so the least text per frame is the cheapest table (a long piece of
+		// 8 KiB took 327 s under -race and cut the stream at the request
+		// deadline; 16-byte pieces took 155 s). The number starts at a word
+		// boundary, so it is an open digit run (streamPIIRules) at every
+		// piece end; a letter before it (" k42", rel-1-0-10:GAP-1767) opens
+		// no run, so the hold never reached the bound and the table tested
+		// nothing.
+		p := fmt.Sprintf(" %d", i%97)
 		pieces = append(pieces, p)
 		n += len(p) + 120 // a piece is a frame of at least 120 bytes on these routes
 	}
 	return pieces
 }
 
-// TestGAP1265NumericTableIsNotCutAtHeldBound: a long numeric table keeps a
-// digit run open at almost every piece end, so more than streamSecretMaxHeld
-// bytes wait behind open runs; that is no secret that could not be read, and
-// no tier cuts or alerts it (the /llm and passthrough routes; the raw forward
+// TestGAP1265NumericTableOverHeldBoundIsTruncated: a long numeric table keeps
+// a digit run open at almost every piece end, so more than
+// streamSecretMaxHeld bytes wait behind open runs. Under the GAP-1767 rule
+// (LEAD ruling 2026-11-26 21:00Z, the stricter behavior; rel ef865bb868 and
+// det111/t23e6-merge f6e151801a sent it with no verdict) that cap hit gets
+// the TRUNCATED verdict once per call, never none: the tiers that block an
+// unknown cut the stream, the others alert once and send the whole table
+// (gap1767CheckTable). The /llm and passthrough routes; the raw forward
 // checks the whole text at every frame, and 9k frames outlast the request
-// deadline, as for the long-prose rows of TestGAP0429BenignStreamsAreNotHeld).
-// Under -race the strict tiers run (the ones that cut).
-func TestGAP1265NumericTableIsNotCutAtHeldBound(t *testing.T) {
+// deadline (TestGAP1767NumericTableOverHeldBoundIsTruncated covers it with
+// larger pieces). Under -race the strict tiers run (the ones that cut).
+func TestGAP1265NumericTableOverHeldBoundIsTruncated(t *testing.T) {
 	table := gap1265Table()
 	for _, path := range gap0429PathsNamed(t, "llm", "passthrough/anthropic") {
 		t.Run(path.name, func(t *testing.T) {
 			var rows []gap1265Row
+			blocks := map[string]bool{}
 			for _, tier := range streamTailTiers {
 				if hookAnswerRaceBuild && !tier.blocks {
 					continue
 				}
+				blocks[tier.name] = tier.blocks
 				rows = append(rows, gap1265Row{name: "numeric-table", tier: tier.name, pack: tier.pack, managed: tier.managed, pieces: table})
 			}
 			results, log := gap1265Serve(t, path, rows)
-			for i, row := range rows {
-				gap1265Check(t, path.name, row, results[i])
-			}
-			gap1265NoTruncated(t, path.name, log)
+			gap1767CheckTable(t, path.name, rows, results, log, blocks)
 		})
 	}
 }

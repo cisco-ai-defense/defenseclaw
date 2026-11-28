@@ -294,7 +294,7 @@ func TestManagedHookDeliveryOutsideSecureClientFailsClosed(t *testing.T) {
 				cmd.Stdin = strings.NewReader(`{"hook_event_name":"` + stdinEvent + `","tool_name":"Bash","tool_input":{"command":"ls"}}`)
 				cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "DEFENSECLAW_FAIL_MODE=open"}
 				out, err := cmd.CombinedOutput()
-				blocked := err != nil || strings.Contains(string(out), `"decision":"block"`)
+				blocked := codexPreToolUseBlocked(t, out, err)
 				// The baked mode is the administrator's (owner decision
 				// 2026-10-20): open lets an outage through, nothing else.
 				wantBlocked := scenario != "outage" || wantBaked == "closed"
@@ -304,6 +304,19 @@ func TestManagedHookDeliveryOutsideSecureClientFailsClosed(t *testing.T) {
 			})
 		}
 	}
+}
+
+// codexPreToolUseBlocked reports whether a Codex PreToolUse hook run blocked.
+// Codex reads a non-zero status as a hook failure, not a block: the managed
+// hook blocks with its deny object and exit 0 (GAP-1755). So a non-zero exit
+// fails the test instead of counting as a block, which would hide a return to
+// exit 2 (GAP-1770).
+func codexPreToolUseBlocked(t *testing.T, out []byte, err error) bool {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("the Codex hook exited non-zero (%v), which Codex reads as a hook failure: %s", err, out)
+	}
+	return strings.Contains(string(out), `"permissionDecision":"deny"`)
 }
 
 // TestResolveHookFailModeSecureClientOnlyOpenDefault is the renderer half of

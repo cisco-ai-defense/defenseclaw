@@ -25,7 +25,7 @@ func TestMain(m *testing.M) {
 	}
 	// No test reads the host's shell startup or system profiles (GAP-0293).
 	testenv.ClearShellStartup()
-	hookpaths.UseSystemShellProfilesForTests(nil, "")
+	hookpaths.UseSystemShellProfilesForTests(nil, "") // gap1913-ok: before any test runs
 	// A call never waits for a start that is not coming; the gate's tests
 	// (TestSessionStartGateCallBeforeItsStart) set the arrival wait.
 	sessionStartArrivalWait = 0

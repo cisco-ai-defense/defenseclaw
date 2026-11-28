@@ -45,7 +45,7 @@ func TestGatewayStartsWithSubstrateAndOpenShellAPIs(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, pkg := range []string{
-		"github.com/NVIDIA/OpenShell/sdk/go/proto/optionsv1",
+		"github.com/ai-openshell/sdk-go/proto/optionsv1",
 		"github.com/defenseclaw/defenseclaw/third_party/substrate/api/ateapi/v1",
 	} {
 		if !strings.Contains(string(deps), pkg+"\n") {

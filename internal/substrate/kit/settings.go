@@ -86,12 +86,14 @@ type OverlayOptions struct {
 	HarnessVersion string
 	// RegistryTokens are the npm registry hosts a substrate.secrets entry
 	// injects the Authorization header on, with the placeholder the kit's
-	// npmrc sends there (NPMRegistryTokens, GAP-0529).
+	// npmrc sends there (NPMRegistryTokens, GAP-0529). Build-time lines for
+	// launchers older than 1.0.11, which write no start files: remove in 1.0.12, when launchers older than 1.0.11 are unsupported.
 	RegistryTokens []RegistryToken
 }
 
 // RegistryToken is one npm registry host that egress injects a credential
 // on, and the placeholder npm sends it in the credential's place.
+// Build-time path: remove in 1.0.12, when launchers older than 1.0.11 are unsupported.
 type RegistryToken struct {
 	Host, Placeholder string
 }
@@ -129,6 +131,24 @@ func npmCredentialKey(k string) bool {
 	return false
 }
 
+// NPMCredential returns the key of an npmrc line that holds a credential
+// or a client key. A value that only names an environment variable
+// (${NPM_TOKEN}) is not a credential; comments and blank lines hold none.
+// The template build (WithBaseNPMConfig) and the agent start (the
+// launcher's registry files) refuse the same lines.
+func NPMCredential(line string) (string, bool) {
+	line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+	if line == "" || line[0] == '#' || line[0] == ';' {
+		return "", false
+	}
+	k, v, _ := strings.Cut(line, "=")
+	k, v = strings.TrimSpace(k), strings.Trim(strings.TrimSpace(v), `"'`)
+	if npmCredentialKey(k) && !npmEnvReference.MatchString(v) {
+		return k, true
+	}
+	return "", false
+}
+
 // WithBaseNPMConfig is the kit's npmrc (kitData) with the settings of the
 // base image's global npmrc (base, read from path) before the kit's own.
 // npm_config_globalconfig makes npm read the kit's file instead of the
@@ -145,12 +165,12 @@ func WithBaseNPMConfig(kitData, base []byte, path string) ([]byte, error) {
 		if line == "" || line[0] == '#' || line[0] == ';' {
 			continue
 		}
-		k, v, _ := strings.Cut(line, "=")
-		k, v = strings.TrimSpace(k), strings.Trim(strings.TrimSpace(v), `"'`)
+		k, _, _ := strings.Cut(line, "=")
+		k = strings.TrimSpace(k)
 		if strings.EqualFold(k, "globalconfig") {
 			continue
 		}
-		if npmCredentialKey(k) && !npmEnvReference.MatchString(v) {
+		if _, ok := NPMCredential(line); ok {
 			return nil, fmt.Errorf("the base image's npm configuration %s sets %s, a credential: remove it from the image and bind the registry's credential in substrate.secrets (egress injects it)", path, k)
 		}
 		keep = append(keep, line)
@@ -734,31 +754,73 @@ func codexManagedConfig(data []byte, gw string, o OverlayOptions) ([]byte, error
 func gitConfig() string {
 	var b strings.Builder
 	b.WriteString("# DefenseClaw actor image (root-owned): SSH remotes use HTTPS, credentials are placeholders.\n")
-	b.WriteString("[url \"https://\"]\n\tinsteadOf = ssh://git@\n\tinsteadOf = git+ssh://git@\n")
-	for _, host := range []string{"github.com", "gitlab.com", "bitbucket.org"} {
-		fmt.Fprintf(&b, "[url \"https://%s/\"]\n\tinsteadOf = git@%s:\n", host, host)
+	// The baked rules: the generic ssh rules, then the default map
+	// (config.SubstrateGitBakedRewrites, which the launcher reads as the
+	// rules git applies first). An admin's own map is written into the
+	// actor user's git config at run (B2 2.5) and adds to them, so the
+	// image needs no rebuild per host. Rules with one target share a
+	// section.
+	baked := config.SubstrateGitBakedRewrites()
+	for i, r := range baked {
+		if i == 0 || baked[i-1].To != r.To {
+			fmt.Fprintf(&b, "[url \"%s\"]\n", r.To)
+		}
+		fmt.Fprintf(&b, "\tinsteadOf = %s\n", r.From)
 	}
 	fmt.Fprintf(&b, "[credential]\n\thelper = %s\n\tuseHttpPath = false\n", CredHelper)
 	fmt.Fprintf(&b, "[http]\n\tsslCAInfo = %s\n", TrustBundle)
 	return b.String()
 }
 
+// gitCredentialHelper answers get with the placeholder. On erase (git
+// sends it after the host refused the placeholder: no secret of the
+// person's is bound there) it prints one line on stderr that names the
+// host and the command to run on the person's own computer (B1 2.2). The
+// host is cut to letters, digits, dots and dashes, so the agent's remote
+// cannot write terminal controls or a forged command; nothing is set from
+// inside the agent.
 const gitCredentialHelper = `#!/bin/sh
 # DefenseClaw git credential helper (Agent Substrate actor images, root-owned).
 # It never holds a secret: Substrate egress swaps the placeholder for the real
 # token on the hosts the token is bound to, and nowhere else.
-[ "${1:-}" = get ] || exit 0
-while IFS= read -r line && [ -n "$line" ]; do :; done
-printf 'username=x-access-token\npassword=placeholder-not-a-secret\n'
+case "${1:-}" in
+get)
+	while IFS= read -r line && [ -n "$line" ]; do :; done
+	printf 'username=x-access-token\npassword=placeholder-not-a-secret\n'
+	;;
+erase)
+	host=
+	while IFS= read -r line && [ -n "$line" ]; do
+		case "$line" in host=*) host=${line#host=} ;; esac
+	done
+	host=$(printf '%s' "${host%%:*}" | LC_ALL=C tr -cd 'A-Za-z0-9.-' | cut -c1-253)
+	[ -n "$host" ] || exit 0
+	case "$host" in
+	github.com) t=github ;;
+	gitlab.com) t=gitlab ;;
+	bitbucket.org) t=bitbucket ;;
+	*) t=TEMPLATE ;;
+	esac
+	printf 'DefenseClaw: %s refused the request. On your computer run: defenseclaw substrate secrets add NAME --template %s --host %s\n' "$host" "$t" "$host" >&2
+	[ "$t" = TEMPLATE ] && printf 'DefenseClaw: defenseclaw substrate secrets templates lists the templates you may use.\n' >&2
+	;;
+esac
+exit 0
 `
 
-// npmConfig is the kit's npmrc. It holds no token: a registry a
-// substrate.secrets entry is bound to gets the placeholder, which Substrate
-// egress swaps for the real credential on that host only (E8, D14).
+// npmConfig is the kit's npmrc. It holds no credential. The launcher
+// writes the placeholders of the registries bound in the agent's policy in
+// the agent's ~/.npmrc at each start (B1 2.6), so a registry bound after the
+// build needs no template rebuild. The template build still writes a
+// placeholder line for each registry bound at build time (tokens), because
+// a launcher older than 1.0.11 writes no start files and its agents would
+// get a 401 from a private registry without them. The new launcher skips a
+// host this file already names. Build-time lines: remove in 1.0.12, when launchers older than 1.0.11 are unsupported.
 func npmConfig(tokens []RegistryToken) string {
 	var b strings.Builder
 	b.WriteString("# DefenseClaw actor image (root-owned). Registry tokens are placeholders: Substrate\n" +
-		"# egress swaps each for the real credential on its bound host only.\n" +
+		"# egress swaps each for the real credential on its bound host only. Registries bound\n" +
+		"# after the build are written at agent start in ~/.npmrc.\n" +
 		"update-notifier=false\nfund=false\naudit=false\n")
 	for _, t := range tokens {
 		fmt.Fprintf(&b, "//%s/:_authToken=%s\n", t.Host, t.Placeholder)
@@ -766,11 +828,12 @@ func npmConfig(tokens []RegistryToken) string {
 	return b.String()
 }
 
-// NPMRegistryTokens are the registry placeholders for the kit's npmrc: every
-// exact host of a secret injected in the Authorization header (npm sends a
-// registry's _authToken there), with the secret's placeholder (else
-// PlaceholderSecret). A host pattern (*.example.com) cannot name an npm
-// registry and is left out. Sorted by host; the first secret wins a host.
+// NPMRegistryTokens are the build-time registry placeholders for the kit's
+// npmrc: every exact host of a secret injected in the Authorization header
+// (npm sends a registry's _authToken there), with the secret's placeholder
+// (else PlaceholderSecret). A host pattern (*.example.com) cannot name an
+// npm registry and is left out. Sorted by host; the first secret wins a
+// host. Build-time path for launchers older than 1.0.11: remove in 1.0.12, when launchers older than 1.0.11 are unsupported.
 func NPMRegistryTokens(secrets []config.SubstrateSecret) []RegistryToken {
 	seen := map[string]bool{}
 	var out []RegistryToken

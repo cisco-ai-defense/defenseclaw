@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -165,7 +166,7 @@ func resolveWindowsGatewayPath(path string) (string, error) {
 	path = strings.ReplaceAll(path, "/", `\`)
 	hadExtendedPrefix := strings.HasPrefix(strings.ToLower(path), `\\?\`)
 	switch {
-	case strings.HasPrefix(strings.ToLower(path), `\\?\unc\`):
+	case strings.HasPrefix(asciifold.Lower(path), `\\?\unc\`):
 		path = `\\` + path[len(`\\?\UNC\`):]
 	case strings.HasPrefix(path, `\\?\`):
 		path = path[len(`\\?\`):]
@@ -237,7 +238,7 @@ func windowsGatewayFinalPath(handle windows.Handle) (string, error) {
 		if err == nil && length < uint32(len(buffer)) {
 			path := windows.UTF16ToString(buffer[:length])
 			switch {
-			case strings.HasPrefix(strings.ToLower(path), `\\?\unc\`):
+			case strings.HasPrefix(asciifold.Lower(path), `\\?\unc\`):
 				path = `\\` + path[len(`\\?\UNC\`):]
 			case strings.HasPrefix(path, `\\?\`):
 				path = path[len(`\\?\`):]

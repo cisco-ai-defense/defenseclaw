@@ -190,50 +190,65 @@ func TestShellHookBehaviourMatchesGolden(t *testing.T) {
 	// A small CI runner cannot give 16 simultaneous shell hooks their
 	// four-second answer windows. Run every case, with concurrency bounded
 	// by the CPUs available to this test process.
-	workers := min(16, runtime.GOMAXPROCS(0))
-	if v, err := strconv.Atoi(os.Getenv("DC_HOOK_GOLDEN_WORKERS")); err == nil && v > 0 {
-		workers = v
-	}
+	workers := hookGoldenConcurrency()
 	base := hookGoldenScratchDir(t)
 	t.Logf("golden scratch root: %s", base)
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				i := int(next.Add(1)) - 1
-				if i >= len(cases) {
-					return
-				}
-				c := cases[i]
-				obs, err := runHookGoldenCase(base, i, c)
-				mu.Lock()
-				if err != nil {
-					failures = append(failures, fmt.Sprintf("%s: setup: %v", c.id, err))
-					mu.Unlock()
-					continue
-				}
-				digest := obs.digest()
-				got[c.id] = digest
-				if dump != "" {
-					body, _ := json.MarshalIndent(obs, "", "  ")
-					_ = os.WriteFile(filepath.Join(dump, strings.ReplaceAll(c.id, "/", "_")+".json"), body, 0o644)
-				}
-				if compare {
-					if w, ok := want[c.id]; !ok {
-						failures = append(failures, fmt.Sprintf("%s: no golden digest", c.id))
-					} else if w != digest {
-						body, _ := json.MarshalIndent(obs, "", "  ")
-						failures = append(failures, fmt.Sprintf("%s: digest %s, golden %s; observation:\n%s", c.id, digest, w, body))
-						mismatch = append(mismatch, hookGoldenMismatch{Case: c.id, Index: i, Golden: w, Digest: digest,
-							Observation: obs, Raw: obs.raw, c: c})
-					}
-				}
-				mu.Unlock()
-			}
-		}()
+	// Every case runs once. The http-429-then-allow answers wait the
+	// gateway's one-second Retry-After inside the four-second tool-call
+	// budget, so they run last with at most 4 hooks at once: next to 15 other
+	// hooks on a loaded host the resend no longer fit (GAP-1460).
+	var early, late []int
+	for i, c := range cases {
+		if c.answer.name == "http-429-then-allow" {
+			late = append(late, i)
+		} else {
+			early = append(early, i)
+		}
 	}
-	wg.Wait()
+	runPool := func(idx []int, n int) {
+		next.Store(0)
+		for w := 0; w < n; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					k := int(next.Add(1)) - 1
+					if k >= len(idx) {
+						return
+					}
+					i := idx[k]
+					c := cases[i]
+					obs, err := runHookGoldenCase(base, i, c)
+					mu.Lock()
+					if err != nil {
+						failures = append(failures, fmt.Sprintf("%s: setup: %v", c.id, err))
+						mu.Unlock()
+						continue
+					}
+					digest := obs.digest()
+					got[c.id] = digest
+					if dump != "" {
+						body, _ := json.MarshalIndent(obs, "", "  ")
+						_ = os.WriteFile(filepath.Join(dump, strings.ReplaceAll(c.id, "/", "_")+".json"), body, 0o644)
+					}
+					if compare {
+						if w, ok := want[c.id]; !ok {
+							failures = append(failures, fmt.Sprintf("%s: no golden digest", c.id))
+						} else if w != digest {
+							body, _ := json.MarshalIndent(obs, "", "  ")
+							failures = append(failures, fmt.Sprintf("%s: digest %s, golden %s; observation:\n%s", c.id, digest, w, body))
+							mismatch = append(mismatch, hookGoldenMismatch{Case: c.id, Index: i, Golden: w, Digest: digest,
+								Observation: obs, Raw: obs.raw, c: c})
+						}
+					}
+					mu.Unlock()
+				}
+			}()
+		}
+		wg.Wait()
+	}
+	runPool(early, workers)
+	runPool(late, min(4, workers))
 	if len(mismatch) > 0 {
 		writeHookGoldenMismatches(t, base, len(cases), mismatch, workers)
 	}
@@ -788,7 +803,28 @@ func (g *hookGoldenGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, answer)
 }
 
-var hookGoldenRenderMu sync.Mutex
+// hookGoldenConcurrency is how many shell hooks run at once in every test
+// that runs cases through runHookGoldenCase: the CPUs available to this
+// process, at most 16, or DC_HOOK_GOLDEN_WORKERS. A hook has a four-second
+// answer window and a three-second restart wait, so more simultaneous hooks
+// than the computer can run turn into timeouts, not into a faster test.
+var hookGoldenConcurrency = sync.OnceValue(func() int {
+	n := min(16, runtime.GOMAXPROCS(0))
+	if v, err := strconv.Atoi(os.Getenv("DC_HOOK_GOLDEN_WORKERS")); err == nil && v > 0 {
+		n = v
+	}
+	return n
+})
+
+// hookGoldenRunSlots holds hookGoldenConcurrency slots, one per hook that is
+// running. A case takes a slot for the hook only: rendering its scripts and
+// reading back what it did take none, so a test with more workers than slots
+// (the hostile-environment and lowered-cap tests run 32) renders and checks
+// cases while the hooks of others run, and never runs more hooks at once than
+// the golden test does.
+var hookGoldenRunSlots = sync.OnceValue(func() chan struct{} {
+	return make(chan struct{}, hookGoldenConcurrency())
+})
 
 func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservation, error) {
 	var obs hookGoldenObservation
@@ -882,9 +918,7 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 		opts.ManagedServiceUID = os.Getuid()
 		opts.SecureClientHookDelivery = c.mode.delivery
 	}
-	hookGoldenRenderMu.Lock()
 	err = WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, c.hook.conn())
-	hookGoldenRenderMu.Unlock()
 	if err != nil {
 		return obs, err
 	}
@@ -950,6 +984,9 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 	env = append(env, c.hook.env...)
 	env = append(env, c.env...)
 	env, review2Delay := review2Env(env, base)
+	slots := hookGoldenRunSlots()
+	slots <- struct{}{}
+	defer func() { <-slots }()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	var delayedStdin io.Reader

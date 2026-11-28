@@ -1,0 +1,22 @@
+package psparse
+
+import (
+	"encoding/base64"
+	"os"
+)
+
+// recordOracle appends the parsed source to $DC_PWSH_RECORD (one base64 line)
+// so the differential oracle can replay every row the tests feed the reader.
+// Test-only tooling: applied by scripts/pwshoracle/record_corpus.patch, never committed in the tree.
+func recordOracle(src string) {
+	p := os.Getenv("DC_PWSH_RECORD")
+	if p == "" || src == "" || len(src) > 200000 {
+		return
+	}
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	_, _ = f.WriteString(base64.StdEncoding.EncodeToString([]byte(src)) + "\n")
+	_ = f.Close()
+}

@@ -90,7 +90,8 @@ final class CommandActivityStore {
         category: String = "other",
         origin: String,
         successEffects: [String] = [],
-        suggestedNextAction: String = ""
+        suggestedNextAction: String = "",
+        outputSummary: ((CLIResult) -> String)? = nil
     ) async -> CLIResult {
         guard await runner.reserve(runID: id) else {
             return CLIResult(
@@ -125,6 +126,7 @@ final class CommandActivityStore {
             entries.remove(at: removable)
         }
 
+        let keepOutput = outputSummary == nil
         let result = await runner.run(
             binary: binary,
             arguments: arguments,
@@ -133,11 +135,18 @@ final class CommandActivityStore {
             mutation: mutation,
             runID: id
         ) { [weak self] line in
+            // A command whose output must not be kept (the vault's) streams
+            // nothing into its row.
+            guard keepOutput else { return }
             await self?.append(line: line, to: id)
         }
 
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return result }
-        if entries[index].output.isEmpty { entries[index].output = result.output }
+        if let outputSummary {
+            entries[index].output = outputSummary(result)
+        } else if entries[index].output.isEmpty {
+            entries[index].output = result.output
+        }
         entries[index].finishedAt = Date()
         entries[index].exitCode = result.exitCode
         entries[index].status = result.cancelled ? .cancelled : (result.succeeded ? .succeeded : .failed)

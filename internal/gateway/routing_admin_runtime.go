@@ -5,7 +5,9 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"os"
 	"runtime"
 	"slices"
 	"strings"
@@ -16,6 +18,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 	"github.com/defenseclaw/defenseclaw/internal/routingadmin"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 )
 
 // routingAdminRuntime holds the process-wide part of routing.admin rules
@@ -137,7 +140,7 @@ func routingCallerMatcher(ctx context.Context) func(config.ProfileMatch) engine.
 	if id, ok := profileAgentSource(ctx); ok {
 		agent = strings.TrimSpace(id)
 	}
-	return func(m config.ProfileMatch) engine.Tri {
+	base := func(m config.ProfileMatch) engine.Tri {
 		state, _, _, _ := set.assignmentState(m, subject, res, true, connectorName, agent)
 		switch state {
 		case matchYes:
@@ -148,6 +151,55 @@ func routingCallerMatcher(ctx context.Context) func(config.ProfileMatch) engine.
 			return engine.No
 		}
 	}
+	var person registry.Person
+	if reg, ok := substrateRegistrationFrom(ctx); ok && isSubstrateActorRequest(ctx) && !reg.Attributed && reg.Person.Subject != "" {
+		person = reg.Person
+	}
+	var issuers []string
+	if cfg != nil {
+		issuers = cfg.PersonIssuers()
+	}
+	return func(m config.ProfileMatch) engine.Tri {
+		return routingIssuerMatch(m, person, issuers, base)
+	}
+}
+
+// routingIssuerMatch applies the issuer of routing.admin users entries and
+// named user budgets before the profile matcher (GAP-0792). An
+// issuer#subject entry names exactly that person: the verified caller's
+// issuer and subject, never a host account. With more than one trusted
+// person issuer, a bare name names only a person of the primary issuer
+// (PersonIssuers), so alice at a second issuer is not the admin's alice: not
+// matching is the safe answer for an allow rule, and for a budget she is
+// another person. person is the actor call's bound person (zero for a host
+// call, which keeps matching bare names as before).
+func routingIssuerMatch(m config.ProfileMatch, person registry.Person, issuers []string, base func(config.ProfileMatch) engine.Tri) engine.Tri {
+	if len(m.Users) == 0 {
+		return base(m)
+	}
+	bareOK := person.Subject == "" || len(issuers) < 2 || person.Issuer == issuers[0]
+	var bare []string
+	for _, entry := range m.Users {
+		if issuer, sub, ok := config.SplitQualifiedUser(entry); ok {
+			if person.Subject != "" && issuer == person.Issuer && sub == person.Subject {
+				rest := m
+				rest.Users = nil
+				if rest.Empty() {
+					return engine.Yes
+				}
+				return base(rest)
+			}
+			continue
+		}
+		if bareOK {
+			bare = append(bare, entry)
+		}
+	}
+	if len(bare) == 0 {
+		return engine.No
+	}
+	m.Users = bare
+	return base(m)
 }
 
 // routingRequestConfig is the config of the generation ctx pinned, else the
@@ -269,7 +321,14 @@ func (s *Sidecar) startRoutingAdmin(ctx context.Context) {
 		return
 	}
 	s.applyRoutingAdmin(cfg)
-	routingAdminRuntime.SetCounters(ctx, routingadmin.NewLocalCounter(cfg.DataDir), routingAdminFleet.counter(), routingAdminSyncInterval(cfg))
+	var local routingadmin.SpendCounter = routingadmin.NewLocalCounter(cfg.DataDir)
+	if s.substrateBuild != nil && cfg.Substrate.Usage.UsageEnabled() {
+		// A cluster replica keeps its spend on the leader (SetCounters in
+		// startSubstrateSpend). The pod-local file was lost on every restart
+		// and never shared, so it is not opened.
+		local = nil
+	}
+	routingAdminRuntime.SetCounters(ctx, local, routingAdminFleet.counter(), routingAdminSyncInterval(cfg))
 	if routingAdminRuntime.For(cfg) != nil {
 		first, cancel := context.WithTimeout(ctx, 2*time.Second)
 		routingAdminRuntime.SyncOnce(first)
@@ -286,15 +345,26 @@ func (s *Sidecar) stopRoutingAdmin() {
 }
 
 // applyRoutingAdmin applies a validated config (start and every reload):
-// whether agent call costs feed the budgets, and the fleet budget store.
+// whether agent call costs feed the budgets, the fleet budget store, and the
+// budgets of the new generation. Compiling the generation here, not only on
+// the next routed request, stops the budget sync loop as soon as a reload
+// removes every budget, so an idle gateway does no SQLite read, spend push or
+// fleet request for budgets it no longer has (GAP-1856). A reload that adds
+// budgets starts the loop the same way, and a request with this config
+// reuses the compiled generation. A request still pinned to the previous
+// generation does not put its budgets back (Runtime.Apply).
 func (s *Sidecar) applyRoutingAdmin(cfg *config.Config) {
 	if cfg == nil {
 		return
 	}
 	routingAdminRuntime.SetFeed(cfg.BudgetFeedReady())
+	for _, w := range cfg.RoutingAdminIssuerWarnings() {
+		fmt.Fprintf(os.Stderr, "[routing] %s\n", w)
+	}
 	routingAdminFleet.apply(cfg)
 	routingAdminRuntime.SetInterval(routingAdminSyncInterval(cfg))
 	routingAdminRuntime.SetFleet(routingAdminFleet.counter(), routingAdminFleet.mapper())
+	routingAdminRuntime.Apply(cfg)
 }
 
 // routingAdminSyncInterval is routing.admin.budget_store.sync_interval (the

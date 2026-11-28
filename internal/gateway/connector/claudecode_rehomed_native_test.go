@@ -13,6 +13,10 @@ import (
 )
 
 func TestClaudeCodeRehomedNativeHandlersReplaced(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		claudeCodeWindowsRehomedHandlersReplaced(t)
+		return
+	}
 	if runtime.GOOS != "linux" {
 		t.Skip("per-user native registration is Linux-only")
 	}
@@ -84,6 +88,10 @@ func TestClaudeCodeRehomedNativeHandlersReplaced(t *testing.T) {
 }
 
 func TestClaudeCodeRehomedNativeOwnershipRequiresConsistentPaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		claudeCodeWindowsRehomedOwnership(t)
+		return
+	}
 	if runtime.GOOS != "linux" {
 		t.Skip("per-user native registration is Linux-only")
 	}
@@ -122,6 +130,10 @@ func TestClaudeCodeRehomedNativeOwnershipRequiresConsistentPaths(t *testing.T) {
 }
 
 func TestClaudeCodeRehomedNativeShellOwnership(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		claudeCodeWindowsRehomedShellOwnership(t)
+		return
+	}
 	if runtime.GOOS != "linux" {
 		t.Skip("per-user native registration is Linux-only")
 	}

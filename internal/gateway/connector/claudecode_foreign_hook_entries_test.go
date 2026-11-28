@@ -22,9 +22,6 @@ import (
 // replace those entries and Teardown must not restore them; the user's own
 // hooks stay.
 func TestClaudeCode_SetupReplacesForeignDefenseClawHookEntries(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows registers the native hook launcher")
-	}
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "settings.json")
 	ClaudeCodeSettingsPathOverride = settingsPath
@@ -64,15 +61,30 @@ func TestClaudeCode_SetupReplacesForeignDefenseClawHookEntries(t *testing.T) {
 	if err := os.MkdirAll(opts.DataDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// Unix registers the generated hook script. Windows registers the native
+	// launcher (claudeCodeHookInvocation), and there the copied entry names
+	// the other account's script by a drive path. Setup and Teardown claim
+	// the copies on every OS, by a POSIX or a Windows path, with or without
+	// the generated missing-script guard (GAP-1909).
+	registered := filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))
+	if runtime.GOOS == "windows" {
+		command, _ := claudeCodeHookInvocation(opts, filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))
+		encoded, err := json.Marshal(command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		registered = strings.Trim(string(encoded), `"`)
+	}
 	c := NewClaudeCodeConnector()
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 	after := mustReadClaudeSettingsForTest(t, settingsPath)
-	if strings.Contains(after, foreignWithSpace) || strings.Contains(after, escapedBackslashForeign) || strings.Contains(after, foreign) {
+	if strings.Contains(after, foreignWithSpace) || strings.Contains(after, escapedBackslashForeign) ||
+		strings.Contains(after, foreign) {
 		t.Fatalf("Setup kept the foreign DefenseClaw hook entries: %s", after)
 	}
-	if !strings.Contains(after, own) || !strings.Contains(after, filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))) {
+	if !strings.Contains(after, own) || !strings.Contains(after, registered) {
 		t.Fatalf("Setup lost the user's hook or did not register its own: %s", after)
 	}
 	// A copied entry can also arrive after Setup; Teardown must remove it.
@@ -96,7 +108,8 @@ func TestClaudeCode_SetupReplacesForeignDefenseClawHookEntries(t *testing.T) {
 		t.Fatalf("Teardown: %v", err)
 	}
 	after = mustReadClaudeSettingsForTest(t, settingsPath)
-	if strings.Contains(after, foreignWithSpace) || strings.Contains(after, escapedBackslashForeign) || strings.Contains(after, foreign) || !strings.Contains(after, own) {
+	if strings.Contains(after, foreignWithSpace) || strings.Contains(after, escapedBackslashForeign) ||
+		strings.Contains(after, foreign) || !strings.Contains(after, own) {
 		t.Fatalf("Teardown settings = %s, want the user's hook only", after)
 	}
 
@@ -128,9 +141,6 @@ func mustReadClaudeSettingsForTest(t *testing.T, path string) string {
 // back after a failed start, its cached hook path keeps blocking with the
 // cause instead of exiting 0.
 func TestClaudeCode_MalformedSettingsRefusedAndRollbackKeepsBlocking(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows registers the native hook launcher")
-	}
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "settings.json")
 	ClaudeCodeSettingsPathOverride = settingsPath
@@ -162,6 +172,17 @@ func TestClaudeCode_MalformedSettingsRefusedAndRollbackKeepsBlocking(t *testing.
 	if !opts.FailedSetupFailClosed {
 		t.Fatal("a closed Claude Code connector is not reported fail-closed")
 	}
+	if after, readErr := os.ReadFile(settingsPath); readErr != nil || string(after) != "{\"model\": \"x\"}\n{ broken\n" {
+		t.Fatalf("the refused Setup changed settings.json: %q, %v", after, readErr)
+	}
+	if runtime.GOOS == "windows" {
+		// Windows registers the native launcher behind a cmd.exe guard, not a
+		// hook script, so there is no placeholder script to leave. The
+		// registered command is what keeps blocking, with the cause, once the
+		// launcher cannot start.
+		claudeCodeWindowsRegisteredCommandBlocksWhenLauncherMissing(t, opts, filepath.Join(dir, "gone", windowsHookBinaryName))
+		return
+	}
 	if err := writeDisabledHookTombstone(opts, "claude-code-hook.sh", "Claude Code"); err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +200,8 @@ func TestClaudeCode_MalformedSettingsRefusedAndRollbackKeepsBlocking(t *testing.
 // otherwise, and an old-home guarded entry is still claimed for repair.
 func TestClaudeCode_PerUserHookCommandFailsClosedWhenScriptMissing(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Windows registers the native hook launcher")
+		claudeCodeWindowsPerUserCommandFailsClosedWhenLauncherMissing(t)
+		return
 	}
 	dir := t.TempDir()
 	script := filepath.Join(dir, "Alice Smith", ".defenseclaw", "hooks", "claude-code-hook.sh")

@@ -8,9 +8,11 @@
 // verified caller, the classifier result and the spend ledger, and the
 // routing engine (internal/routing/engine) picks the model from the verdict.
 //
-// On OSS a deny never blocks: it becomes a warning code. Only a standalone
+// On OSS a deny never blocks: it becomes a warning code. A standalone
 // managed device (Policy.Managed) refuses, and there unknown facts fail
-// closed.
+// closed. An Agent Substrate actor call (Request.Actor) is enforced on OSS
+// too (D4-1: the cluster gateway is admin-run and shared), with per-person
+// keys, but unknown facts and spend still only warn there (D4-2).
 //
 // Reason codes (closed set): rule_deny:<id>, identity_unconfirmed:<fact>,
 // budget_exceeded:<id>, budget_unavailable:<id>,
@@ -19,14 +21,19 @@
 // rule_allow_not_enforced:<ids>, budget_warn:<id>, budget_downgrade:<id>,
 // budget_deny_not_enforced:<id>, budget_downgrade_unavailable:<id>,
 // budget_downgrade_not_enforced:<id>, budget_spend_unknown:<id>,
+// budget_keys_evicted:<id> (an actor or batch budget passed its key cap),
 // budget_cost_unknown:<id> (warnings; budget_cost_unknown:<id> is also a
-// managed deny).
+// managed deny). budget_warn:<id> is also raised for a deny or downgrade
+// budget at warn_at_percent of its limit.
 //
 // Charge keys: user:<id>:*:<caller key> (each user of a * budget),
 // user:<id>:=<sha12 of the subject> (a named user), group:<id>:<sha12 of the
-// subject>, connector:<id>:<connector>. The caller key is the verified id
+// subject>, connector:<id>:<connector>, actor:<id>:<sha12 of the actor
+// registration key> (scope actor). The caller key is the verified id
 // with its kind (uid:1001, sid:S-1-5-...); subjects are hashed so no group
-// or account name is stored.
+// or account name is stored. An actor's caller key is its person key
+// (p:<16 hex of sha256(issuer#subject)>); an attributed actor has no person
+// and is charged only to actor and connector budgets.
 package routingadmin
 
 import (
@@ -36,6 +43,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 )
 
 // MatchState is the outcome of an identity selector against the caller.
@@ -82,6 +90,10 @@ type Request struct {
 	// Severity is the pre-call guardrail severity ("" when the listener runs
 	// no guardrail, as route-only does).
 	Severity string
+	// Actor is set for an Agent Substrate actor call (from the
+	// registration, never headers): match.substrate and scope actor read
+	// it, and the verdict is enforced on OSS too.
+	Actor *engine.Actor
 }
 
 // Deny is a refusal on a managed device.
@@ -118,6 +130,9 @@ type Verdict struct {
 	RuleIDs []string
 	// ChargeKeys are the budget keys this call counts against.
 	ChargeKeys []string
+	// Enforce is true on a managed device and for an actor call: Deny is
+	// set and the gate refuses instead of warning.
+	Enforce bool
 }
 
 type compiledRule struct {
@@ -126,6 +141,7 @@ type compiledRule struct {
 	identity   config.ProfileMatch
 	hasID      bool
 	severity   int
+	substrate  *config.ProfileMatchSubstrate // nil: not an actor selector
 }
 
 type compiledBudget struct {
@@ -142,6 +158,23 @@ type Policy struct {
 	Managed bool
 	rules   []compiledRule
 	budgets []compiledBudget
+	// owned are the atespaces DefenseClaw creates (substrate
+	// launcher_atespaces): an atespace glob matches only these (E3).
+	owned map[string]bool
+}
+
+// SetLauncherAtespaces records the launcher atespaces (profile to list),
+// the owned set an atespace glob in match.substrate may match.
+func (p *Policy) SetLauncherAtespaces(lists map[string][]string) {
+	if p == nil {
+		return
+	}
+	p.owned = map[string]bool{}
+	for _, list := range lists {
+		for _, ns := range list {
+			p.owned[ns] = true
+		}
+	}
 }
 
 // Compile returns the policy for rules and budgets, or nil when there are
@@ -157,7 +190,12 @@ func Compile(rules []config.RoutingAdminRule, budgets []config.RoutingBudget, ma
 		m := r.Match
 		r.Match = config.RoutingAdminMatch{Groups: clone(m.Groups), Users: clone(m.Users), Connectors: clone(m.Connectors),
 			Agents: clone(m.Agents), Categories: clone(m.Categories), SeverityAtLeast: m.SeverityAtLeast}
-		c := compiledRule{RoutingAdminRule: r, hasID: r.Match.NamesIdentity(), severity: severityRank(r.Match.SeverityAtLeast)}
+		if m.Substrate != nil {
+			r.Match.Substrate = &config.ProfileMatchSubstrate{Atespaces: clone(m.Substrate.Atespaces),
+				Templates: clone(m.Substrate.Templates), Workloads: clone(m.Substrate.Workloads)}
+		}
+		c := compiledRule{RoutingAdminRule: r, hasID: r.Match.NamesIdentity(), severity: severityRank(r.Match.SeverityAtLeast),
+			substrate: r.Match.Substrate}
 		for _, name := range r.Match.Connectors {
 			c.connectors = append(c.connectors, config.NormalizeConnectorName(name))
 		}
@@ -170,6 +208,8 @@ func Compile(rules []config.RoutingAdminRule, budgets []config.RoutingBudget, ma
 		switch {
 		case b.Scope == config.RoutingBudgetScopeConnector && b.Subject != config.RoutingBudgetSubjectAll:
 			c.subject = config.NormalizeConnectorName(b.Subject)
+		case b.Scope == config.RoutingBudgetScopeUser && b.Subject != config.RoutingBudgetSubjectAll:
+			c.subject = UserSubjectKey(b.Subject)
 		case b.Subject != config.RoutingBudgetSubjectAll:
 			c.subject = shortHash(b.Subject)
 		}
@@ -201,6 +241,7 @@ func (p *Policy) Evaluate(req Request, ledger *Ledger, now time.Time) Verdict {
 	if p == nil {
 		return v
 	}
+	v.Enforce = p.Managed || req.Actor != nil
 	definiteDeny := false
 	for i := range p.rules {
 		rule := &p.rules[i]
@@ -220,7 +261,7 @@ func (p *Policy) Evaluate(req Request, ledger *Ledger, now time.Time) Verdict {
 			v.RuleIDs = append(v.RuleIDs, rule.ID)
 		}
 		if rule.IsDeny() {
-			if !p.Managed {
+			if !v.Enforce {
 				v.warn("rule_deny_not_enforced:" + rule.ID)
 			} else if !definiteDeny {
 				v.Deny, definiteDeny = &Deny{Code: "rule_deny:" + rule.ID, Message: denyMessage(rule.RoutingAdminRule)}, true
@@ -265,10 +306,40 @@ func (p *Policy) ruleState(rule *compiledRule, req Request, v *Verdict) (MatchSt
 	if rule.severity > 0 && (req.Severity == "" || severityRank(req.Severity) < rule.severity) {
 		return No, ""
 	}
-	if rule.hasID {
-		return identityState(req.Caller, rule.identity)
+	state, fact := Yes, ""
+	if rule.substrate != nil {
+		if state, fact = p.substrateState(rule.substrate, req.Actor); state == No {
+			return No, ""
+		}
 	}
-	return Yes, ""
+	if rule.hasID {
+		if s, f := identityState(req.Caller, rule.identity); s != Yes {
+			state, fact = s, f
+		}
+	}
+	return state, fact
+}
+
+// substrateState matches a match.substrate against the actor: No for a
+// host call, Maybe when the registration does not name its template yet
+// (unknown is not absent; the other keys can still prove No).
+func (p *Policy) substrateState(m *config.ProfileMatchSubstrate, a *engine.Actor) (MatchState, string) {
+	if a == nil {
+		return No, ""
+	}
+	f := config.SubstrateActorFacts{Atespace: a.Atespace, Template: a.Template, Workload: a.Workload, AtespaceOwned: p.owned[a.Atespace]}
+	if len(m.Templates) > 0 && a.Template == "" {
+		rest := *m
+		rest.Templates = nil
+		if ok, _ := rest.Matches(f); !ok {
+			return No, ""
+		}
+		return Maybe, "template"
+	}
+	if ok, _ := m.Matches(f); ok {
+		return Yes, ""
+	}
+	return No, ""
 }
 
 func identityState(c Caller, m config.ProfileMatch) (MatchState, string) {
@@ -298,11 +369,24 @@ func BudgetChargeKey(b config.RoutingBudget) string {
 	}
 	switch b.Scope {
 	case config.RoutingBudgetScopeUser:
-		return "user:" + b.ID + ":=" + shortHash(b.Subject)
+		return "user:" + b.ID + ":=" + UserSubjectKey(b.Subject)
 	case config.RoutingBudgetScopeGroup:
 		return "group:" + b.ID + ":" + shortHash(b.Subject)
 	}
 	return ""
+}
+
+// UserSubjectKey is the spend key part of a named user budget's subject,
+// for the evaluator (Compile) and the budget views (BudgetChargeKey) alike.
+// An issuer-qualified subject keys on its person id, issuer#subject, so
+// alice at a second issuer is a different person with her own spend
+// (GAP-0792); a bare name keeps the key it had before, so nobody's spend
+// resets on upgrade.
+func UserSubjectKey(subject string) string {
+	if issuer, sub, ok := config.SplitQualifiedUser(subject); ok {
+		return shortHash(issuer + "#" + sub)
+	}
+	return shortHash(subject)
 }
 
 // NamesCaller reports whether the facts prove that the users and groups
@@ -312,6 +396,49 @@ func BudgetChargeKey(b config.RoutingBudget) string {
 func NamesCaller(c Caller, m config.ProfileMatch) bool {
 	state, _ := identityState(c, m)
 	return state == Yes
+}
+
+// HoldFullIDs lists the managed deny budgets of the launcher-keyed scopes
+// (actor, batch): at the retired-key bound they refuse new keys instead of
+// dropping spend (Ledger.SetHoldFull).
+func (p *Policy) HoldFullIDs() []string {
+	if p == nil || !p.Managed {
+		return nil
+	}
+	var ids []string
+	for _, b := range p.budgets {
+		if b.action == config.RoutingBudgetOnExceedDeny &&
+			(b.Scope == config.RoutingBudgetScopeActor || b.Scope == config.RoutingBudgetScopeBatch) {
+			ids = append(ids, b.ID)
+		}
+	}
+	return ids
+}
+
+// CappedBudget is a launcher-keyed (actor, batch) budget. The cluster read
+// asks for the keys at or over the limit of one that Blocks (deny or
+// downgrade), so a replica never forgets a blocked key (GAP-0892), and for
+// the per-budget sums of each, for the admin view (GAP-0894).
+type CappedBudget struct {
+	Prefix   string // "<scope>:<id>:"
+	Period   string
+	LimitUSD float64
+	Blocks   bool
+}
+
+// CappedBudgets lists the actor and batch budgets with a limit.
+func (p *Policy) CappedBudgets() []CappedBudget {
+	if p == nil {
+		return nil
+	}
+	var out []CappedBudget
+	for _, b := range p.budgets {
+		if b.LimitUSD > 0 && (b.Scope == config.RoutingBudgetScopeActor || b.Scope == config.RoutingBudgetScopeBatch) {
+			out = append(out, CappedBudget{Prefix: b.Scope + ":" + b.ID + ":", Period: b.Period, LimitUSD: b.LimitUSD,
+				Blocks: b.action != config.RoutingBudgetOnExceedWarn})
+		}
+	}
+	return out
 }
 
 func (p *Policy) applyBudgets(req Request, ledger *Ledger, now time.Time, v *Verdict) {
@@ -342,6 +469,18 @@ func (p *Policy) applyBudgets(req Request, ledger *Ledger, now time.Time, v *Ver
 		if state == Yes {
 			v.ChargeKeys = append(v.ChargeKeys, key)
 		}
+		if capped(key) {
+			evicted, full := ledger.CapState(key)
+			if evicted {
+				v.warn("budget_keys_evicted:" + b.ID)
+			}
+			// Full of keys whose spend is not stored yet: a managed deny
+			// budget refuses a new key rather than drop spend (as when stale).
+			if full && p.Managed && b.action == config.RoutingBudgetOnExceedDeny {
+				v.Deny = &Deny{Code: "budget_unavailable:" + b.ID, Message: "Model use is paused: DefenseClaw is still storing the spend of budget " + b.ID + ". Try again shortly or contact your administrator."}
+				return
+			}
+		}
 		spend, seeded := ledger.Spend(key, b.Period, now)
 		if !seeded {
 			if p.Managed && b.action == config.RoutingBudgetOnExceedDeny {
@@ -368,13 +507,18 @@ func (p *Policy) applyBudgets(req Request, ledger *Ledger, now time.Time, v *Ver
 				continue
 			}
 		} else if spend < b.LimitUSD {
+			// warn_at_percent (deny and downgrade budgets): warn before
+			// the limit refuses or downgrades.
+			if pct := b.EffectiveWarnAtPercent(); pct > 0 && spend >= b.LimitUSD*float64(pct)/100 {
+				v.warn("budget_warn:" + b.ID)
+			}
 			continue
 		}
 		switch {
 		case b.action == config.RoutingBudgetOnExceedWarn:
 			v.warn("budget_warn:" + b.ID)
 			continue
-		case b.action == config.RoutingBudgetOnExceedDeny && !p.Managed:
+		case b.action == config.RoutingBudgetOnExceedDeny && !v.Enforce:
 			// OSS reports a deny budget and keeps routing: a downgrade
 			// budget that is also over its limit still applies.
 			v.warn("budget_deny_not_enforced:" + b.ID)
@@ -400,7 +544,7 @@ func (p *Policy) applyBudgets(req Request, ledger *Ledger, now time.Time, v *Ver
 			force = intersect(force, v.Allowed)
 		}
 		if len(force) == 0 {
-			if p.Managed {
+			if v.Enforce {
 				v.Deny = &Deny{Code: "budget_downgrade_unavailable:" + b.ID, Message: "Your model budget " + b.ID + " is used up and none of its fallback models is allowed for this request."}
 				return
 			}
@@ -412,6 +556,35 @@ func (p *Policy) applyBudgets(req Request, ledger *Ledger, now time.Time, v *Ver
 	}
 }
 
+// ActorBudgetKey is the ledger key of the actor or batch budget id for the
+// actor a whose person key is callerKey, and "" when a has none (a host
+// call, an actor without a batch, any other scope). A batch is one limit per
+// batch of one person in one atespace, so two people who pick the same batch
+// id never share a counter. chargeKey and the BUDGET column of substrate
+// list read the same key through this one function.
+func ActorBudgetKey(scope, id string, a *engine.Actor, callerKey string) string {
+	if a == nil {
+		return ""
+	}
+	switch scope {
+	case config.RoutingBudgetScopeActor:
+		if a.Key == "" {
+			return ""
+		}
+		return "actor:" + id + ":" + shortHash(a.Key)
+	case config.RoutingBudgetScopeBatch:
+		if a.BatchID == "" {
+			return ""
+		}
+		who := "-"
+		if a.Person && callerKey != "" {
+			who = callerKey
+		}
+		return "batch:" + id + ":" + shortHash(a.Atespace+"/"+who) + ":" + shortHash(a.BatchID)
+	}
+	return ""
+}
+
 // chargeKey returns the budget's key for req and whether the subject names
 // the caller. A * user budget for an unverified caller has no key (Maybe).
 func chargeKey(b *compiledBudget, req Request) (string, MatchState, string) {
@@ -421,7 +594,16 @@ func chargeKey(b *compiledBudget, req Request) (string, MatchState, string) {
 			return "", No, ""
 		}
 		return "connector:" + b.ID + ":" + req.Connector, Yes, ""
+	case config.RoutingBudgetScopeActor, config.RoutingBudgetScopeBatch:
+		key := ActorBudgetKey(b.Scope, b.ID, req.Actor, req.Caller.Key)
+		if key == "" {
+			return "", No, ""
+		}
+		return key, Yes, ""
 	case config.RoutingBudgetScopeUser:
+		if req.Actor != nil && !req.Actor.Person {
+			return "", No, ""
+		}
 		if b.Subject == config.RoutingBudgetSubjectAll {
 			if !req.Caller.Verified || req.Caller.Key == "" {
 				return "", Maybe, "unverified"
@@ -431,6 +613,9 @@ func chargeKey(b *compiledBudget, req Request) (string, MatchState, string) {
 		state, fact := identityState(req.Caller, config.ProfileMatch{Users: []string{b.Subject}})
 		return "user:" + b.ID + ":=" + b.subject, state, fact
 	case config.RoutingBudgetScopeGroup:
+		if req.Actor != nil && !req.Actor.Person {
+			return "", No, ""
+		}
 		state, fact := identityState(req.Caller, config.ProfileMatch{Groups: []string{b.Subject}})
 		return "group:" + b.ID + ":" + b.subject, state, fact
 	}

@@ -4,15 +4,18 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import yaml
 from click.testing import CliRunner
+from defenseclaw import price_lookup
 from defenseclaw.commands.cmd_setup_tokenomics import status_of, tokenomics
 from defenseclaw.context import AppContext
 from defenseclaw.observability.v8_config import load_validate_v8
-from defenseclaw.tokenomics_seed import load_default_pricing, pricing_changes
+from defenseclaw.tokenomics_seed import _SOURCE_TREE, load_default_pricing, pricing_changes
 
 BASE = "config_version: 9\nobservability: {}\n"
 MINE = (
@@ -99,3 +102,40 @@ def test_status_says_a_store_left_on_is_idle_while_tokenomics_is_off(tmp_path: P
     app = _app(tmp_path, BASE.replace("observability: {}", "observability:\n  tokenomics:\n    local_store: {enabled: true}"))
     result = CliRunner().invoke(tokenomics, ["--status"], obj=app, catch_exceptions=False)
     assert "Local store:    on, idle while tokenomics is off (keeps 30 days)" in result.output
+
+
+# rel-1-0-10:GAP-0041: the seed prices each model at its vendor's list price
+# (checked 2026-11-21, _sources). gpt-5-2* was meant for gpt-5.2 but, with
+# its hyphen, matched only dated gpt-5 snapshots (gpt-5-2025-08-07), so
+# gpt-5.2 had no cost. Dated gpt-5 snapshots keep the gpt-5 price, and
+# gpt-5.2-pro, which costs 12 times gpt-5.2, gets no row rather than the
+# gpt-5.2 price.
+@pytest.mark.parametrize(
+    ("model", "entry", "rates"),
+    [
+        ("gpt-5", "openai/gpt-5", (1.25, 10.0, 0.125)),
+        ("gpt-5-2025-08-07", "openai/gpt-5-20*", (1.25, 10.0, 0.125)),
+        ("gpt-5.2", "openai/gpt-5.2", (1.75, 14.0, 0.175)),
+        ("gpt-5.2-2025-12-11", "openai/gpt-5.2-20*", (1.75, 14.0, 0.175)),
+        ("gpt-5.2-pro", None, None),
+        ("gpt-5-pro", None, None),
+        ("gpt-5-mini-2025-08-07", None, None),
+    ],
+)
+def test_seed_prices_openai_ids_at_their_list_price(model: str, entry: str | None, rates: tuple | None) -> None:
+    seed = load_default_pricing()
+    assert price_lookup.price_entry(seed, "openai", model) == entry
+    if rates is None:
+        return
+    row = next(r for r in seed["models"] if f"{r['provider']}/{r['model']}" == entry)
+    assert (row["input_per_mtok"], row["output_per_mtok"], row["cache_read_per_mtok"]) == rates
+
+
+def test_every_seed_row_names_its_source_and_check_date() -> None:
+    raw = json.loads(_SOURCE_TREE.read_text(encoding="utf-8"))
+    sources = {s["row"]: s for s in raw["_sources"]}
+    rows = [f"{r['provider']}/{r['model']}" for r in raw["models"]]
+    assert sorted(sources) == sorted(rows)
+    for row in rows:
+        assert sources[row]["source"].startswith("https://"), row
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", sources[row]["checked"]), row

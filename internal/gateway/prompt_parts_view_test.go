@@ -443,9 +443,9 @@ func TestUnionRuleFindingsKeepsOneFindingPerRule(t *testing.T) {
 // alert-only over detection-only, then severity, then confidence. Ties keep the
 // first scan's finding.
 func TestUnionRuleFindingsKeepsTheStrongerFinding(t *testing.T) {
-	demoted := RuleFinding{RuleID: "D", Severity: "LOW", Confidence: 0.4, Evidence: "weak", enforcement: findingEnforcementDetectionOnly}
+	demoted := RuleFinding{RuleID: "D", Severity: "LOW", Confidence: 0.4, Evidence: "weak", Proof: recordProof}
 	full := RuleFinding{RuleID: "D", Severity: "CRITICAL", Confidence: 0.8, Evidence: "strong"}
-	lowAlert := RuleFinding{RuleID: "D", Severity: "LOW", Evidence: "alert", enforcement: findingEnforcementAlertOnly}
+	lowAlert := RuleFinding{RuleID: "D", Severity: "LOW", Evidence: "alert", Proof: advisoryProof}
 	lowEnforce := RuleFinding{RuleID: "D", Severity: "LOW", Evidence: "enforce"}
 	lowSure := RuleFinding{RuleID: "D", Severity: "LOW", Confidence: 0.9, Evidence: "sure"}
 	otherProfile := RuleFinding{RuleID: "D", Severity: "CRITICAL", Evidence: "member", profile: "p2"}

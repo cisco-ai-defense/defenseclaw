@@ -34,7 +34,7 @@ func TestPerUserInstallLockClosesEveryShellHook(t *testing.T) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"action":"allow"}`))
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 	type hookCase struct {
 		name   string
 		conn   Connector
@@ -59,6 +59,7 @@ func TestPerUserInstallLockClosesEveryShellHook(t *testing.T) {
 	} {
 		for _, tc := range cases {
 			t.Run(tc.name+"/"+endpoint.name, func(t *testing.T) {
+				parallelHookCase(t)
 				data := t.TempDir()
 				hooks := filepath.Join(data, "hooks")
 				if err := os.Mkdir(filepath.Join(data, ".install.lock"), 0o700); err != nil {

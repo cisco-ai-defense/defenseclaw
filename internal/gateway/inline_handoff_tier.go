@@ -11,6 +11,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/textlower"
 )
 
 // inlineStateReading is what a shell call hands to inline-code interpreter
@@ -138,11 +139,9 @@ func withInlineHandoffTier(ctx context.Context, request trustedActionRequest, fi
 	finding = adjustConfidence(request.Input.Tool, finding)
 	switch {
 	case !request.EnforcementCapable:
-		finding.enforcement = findingEnforcementDetectionOnly
-	case request.StrictPolicy:
-		finding.enforcement = findingEnforcementAllowed
+		finding.Proof = finding.Proof.Record()
 	default:
-		finding.enforcement = findingEnforcementAlertOnly
+		finding.Proof = request.tieredProof(finding.Proof, tierGateStrict)
 	}
 	return append(slices.Clip(findings), finding)
 }
@@ -162,7 +161,7 @@ func containsInlineInterpreterName(command string) bool {
 // shell reads a program word, without quotes and backslashes and in any
 // case, so 'un'zip, t\ar and TAR pass it (rel-1-0-10:GAP-1223).
 func mentionsArchiveExtractor(command string) bool {
-	text := strings.ToLower(archiveGateText.Replace(command))
+	text := textlower.Lower(archiveGateText.Replace(command))
 	for _, name := range []string{"tar", "unzip", "7z", "cpio", "ditto", "zipfile", "unpack_archive", "expand-archive", "extracttodirectory"} {
 		if strings.Contains(text, name) {
 			return true
@@ -189,6 +188,11 @@ func withFindChildTwins(ctx context.Context, request trustedActionRequest, findi
 	for _, child := range children[:min(len(children), 4)] {
 		twin := operandBoundReading(request, child)
 		twin.targetMemo, twin.simpleMemo = nil, nil
+		// The twin is a reading of the call, not a call: the call records its
+		// own facts for the tool-call chains. Recording the twin replaced
+		// them, so a find -exec read of a credentials file started no
+		// secret-read chain (substrate-1:GAP-0349 Q23).
+		twin.record = nil
 		got := dispatchTrustedAction(ctx, twin)
 		got = agentHookConfigFindings(ctx, twin, got)
 		for _, found := range got {

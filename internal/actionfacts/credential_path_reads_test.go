@@ -4,6 +4,7 @@
 package actionfacts
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -57,7 +58,7 @@ func TestGAP0341CredentialPathProbeRows(t *testing.T) {
 			if got := gap0341ReadsCredentialFile(facts); got != want {
 				t.Fatalf("read=%v want=%v (record %v)", got, want, facts.CredentialPathReads())
 			}
-			if caps := facts.CredentialPathReadCaps(); caps.Any() {
+			if caps := facts.CredentialPathReadCaps(context.Background()); caps.Any() {
 				t.Fatalf("an ordinary call hit a resolve cap: %s", caps.Reason())
 			}
 		})
@@ -118,7 +119,7 @@ func TestGAP1030GlobWildcardNeverMatchesALeadingDot(t *testing.T) {
 		{"*", ".env", false}, {"?env", ".env", false}, {"[.]env", ".env", false}, {".*", ".env", true},
 		{".en?", ".env", true}, {`\.env`, ".env", true}, {"*", "id_rsa", true}, {"id_*", "id_rsa", true},
 	} {
-		if got := credentialGlobSegmentMatches(row.pattern, row.name); got != row.want {
+		if got := credentialGlobSegmentMatches(row.pattern, row.name, false); got != row.want {
 			t.Errorf("%q vs %q: %v, want %v", row.pattern, row.name, got, row.want)
 		}
 	}
@@ -189,7 +190,7 @@ func TestGAP1030RecordIsPrivateInEffect(t *testing.T) {
 	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.HasCredentialPathReads() || decoded.CredentialPathReadCaps().Any() {
+	if decoded.HasCredentialPathReads() || decoded.CredentialPathReadCaps(context.Background()).Any() {
 		t.Fatal("a payload set the private record")
 	}
 
@@ -255,7 +256,7 @@ func TestGAP1029ResolveStopsAtEachCapAndKeepsWhatItRead(t *testing.T) {
 		t.Helper()
 		out := parsePOSIX(command, 1, 0)
 		classifyOutput(&out)
-		return resolveCredentialPathReadsWithin(limits, out.credentialWords, dir, dir, out.commands, out.paths)
+		return resolveCredentialPathReadsWithin(NewCredentialWalkBudget(context.Background()), limits, out.credentialWords, dir, dir, out.commands, out.paths)
 	}
 	for _, row := range []struct {
 		name    string
@@ -265,7 +266,7 @@ func TestGAP1029ResolveStopsAtEachCapAndKeepsWhatItRead(t *testing.T) {
 	}{
 		{"candidates", credentialPathLimits{candidates: 2, work: 1 << 20, lookups: 64}, "sed -n p .env a.x b.x c.x", bounded.Items},
 		{"work", credentialPathLimits{candidates: 64, work: 16, lookups: 64}, "sed -n p .env " + strings.Repeat("a", 32) + ".x", bounded.Time},
-		{"lookups", credentialPathLimits{candidates: 64, work: 1 << 20, lookups: 1}, "sed -n p .env; grep -r KEY .", bounded.Paths},
+		{"lookups", credentialPathLimits{candidates: 64, work: 1 << 20, lookups: 1}, "sed -n p .env; grep -r KEY .; grep -r KEY src", bounded.Paths},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			record := analyze(row.limits, row.command)
@@ -285,7 +286,7 @@ func TestGAP1029ResolveStopsAtEachCapAndKeepsWhatItRead(t *testing.T) {
 	// At the production cap: one candidate more is TRUNCATED (bounded.Items).
 	for _, n := range []int{maxCredentialPathCandidates, maxCredentialPathCandidates + 1} {
 		facts := Analyze(Input{Tool: "exec", Command: "sed -n p " + strings.Join(gap1029Words(n), " "), CWD: "/work"})
-		if got := facts.CredentialPathReadCaps().Has(bounded.Items); got != (n > maxCredentialPathCandidates) {
+		if got := facts.CredentialPathReadCaps(context.Background()).Has(bounded.Items); got != (n > maxCredentialPathCandidates) {
 			t.Fatalf("%d candidates: items cap %v", n, got)
 		}
 	}

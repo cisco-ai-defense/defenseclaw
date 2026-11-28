@@ -2463,12 +2463,7 @@ func exactPathDigest(candidate actionfacts.PathFact) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return pathIdentityDigest(identity), true
-}
-
-func pathIdentityDigest(identity string) string {
-	digest := sha256.Sum256([]byte("defenseclaw/tool-chain/path-identity/v1\x00" + identity))
-	return hex.EncodeToString(digest[:])
+	return guardrail.ToolChainPathIdentityDigest(identity), true
 }
 
 // exactArtifactIntentPathDigest is exactPathDigest for the artifact of a
@@ -2479,7 +2474,7 @@ func pathIdentityDigest(identity string) string {
 // (rel-1-0-6:GAP-0182). Other chains keep exactPathDigest.
 func exactArtifactIntentPathDigest(candidate actionfacts.PathFact) (string, bool) {
 	if identity, ok := gitBashDriveLetterIdentity(candidate); ok {
-		return pathIdentityDigest("windows\x00" + identity), true
+		return guardrail.ToolChainPathIdentityDigest("windows\x00" + identity), true
 	}
 	return exactPathDigest(candidate)
 }
@@ -2786,24 +2781,49 @@ func secretReadPathIdentity(facts actionfacts.Facts, candidate actionfacts.PathF
 // exactSecretReadChainDigest is exactSingleReadPathDigest for the
 // secret-read chain: the identity of a relative operand in a call that may
 // change directory is not exact (GAP-0409).
+//
+// The call's own paths and then the chain's private reads are checked one at
+// a time, and the digest is refused at the first read whose identity is not
+// exact or differs from the one before: every later read can only agree or
+// refuse again. A call that searches a deep tree has hundreds of private
+// reads, and each is spelled by a Windows system call; the handler kept the
+// call's whole record alive until it had spelled them all (substrate-1:
+// GAP-0674). secretReadPathIdentity reads the call's commands and the read
+// itself, never the call's other paths, so the checks do not depend on the
+// order.
 func exactSecretReadChainDigest(facts actionfacts.Facts) (string, bool) {
-	private := facts.CredentialPathReads()
-	if len(private) != 0 {
-		facts.Paths = append([]actionfacts.PathFact(nil), facts.Paths...)
+	var selected string
+	exact := func(candidate actionfacts.PathFact) bool {
+		identity, ok := secretReadPathIdentity(facts, candidate)
+		if !ok || selected != "" && selected != identity {
+			return false
+		}
+		selected = identity
+		return true
 	}
-	for _, candidate := range private {
-		if credentialFileFixturePath(semanticPathValue(candidate)) {
+	for _, candidate := range facts.Paths {
+		if candidate.Access == actionfacts.PathAccessRead &&
+			matchesAnySensitivePathCandidate(semanticPathValue(candidate)) && !exact(candidate) {
+			return "", false
+		}
+	}
+	for _, candidate := range facts.CredentialPathReads() {
+		value := semanticPathValue(candidate)
+		if credentialFileFixturePath(value) {
 			continue
 		}
 		if candidate.Value == "" {
 			return "", false
 		}
-		facts.Paths = append(facts.Paths, candidate)
+		if candidate.Access == actionfacts.PathAccessRead && matchesAnySensitivePathCandidate(value) && !exact(candidate) {
+			return "", false
+		}
 	}
-	return exactSinglePathDigestBy(facts, func(candidate actionfacts.PathFact) bool {
-		return candidate.Access == actionfacts.PathAccessRead &&
-			matchesAnySensitivePathCandidate(semanticPathValue(candidate))
-	}, secretReadPathIdentity)
+	if selected == "" {
+		return "", false
+	}
+	digest := sha256.Sum256([]byte("defenseclaw/tool-chain/path-identity/v1\x00" + selected))
+	return hex.EncodeToString(digest[:]), true
 }
 
 // externalUploadProofDigest proves an external upload in a call whose
@@ -2846,7 +2866,7 @@ func externalUploadProofDigest(facts actionfacts.Facts) (string, bool) {
 		selected = identity
 	}
 	if exact && selected != "" {
-		return pathIdentityDigest(selected), true
+		return guardrail.ToolChainPathIdentityDigest(selected), true
 	}
 	return guardrail.ToolChainFileUnknownDigest, true
 }
@@ -2872,9 +2892,13 @@ func credentialFileReadProofDigest(facts actionfacts.Facts) (string, bool) {
 		identity, ok := secretReadPathIdentity(facts, candidate)
 		if !ok || selected != "" && selected != identity {
 			exact = false
-		} else {
-			selected = identity
+			// Nothing after a read that is not exact changes the result: the
+			// call has a read, and none of the reads is a single exact file.
+			// The rest are spelled by a system call each on Windows, with the
+			// call's record kept alive (substrate-1:GAP-0674).
+			break
 		}
+		selected = identity
 	}
 	for _, candidate := range facts.Paths {
 		command, ok := credentialFileContentReadCommand(facts, candidate)
@@ -2901,7 +2925,7 @@ func credentialFileReadProofDigest(facts actionfacts.Facts) (string, bool) {
 	case !found:
 		return "", false
 	case exact && selected != "" && !credentialFileReadDerivesFile(facts):
-		return pathIdentityDigest(selected), true
+		return guardrail.ToolChainPathIdentityDigest(selected), true
 	default:
 		return guardrail.ToolChainFileUnknownDigest, true
 	}
@@ -3468,11 +3492,11 @@ func toolChainRuleFindings(
 		finding := RuleFinding{
 			RuleID: id, Title: definition.Title,
 			Severity: definition.Severity, Confidence: 0.98,
-			Tags:        []string{"tool-call-chain", "multi-step"},
-			enforcement: findingEnforcementDetectionOnly,
+			Tags:  []string{"tool-call-chain", "multi-step"},
+			Proof: recordProof,
 		}
 		if _, ok := enforcementSafe[id]; ok {
-			finding.enforcement = findingEnforcementAllowed
+			finding.Proof = finding.Proof.Enforce()
 		}
 		findings = append(findings, finding)
 	}

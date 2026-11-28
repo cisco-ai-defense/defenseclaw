@@ -133,6 +133,15 @@ type EnumerateOptions struct {
 	// GroupCache is the membership cache the caller keeps between cycles;
 	// the standalone enumerator updates it in place. Nil starts empty.
 	GroupCache *WindowsEnrollmentGroupCache
+
+	// Enrolled reports an account the hook guardian has protected
+	// (enterpriseHookEnrolledAccounts in internal/cli, which reads the
+	// guardian's enrolled-accounts record and ledger). A newly discovered
+	// row of such an account is never skipped as a per-user install: its
+	// managed folder is writable by the account, so that entry is tamper,
+	// which the guardian reports (GAP-1733 review 2). Nil counts only the
+	// accounts the existing manifest has rows for.
+	Enrolled func(sid string) bool
 	// ReportUnprotected receives each agent the standalone enumerator found
 	// installed for an eligible profile but could not enroll.
 	ReportUnprotected func(UnprotectedAgent)
@@ -385,6 +394,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			signedIn:      sessionActive || sessionListed(profile.SID),
 			user:          filepath.Base(filepath.Clean(profile.Home)),
 			report:        opts.ReportUnprotected,
+			enrolled:      opts.Enrolled,
 		}
 		if standalone && !sessionActive && !windowsRunsConnector(running[canonicalManifestTargetSID(profile.SID)], connectors) &&
 			windowsDisabledLocalAccount(profile.SID, lookupAccount) && !signedIn(profile.SID) {

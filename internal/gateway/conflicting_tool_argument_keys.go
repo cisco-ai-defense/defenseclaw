@@ -27,6 +27,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 const (
@@ -37,6 +38,11 @@ const (
 	// maxConflictingToolArgumentCandidates bounds the single-key calls one
 	// call is judged as.
 	maxConflictingToolArgumentCandidates = 16
+	// maxBesideCallConflictCandidates bounds the candidates judged beside
+	// the call's own reading (conflictingToolArguments.besideCall); past it
+	// the call is floored at the unknown tier, as on the MCP bridge
+	// (substrate-1:GAP-1105).
+	maxBesideCallConflictCandidates = 8
 )
 
 // conflictingToolArgumentSource is the argument object of a tool call as
@@ -68,6 +74,12 @@ type conflictingToolArguments struct {
 	// shellOrWrite is set when a candidate is a complete shell or
 	// file-write call.
 	shellOrWrite bool
+	// besideCall is set when no candidate is a complete reading: the call
+	// is judged as it reads too, and the candidates only add to that.
+	besideCall bool
+	// overflow is set when besideCall left candidates unjudged
+	// (maxBesideCallConflictCandidates).
+	overflow bool
 }
 
 // toolArgument is one member of a tool call's argument object.
@@ -116,7 +128,9 @@ func conflictingToolArgumentKeys(request trustedActionRequest, facts actionfacts
 	// A wrapper object names the call's own fields only where ActionFacts
 	// reads it so for this tool; a closed shell contract reads it as an
 	// unknown key.
-	foldsWrappers := actionfacts.Analyze(project(json.RawMessage(`{"input":{"command":"true"}}`))).Authoritative()
+	foldsWrappers := slices.ContainsFunc(members, func(member toolArgument) bool {
+		return toolArgumentWrapper(member.key, member.value)
+	}) && toolArgumentFoldsWrappers(project)
 	choices, conflicted, repeated := toolArgumentChoices(members, 0, foldsWrappers)
 	if !conflicted && !repeated {
 		return conflictingToolArguments{}, false
@@ -166,15 +180,71 @@ func conflictingToolArgumentKeys(request trustedActionRequest, facts actionfacts
 		result.shellOrWrite = true
 		return result, true
 	}
+	if !complete && competing && (foldsWrappers || toolArgumentReadValuesCompete(members, 0)) {
+		// No candidate is a complete reading: a tool whose argument object
+		// ActionFacts does not review (an MCP tool) reads its command keys
+		// as partial. The call's own reading then reads one value of a
+		// field, the first key in order, and the others went unread, so
+		// {"command":"x","script":CMD} was allowed where {"script":CMD}
+		// alone is denied (substrate-1:GAP-1105). Each candidate is judged
+		// beside the call's own reading, so a value under either key gets
+		// the verdict it gets alone, and the call keeps its own findings.
+		result.besideCall = true
+		if len(result.candidates) > maxBesideCallConflictCandidates {
+			result.candidates = result.candidates[:maxBesideCallConflictCandidates]
+			result.overflow = true
+		}
+		return result, true
+	}
 	return result, complete
+}
+
+// toolArgumentFoldsWrappers reports a tool for which ActionFacts reads a
+// wrapper object's fields (input, parameters, request) as the call's own:
+// the wrapped command reads as a complete call, or as the plain command
+// does. A closed shell contract reads the wrapper as an unknown key; a tool
+// whose arguments ActionFacts does not review (an MCP tool) reads both as
+// partial, and folds the wrapper all the same (substrate-1:GAP-1105).
+func toolArgumentFoldsWrappers(project func(json.RawMessage) actionfacts.Input) bool {
+	wrapped := actionfacts.Analyze(project(json.RawMessage(`{"input":{"command":"true"}}`)))
+	if wrapped.Authoritative() {
+		return true
+	}
+	plain := actionfacts.Analyze(project(json.RawMessage(`{"command":"true"}`)))
+	return !plain.Authoritative() && wrapped.Parse.Status == plain.Parse.Status &&
+		slices.Equal(wrapped.Parse.Issues, plain.Parse.Issues)
 }
 
 // toolArgumentCommandsCompete reports an argument object whose command keys
 // (command, cmd, script, ...) hold more than one command, compared as
 // toolArgumentSpellingsAgree compares values.
 func toolArgumentCommandsCompete(members []toolArgument) bool {
+	return toolArgumentValuesCompete(members, func(field string, _ bool) bool { return field == "command" })
+}
+
+// toolArgumentReadValuesCompete reports an argument object, or a wrapper
+// object in it, that names a field ActionFacts reads with more than one
+// value. An unreviewed key given in two letter cases is not read as one.
+func toolArgumentReadValuesCompete(members []toolArgument, depth int) bool {
+	if toolArgumentValuesCompete(members, func(field string, reviewed bool) bool { return reviewed && field != "nested" }) {
+		return true
+	}
+	for _, member := range members {
+		if depth < maxNestedToolArgumentDepth && toolArgumentWrapper(member.key, member.value) {
+			if nested, ok := topLevelToolArguments(member.value); ok && toolArgumentReadValuesCompete(nested, depth+1) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// toolArgumentValuesCompete reports a field selected by want that the
+// members name with more than one value, compared as
+// toolArgumentSpellingsAgree compares values.
+func toolArgumentValuesCompete(members []toolArgument, want func(field string, reviewed bool) bool) bool {
 	for _, group := range groupToolArguments(members) {
-		if field, _ := conflictingToolArgumentField(group.keys[0]); field != "command" || len(group.values) < 2 {
+		if field, reviewed := conflictingToolArgumentField(group.keys[0]); !want(field, reviewed) || len(group.values) < 2 {
 			continue
 		}
 		first, ok := normalizedToolArgumentValue(group.values[0])
@@ -626,39 +696,26 @@ func hasCommandArgumentAt(args json.RawMessage, depth int) bool {
 }
 
 // conflictingToolArgumentField is the field an argument key names for the
-// conflict check, and whether ActionFacts reviews it. It mirrors
-// actionfacts canonicalInputFieldName (keys equal but for letter case, and
-// the aliases it folds onto one field), plus the edit tools' text keys. Any
+// conflict check, and whether ActionFacts reviews it: the reader's field
+// (actionfacts.ReadArgumentField: keys equal but for letter case, and the
+// aliases it folds onto one field), plus the edit tools' text keys. Any
 // other key names its lower-case form.
 func conflictingToolArgumentField(key string) (string, bool) {
+	// The reader's own aliases come from the reader, so the two cannot drift
+	// (substrate-1:GAP-1132, the GAP-1128 class); only the edit-tool keys,
+	// which the generic reader does not read, are spelled here.
+	if field, known := actionfacts.ReadArgumentField(key); known {
+		return field, true
+	}
 	field := strings.ToLower(key)
 	switch field {
-	case "command", "cmd", "script",
-		"rawcommand", "raw_command", "raw-command",
-		"shellcommand", "shell_command", "shell-command",
-		"commandline", "command_line", "command-line":
-		return "command", true
-	case "argv", "commandargv", "command_argv", "command-argv":
-		return "argv", true
-	case "cwd", "workdir", "work_dir", "work-dir",
-		"workingdirectory", "working_directory", "working-directory":
-		return "cwd", true
-	case "path", "filepath", "file_path", "file-path":
-		return "path", true
-	case "url", "uri", "endpoint":
-		return "url", true
-	case "method", "httpmethod", "http_method", "http-method":
-		return "method", true
-	case "input", "parameters", "request":
-		return "nested", true
 	case "old_string", "oldstring", "old-string", "old_str":
 		return "old_string", true
 	case "new_string", "newstring", "new-string", "new_str":
 		return "new_string", true
 	case "replace_all", "replaceall", "replace-all":
 		return "replace_all", true
-	case "args", "source", "destination", "target",
-		"body", "data", "payload", "content", "headers", "edits":
+	case "edits":
 		return field, true
 	}
 	return field, false
@@ -714,20 +771,24 @@ func dispatchConflictingToolArguments(
 		findings = append(findings, dispatchTrustedAction(parent, single)...)
 	}
 	findings = deduplicateTrustedActionFindings(findings)
+	if conflict.overflow {
+		// More candidates than were judged: the rest is not read.
+		findings = withBoundedTruncation(findings, bounded.Of(bounded.Items), request)
+	}
 	if !conflict.shellOrWrite {
 		return findings
 	}
-	enforcement := findingEnforcementAllowed
+	enforcement := enforcingProof
 	if !request.EnforcementCapable {
-		enforcement = findingEnforcementDetectionOnly
+		enforcement = recordProof
 	}
 	return append(findings, RuleFinding{
-		RuleID:      conflictingToolArgumentsRuleID,
-		Title:       conflictingToolArgumentsTitle,
-		Severity:    "CRITICAL",
-		Confidence:  1,
-		Tags:        []string{"tool-arguments"},
-		LineNumber:  1,
-		enforcement: enforcement,
+		RuleID:     conflictingToolArgumentsRuleID,
+		Title:      conflictingToolArgumentsTitle,
+		Severity:   "CRITICAL",
+		Confidence: 1,
+		Tags:       []string{"tool-arguments"},
+		LineNumber: 1,
+		Proof:      enforcement,
 	})
 }

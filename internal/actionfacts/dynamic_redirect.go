@@ -293,6 +293,10 @@ func DynamicRedirectTargetReduction(input Input, facts Facts) (view, twin Facts,
 	view = twin
 	view.Commands = commands
 	view.Paths = paths
+	// The twin's private record is resolved first (credentialPathResult):
+	// the scan reads what the record holds, never the parse it keeps to
+	// resolve from, which names the placeholders.
+	view.credentialPaths.get()
 	if mentionsString(reflect.ValueOf(view), dynamicRedirectPlaceholderPrefix, 0) {
 		return Facts{}, Facts{}, false
 	}

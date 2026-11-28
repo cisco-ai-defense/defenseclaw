@@ -55,6 +55,7 @@ struct GatewayAdministratorTests {
         await testStartContinuesAsAccountAfterRepair()
         await testFailedRepairStopsTheCommand()
         await testUnresolvedRepairDoesNotPromptAgain()
+        await testUnfinishedRepairIsOfferedAgain()
         testRetiredPreferenceRemoved()
         testRepairHintQuotesTheHome()
         await testRefusalBeforeAuthorization()
@@ -286,6 +287,58 @@ struct GatewayAdministratorTests {
         let cleared = makeRunner(context(), clearedState, repair: { _, _ in CLIResult(exitCode: 0, output: "repaired") })
         _ = await cleared.run(binary: "defenseclaw-gateway", arguments: ["stop"])
         expect(clearedState.remembered == nil, "a home the repair cleared leaves nothing remembered")
+    }
+
+    /// GAP-2003: a repair the helper stopped at its walk deadline is not an
+    /// unresolved leftover. Whether the top-level markers are unchanged (the
+    /// stop was deep in a folder) or all cleared (deep files stay root-owned),
+    /// the next start repairs again, until a repair finishes.
+    private static func testUnfinishedRepairIsOfferedAgain() async {
+        let unfinished = CLIResult(exitCode: GatewayAdminPolicy.repairUnfinishedExitCode,
+                                   output: "The repair stopped before it reached every file; repair again to return the rest.\n")
+        // Markers unchanged after the unfinished repair.
+        let probe = InvocationProbe()
+        let state = RootStateFixture()
+        let unchanged = makeRunner(context(), state, clearOnRepair: false, repair: { context, _ in
+            await probe.record(context)
+            return unfinished
+        })
+        let first = await unchanged.run(binary: "defenseclaw-gateway", arguments: ["start"])
+        expect(first.exitCode == unfinished.exitCode && first.output.contains("repair again"),
+               "the unfinished result and its advice reach the user: \(first.output)")
+        expect(state.remembered != GatewayRootState.fingerprint(state.current),
+               "an unfinished repair does not record the markers as unresolved")
+        let second = await unchanged.run(binary: "defenseclaw-gateway", arguments: ["start"])
+        let calls = await probe.count()
+        expect(second.exitCode == unfinished.exitCode && calls == 2,
+               "unchanged markers after an unfinished repair still bring the repair back, not a refusal: \(second.exitCode) after \(calls)")
+
+        // Every top-level marker cleared, deeper files still root-owned.
+        let deepProbe = InvocationProbe()
+        let deepState = RootStateFixture()
+        let finishes = ManagedAtomicFlag()
+        let cleared = CLIRunner(context: context(), rootOwnedState: { _ in deepState.current }, administratorRepair: { context, _ in
+            await deepProbe.record(context)
+            deepState.set([])
+            return finishes.isSet ? CLIResult(exitCode: 0, output: "repaired\n") : unfinished
+        }, repairMemory: deepState.repairMemory)
+        // Stop ends with the repair, so no gateway command runs here.
+        _ = await cleared.run(binary: "defenseclaw-gateway", arguments: ["stop"])
+        expect(deepState.remembered == GatewayRepairMemory.unfinished, "the unfinished repair is remembered as to do again")
+        _ = await cleared.run(binary: "defenseclaw-gateway", arguments: ["stop"])
+        var deepCalls = await deepProbe.count()
+        expect(deepCalls == 2, "cleared top-level markers after an unfinished repair still bring the repair back: \(deepCalls)")
+        finishes.set()
+        _ = await cleared.run(binary: "defenseclaw-gateway", arguments: ["stop"])
+        deepCalls = await deepProbe.count()
+        expect(deepCalls == 3 && deepState.remembered == nil, "a finished repair clears the reminder: \(deepCalls) \(String(describing: deepState.remembered))")
+    }
+
+    private final class ManagedAtomicFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+        func set() { lock.lock(); value = true; lock.unlock() }
     }
 
     /// REVIEW-2 NH-6: every pasted sudo chown hint quotes the home as one shell word.

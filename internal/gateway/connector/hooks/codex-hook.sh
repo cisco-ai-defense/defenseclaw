@@ -24,7 +24,7 @@ codex_event_can_control() {
   case "${2:-}" in
     UserPromptSubmit|PreToolUse|PermissionRequest|PostToolUse|Stop) return 0 ;;
     SessionStart|SubagentStop|PreCompact|PostCompact)
-      case "${1:-}" in codex-hooks-v3|codex-hooks-v4) return 0 ;; esac
+      case "${1:-}" in codex-hooks-v3|codex-hooks-v3-generic|codex-hooks-v4) return 0 ;; esac
       ;;
   esac
   return 1
@@ -229,20 +229,21 @@ defenseclaw_install_held() {
   defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}" && return 0
   [ -n "${_DC_HOOK_DATA_DIR:-}" ] && defenseclaw_install_lock_held "${_DC_HOOK_DATA_DIR}"
 }
-# A failure before the helpers load (a hook path that does not resolve, a
-# missing or broken _hardening.sh, a set -e error) blocks in fail mode
-# closed, under strict availability and while this account's installer holds
-# its data directory, and so does every exit 2, with Codex's own block of
-# the registered event (codex_closed_answer); fail mode open keeps the exit
-# status. The installed mode decides (GAP-0315).
-# defenseclaw_harden_env replaces this trap with the hook's own.
+# A failure (a hook path that does not resolve, a missing or broken
+# _hardening.sh, a set -e error, an unbound variable, before or after the
+# helpers load) blocks in fail mode closed, under strict availability and
+# while this account's installer holds its data directory, and so does every
+# exit 2, with Codex's own block of the registered event
+# (codex_closed_answer); fail mode open keeps the exit status. The installed
+# mode decides (GAP-0315). The exit guard (shell-exit-guard, installed below
+# codex_closed_answer) stays the EXIT trap to the end (GAP-1734).
 _DC_BOOT_FAIL_MODE="{{.FailMode}}"
 defenseclaw_boot_fails_closed() {
   [ "$_DC_BOOT_FAIL_MODE" = "open" ] || return 0
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) return 0 ;; esac
   defenseclaw_install_held
 }
-# The registered event and contract, from the arguments setup binds (--event,
+{{end}}{{if not .SecureClient}}# The registered event and contract, from the arguments setup binds (--event,
 # --hook-contract), before the helpers load; the binding check below
 # validates them.
 _DC_CODEX_EVENT=""
@@ -259,32 +260,46 @@ done
 unset _dc_codex_arg _dc_codex_arg_prev
 # codex_closed_answer [REASON] answers a call this hook blocks as Codex reads
 # a block of the registered event: the event's block object on stdout and
-# exit 0, as the native hook answers (emitCodexBlock). Codex v0.130+ reads a
-# non-zero UserPromptSubmit status as a hook failure and submits the prompt,
-# so exit 2 is no block there (GAP-0949). An event Codex gives no control
-# keeps exit 2, and so do Stop and SubagentStop, where a block only keeps
-# Codex running (#1140) as exit 2 does. Codex shows REASON, else why: the
-# install, or the failure the hook recorded (_DC_CODEX_BLOCK_REASON).
+# exit 0, as the native hook answers (emitCodexBlock), event for event (the
+# connector tests hold both to one table).
+# Codex v0.130+ reads a non-zero UserPromptSubmit status as a hook failure and
+# submits the prompt, so exit 2 is no block there (GAP-0949). A Stop or
+# SubagentStop block keeps Codex running the turn with REASON (#1140); exit 2
+# with no stderr was read as a hook failure and lost it (GAP-1770). An event
+# Codex gives no control keeps exit 2, except SessionEnd and SubagentStart,
+# which nothing can block: they exit 0. Codex shows REASON, else why: the
+# install, or the failure the hook recorded (_DC_CODEX_BLOCK_REASON). The
+# standalone managed hook answers its blocks the same way (GAP-1755), from
+# its first line: its exit guard is installed here too.
 codex_closed_answer() {
   local reason="${1:-}"
-  if [ -z "$reason" ] && defenseclaw_install_held; then
+{{if not .Managed}}  if [ -z "$reason" ] && defenseclaw_install_held; then
     reason="DefenseClaw blocked this: DefenseClaw is being installed or upgraded for this account (fail mode closed). Try again when it is done."
   fi
-  reason="${reason:-${_DC_CODEX_BLOCK_REASON:-DefenseClaw blocked this because its hook failed (fail mode closed). Run defenseclaw doctor to see why.}}"
+{{end}}  reason="${reason:-${_DC_CODEX_BLOCK_REASON:-{{if .Sandbox}}DefenseClaw blocked this because its sandbox hook failed (sandbox hooks fail closed): the user runs defenseclaw sandbox doctor on their machine to see why.{{else}}DefenseClaw blocked this because its hook failed (fail mode closed). Run defenseclaw doctor to see why.{{end}}}}"
   reason="${reason//\\/\\\\}"
   reason="${reason//\"/\\\"}"
   reason="${reason//[[:cntrl:]]/ }"
-  codex_event_can_control "$_DC_CODEX_CONTRACT" "$_DC_CODEX_EVENT" || exit 2
+  if ! codex_event_can_control "$_DC_CODEX_CONTRACT" "$_DC_CODEX_EVENT"; then
+    case "$_DC_CODEX_EVENT" in
+      SessionEnd|SubagentStart) exit 0 ;;
+    esac
+    exit 2
+  fi
   case "$_DC_CODEX_EVENT" in
-    Stop|SubagentStop) exit 2 ;;
     SessionStart|PreCompact|PostCompact) printf '{"continue":false,"stopReason":"%s"}\n' "$reason" ;;
     PermissionRequest) printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"%s"}}}\n' "$reason" ;;
+    UserPromptSubmit|PostToolUse|SubagentStop|Stop) printf '{"decision":"block","reason":"%s"}\n' "$reason" ;;
     PreToolUse) printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$reason" ;;
-    *) printf '{"decision":"block","reason":"%s"}\n' "$reason" ;;
-  esac
+    *) exit 2 ;;
+  esac{{if .Sandbox}} || {
+    # The answer could not be written: exit 0 with nothing on stdout is a
+    # Codex allow, exit 2 still blocks where a status can (GAP-1769).
+    builtin exit 2
+  }{{end}}
   exit 0
 }
-trap '_dc_boot_rc=$?; if [ "$_dc_boot_rc" -eq 2 ] || { [ "$_dc_boot_rc" -ne 0 ] && defenseclaw_boot_fails_closed; }; then codex_closed_answer; fi' EXIT
+{{template "shell-exit-guard" .}}
 {{end}}
 # Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
@@ -381,11 +396,7 @@ fi
 command . "${HOOK_DIR}/_sandbox.sh" || exit 2
 {{end}}defenseclaw_harden_resources
 defenseclaw_harden_env
-{{if and (not .Managed) (not .Sandbox)}}# defenseclaw_harden_env replaced the EXIT trap with its cleanup: keep it, and
-# answer every block below (exit 2) as Codex reads one for the registered
-# event (codex_closed_answer, GAP-0949).
-trap '_dc_codex_rc=$?; _defenseclaw_hook_cleanup; if [ "$_dc_codex_rc" -eq 2 ]; then codex_closed_answer; fi' EXIT
-{{end}}{{if .ManagedShellGuard}}trap '_dc_managed_on_exit' EXIT
+{{if .ManagedShellGuard}}trap '_dc_managed_on_exit' EXIT
 {{end}}
 # Fail mode governs response-layer failures (4xx, bad JSON, missing
 # action) and transport failures (gateway unreachable / timeout / 5xx).
@@ -418,6 +429,7 @@ fail_binding() {
 {{if and (not .Managed) (not .Sandbox)}}  _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this because its Codex hook registration does not match this call (${reason}). Run defenseclaw setup codex to register it again."
 {{end}}{{if and .Managed (not .SecureClient)}}  # A managed binding error is integrity, not an outage: closed in every
   # fail mode, as in the native runner.
+  _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this because its Codex hook registration does not match this call (${reason})."
   defenseclaw_log_hook_delivery_failure codex codex-hook "$reason" response closed
   echo "defenseclaw: codex hook binding error: $reason" >&2
   exit 2
@@ -475,7 +487,7 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
     defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "stdin body exceeded cap" transport
   echo "defenseclaw: codex hook refusing oversized payload" >&2
   if [ "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" != "open" ]; then
-{{if and (not .Managed) (not .Sandbox)}}    _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this because the hook payload is too large for DefenseClaw to inspect."
+{{if not .SecureClient}}    _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this because the hook payload is too large for DefenseClaw to inspect."
 {{else}}    printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
 {{end}}    exit 2
   fi
@@ -501,7 +513,9 @@ fi
 # It runs after the binding check, as in the native runner, so a stop event
 # that gets the fail-closed exception has a payload that matches its
 # registered event.
-{{if .Sandbox}}defenseclaw_sandbox_require_token codex codex-hook "codex tool"{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+{{if .Sandbox}}_DC_CODEX_BLOCK_REASON="DefenseClaw blocked this because this sandbox has no valid DefenseClaw binding token: the user runs defenseclaw sandbox doctor on their machine."
+defenseclaw_sandbox_require_token codex codex-hook "codex tool"
+_DC_CODEX_BLOCK_REASON=""{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token codex codex-hook "codex tool" "${HOOK_DIR}/{{.TokenFile}}" "$BOUND_EVENT" ""
 fi{{end}}
 
@@ -542,6 +556,8 @@ fail_unreachable() {
   elif _dc_answer="$(defenseclaw_gateway_error_block_text "$1")"; then
     _DC_CODEX_BLOCK_REASON="$_dc_answer"
   fi
+{{else if .Sandbox}}  _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this: ${1%.}."
+{{else if not .SecureClient}}  _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this because it could not reach its gateway ($1)."
 {{end}}  # A blocked Stop only keeps Codex running the turn (#1140).
   if defenseclaw_should_fail_closed_on_unreachable; then
     defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "$1" transport
@@ -588,7 +604,8 @@ fail_response() {
   FAIL_MODE="closed"
 {{end}}  local reason
   reason="$(defenseclaw_response_failure_reason "$1")"
-  [ "$FAIL_MODE" = "open" ] ||
+{{if and .Managed (not .SecureClient)}}  _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this because its gateway's answer could not be used (${reason})."
+{{end}}  [ "$FAIL_MODE" = "open" ] ||
     defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "$reason" response
   defenseclaw_log_hook_delivery_failure codex codex-hook "$reason" response "$FAIL_MODE"
   echo "defenseclaw: codex hook error: $reason" >&2
@@ -863,8 +880,9 @@ if [ "$ACTION" = "block" ]; then
     # decision=block. Exit 0 so Codex honors it.
     exit 0
   fi
-  # codex_output was not extractable (no jq/python3 for object fields).
-  # Construct minimal structured block JSON so Codex sees exit 0 + JSON
+{{if .Sandbox}}  # The gateway's block carries no codex_output.
+{{else}}  # codex_output was not extractable (no jq/python3 for object fields).
+{{end}}  # Construct minimal structured block JSON so Codex sees exit 0 + JSON
   # rather than exit 2 — newer Codex versions (v0.130+) treat exit 2 on
   # UserPromptSubmit as "hook failed" rather than "hook blocked".
 {{if .SecureClient}}  REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null)
@@ -872,7 +890,7 @@ if [ "$ACTION" = "block" ]; then
 {{end}}  if [ -z "$REASON" ]; then
     REASON="Blocked by DefenseClaw Codex policy."
   fi
-{{if and (not .Managed) (not .Sandbox)}}  codex_closed_answer "$REASON"
+{{if not .SecureClient}}  codex_closed_answer "$REASON"
 {{else}}  printf '{"decision":"block","reason":"%s"}\n' "$(defenseclaw_json_escape "$REASON")"
   exit 0
 {{end}}fi

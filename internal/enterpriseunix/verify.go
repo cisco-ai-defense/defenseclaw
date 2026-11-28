@@ -1235,6 +1235,13 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	if record != nil {
 		drift, unpinnable := l.policyViewPinProblems(record.MachinePolicyConnectors)
 		for _, problem := range drift {
+			if strings.HasPrefix(problem, "codex policy view differs") {
+				// Ensure puts the published requirements.toml back; only
+				// reconcile accepts an edit of it (GAP-1928).
+				r.AddWarning(codeMachinePolicyIncomplete, problem+"; run `"+env.lifecycleCommand(ActionEnsure)+"` to put back the requirements DefenseClaw published, or `"+
+					env.lifecycleCommand(ActionReconcile)+"` to accept an administrator's edit of it as the trusted policy view")
+				continue
+			}
 			r.AddWarning(codeMachinePolicyIncomplete, problem+"; run `"+env.lifecycleCommand(ActionReconcile)+"` or `"+env.lifecycleCommand(ActionEnsure)+"` to pin the verified policy view")
 		}
 		for _, problem := range unpinnable {

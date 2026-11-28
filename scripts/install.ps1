@@ -1546,13 +1546,48 @@ function Get-GatewayDescendants {
     return $found
 }
 
+function Wait-UpgradeCaller {
+    # `defenseclaw upgrade` and `rollback` start this installer from the CLI,
+    # whose processes run from the venv. The CLI waited for the install log,
+    # and a downgrade's controller checks the venv before it has one, so the
+    # two waited on each other until Wait-VenvFree gave up: "DefenseClaw is in
+    # use by defenseclaw.exe, defenseclaw.exe, python.exe" (GAP-2117). The CLI
+    # hands over instead: DC_INSTALLER_HANDOFF names its process (pid and
+    # creation time) and a named event. Setting the event lets it exit; this
+    # then waits for exactly that process. Nothing is left out of the venv
+    # check: the CLI's console launchers end with it, and any other program
+    # that runs from the venv still holds the install. A value that names no
+    # live process with that creation time is ignored.
+    $handoff = [string]$env:DC_INSTALLER_HANDOFF
+    if (-not $handoff) { return }
+    Remove-Item Env:DC_INSTALLER_HANDOFF -ErrorAction SilentlyContinue
+    if ($handoff -notmatch '^([1-9][0-9]{0,9}):([1-9][0-9]{0,18}):(Local\\DefenseClaw-installer-handoff-[0-9a-f]{32})$') { return }
+    $name = $Matches[3]
+    $callerId = 0
+    $born = [long]0
+    if (-not [int]::TryParse($Matches[1], [ref]$callerId) -or -not [long]::TryParse($Matches[2], [ref]$born)) { return }
+    try {
+        # A pid names the caller only with its creation time: an exited
+        # caller's pid can be another program's. The handle keeps it.
+        $caller = [Diagnostics.Process]::GetProcessById($callerId)
+        $null = $caller.Handle
+        if ($caller.StartTime -ne [DateTime]::FromFileTime($born)) { return }
+        $event = [Threading.EventWaitHandle]::OpenExisting($name)
+        try { [void]$event.Set() } finally { $event.Dispose() }
+    } catch { return }
+    Write-Info "Waiting for the DefenseClaw command that started this installer to exit"
+    [void]$caller.WaitForExit(60000)
+}
+
 function Wait-VenvFree {
     # A program running from the venv (the TUI, or the CLI that started this
-    # installer and is still exiting) keeps its files from being deleted, and
-    # an open file keeps the venv from being moved. Wait for them, then give
-    # up before anything has changed. The gateway's own scans are not waited
-    # for: they stop with the gateway, before anything uses the venv (a
-    # rollback right after an upgrade was refused for them).
+    # installer, which Wait-UpgradeCaller lets exit first) keeps its files
+    # from being deleted, and an open file keeps the venv from being moved.
+    # Wait for them, then give up before anything has changed. The gateway's
+    # own scans are not waited for: they stop with the gateway, before
+    # anything uses the venv (a rollback right after an upgrade was refused
+    # for them).
+    Wait-UpgradeCaller
     if (-not (Test-Path -LiteralPath $Venv)) { return }
     for ($waited = 0; $waited -le 60; $waited++) {
         $own = @(Get-GatewayDescendants | ForEach-Object { [int]$_.ProcessId })
@@ -4213,9 +4248,9 @@ function Save-RolledBackData {
     New-Item -ItemType Directory -Path (Join-Path $DataDir "backups") -Force | Out-Null
     Move-Path (Join-Path $Previous "data") $kept
     $bytes = Get-TreeSize $kept
-    $what = if ($label -eq "rolled-back") { "the data from before the last rollback" } else { "the audit history DefenseClaw $version recorded" }
+    $what = if ($label -eq "rolled-back") { "the data written while $version ran" } else { "the audit history DefenseClaw $version recorded" }
     Write-Info ("Kept $what in $kept ({0:N1} MB)" -f ([double]$bytes / 1MB))
-    Write-Info "It is not used again; once you no longer need its audit history, remove it with: cmd /c rd /s /q `"$kept`""
+    Write-Info "It is not used again; once you no longer need it, remove it with: cmd /c rd /s /q `"$kept`""
 }
 
 function Save-Live([string]$Slot) {
@@ -5122,6 +5157,27 @@ function Convert-HooksForRestore([string]$Slot) {
     Invoke-Quietly { Convert-HooksForRollback $live $back }
 }
 
+function Test-ClaudeHooksUnchangedSinceConversion {
+    # True only when the abort left the Claude Code settings exactly as the
+    # gateway saved them before converting (backups\claudecode-settings.before-
+    # rollback.json), and no other connector kept rollback evidence that this
+    # check cannot read. Any doubt is false: the caller then keeps its warning.
+    try {
+        $backups = Join-Path $DataDir "backups"
+        $saved = Join-Path $backups "claudecode-settings.before-rollback.json"
+        $configDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE ".claude" }
+        $settings = Join-Path $configDir "settings.json"
+        foreach ($file in @($saved, $settings)) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return $false }
+            if ((Get-Item -LiteralPath $file -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+        }
+        $others = @(Get-ChildItem -LiteralPath $backups -File -Force -ErrorAction Stop |
+            Where-Object { $_.Name -like "*before-rollback*" -and $_.Name -notlike "claudecode-settings.before-rollback*.json" })
+        if ($others.Count -gt 0) { return $false }
+        return (Get-Sha256 $saved) -eq (Get-Sha256 $settings)
+    } catch { return $false }
+}
+
 function Restore-HooksAfterAbortedRollback {
     # Only the current reader may recover a published conversion and restore
     # its exact owned hooks. A saved settings copy is not overwrite authority.
@@ -5136,7 +5192,13 @@ function Restore-HooksAfterAbortedRollback {
         $restored = Invoke-Native $gateway @("connector", "prepare-rollback", "--restore", "--data-dir", $DataDir)
         if ($null -eq $restored -or $restored -ne 0) { throw "the current reader did not verify hook restoration" }
     } catch { $failure = $_.Exception.Message }
-    if ($failure) {
+    if ($failure -and (Test-ClaudeHooksUnchangedSinceConversion)) {
+        # GAP-1092: the current reader refused its restore check, but the one
+        # agent file the abort could have left changed is byte for byte the
+        # copy it saved before converting: the hooks are as they were.
+        Write-Info "Hook protection is unchanged: the Claude Code settings are the copy saved before the downgrade attempt ($failure)"
+        Write-Info "The connector recovery receipts are kept; 'defenseclaw doctor' lists the hooks."
+    } elseif ($failure) {
         Write-Warn "Current hook protection is unverified after the aborted rollback ($failure)"
         Write-Info "Keep the connector recovery receipts and repair with the current DefenseClaw release before continuing agent tool calls."
         Write-Info "Retry the current reader: & `"$gateway`" connector prepare-rollback --restore --data-dir `"$DataDir`""

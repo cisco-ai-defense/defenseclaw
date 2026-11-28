@@ -610,14 +610,6 @@ func TestAMDRegression_PrivateIP(t *testing.T) {
 // guardrails by sneaking the word "heartbeat" into arbitrary text.
 // ---------------------------------------------------------------------------
 
-func repeatStr(s string, n int) string {
-	out := make([]byte, 0, len(s)*n)
-	for i := 0; i < n; i++ {
-		out = append(out, s...)
-	}
-	return string(out)
-}
-
 // ---------------------------------------------------------------------------
 // isSessionStartupMessage tests — the OpenClaw `/new` and `/reset` probe
 // must bypass the LLM judge, but only when the canonical anchors AND a

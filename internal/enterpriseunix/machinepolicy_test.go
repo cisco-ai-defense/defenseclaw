@@ -1452,18 +1452,30 @@ func TestStatusAndVerifyFailWhenAHigherPrecedenceSourceOutranksTheHooks(t *testi
 // An administrator line outside DefenseClaw's block that does not parse made
 // verify say "run repair", while repair exited 0 and changed nothing
 // (GAP-0531). repair now fails and names the line to fix.
-func TestRepairFailsOnAnUnparseableCodexRequirementsLine(t *testing.T) {
+func TestRepairPutsBackAnUnparseableCodexRequirementsLine(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
 	path := h.env.P(codexRequirements)
 	lines := strings.Count(h.read(codexRequirements), "\n")
-	if err := os.WriteFile(path, []byte(h.read(codexRequirements)+"this is not toml\n"), 0o644); err != nil {
+	// Repair puts back the requirements DefenseClaw published (GAP-1928).
+	published := h.read(codexRequirements)
+	broken := published + "this is not toml\n"
+	if err := os.WriteFile(path, []byte(broken), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	repair := h.run(Options{Action: ActionRepair})
-	requireError(t, repair, codeMachinePolicyIncomplete)
-	if got := messagesOf(repair.Errors, codeMachinePolicyIncomplete); !strings.Contains(got, fmt.Sprintf("line %d", lines+1)) {
-		t.Fatalf("repair does not name the line to fix: %s", got)
+	requireOK(t, h.run(Options{Action: ActionRepair}))
+	if got := h.read(codexRequirements); got != published {
+		t.Fatalf("repair did not put back the published requirements:\n%s", got)
+	}
+	// Reconcile, which accepts an administrator's edit, cannot take a line
+	// that does not parse, and says which line to fix.
+	if err := os.WriteFile(path, []byte(broken), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reconcile := h.run(Options{Action: ActionReconcile})
+	got := messagesOf(reconcile.Errors, codeMachinePolicyIncomplete) + messagesOf(reconcile.Warnings, codeMachinePolicyIncomplete) + messagesOf(reconcile.Warnings, codeMachinePolicy)
+	if !strings.Contains(got, fmt.Sprintf("line %d", lines+1)) {
+		t.Fatalf("reconcile does not name the line to fix: %s (%+v)", got, reconcile)
 	}
 }
 

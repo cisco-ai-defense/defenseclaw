@@ -7,9 +7,9 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +17,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // replaceRecord publishes content at path through a new file renamed over it,
@@ -50,18 +51,62 @@ func swapAfterStat(t *testing.T, path string, swaps int, content []byte) *int {
 	return &checks
 }
 
+// swapAfterStatStaged is swapAfterStat with every replacement written
+// before the read starts, so the swap inside the read is one rename. On
+// Windows the read keeps retrying for a bounded 250 ms (safefile.
+// RetryPublishedRead); a replacement that also writes and scans a new file
+// (replaceRecord) can use that whole bound on a loaded host.
+func swapAfterStatStaged(t *testing.T, path string, swaps int, content []byte) *int {
+	t.Helper()
+	staged := make([]string, swaps)
+	for i := range staged {
+		staged[i] = fmt.Sprintf("%s.staged%d", path, i)
+		if err := os.WriteFile(staged[i], content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checks := 0
+	restore := pathidentity.SetPinnedStatHookForTest(func(checked string) {
+		if checked != path {
+			return
+		}
+		checks++
+		if checks <= swaps {
+			if err := os.Rename(staged[checks-1], path); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	t.Cleanup(restore)
+	return &checks
+}
+
 func TestPublishedRecordReadSurvivesAReplacementBetweenCheckAndOpen(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "record.json")
-	if err := os.WriteFile(path, []byte(`{"v":1}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	checks := swapAfterStat(t, path, 2, []byte(`{"v":1}`))
-	data, exists, err := readEnterpriseHookPublishedRecord(path, "hook guardian activation", 1024, nil)
-	if err != nil || !exists || string(data) != `{"v":1}` {
-		t.Fatalf("read after replacements = %q, exists=%t, %v; want the record", data, exists, err)
-	}
-	if *checks != 3 {
-		t.Fatalf("name checked %d times, want 3 (two replaced, one stable)", *checks)
+	// The Windows read retries for 250 ms of wall time. If the whole bound
+	// went to a stall of the host (the full native run) and not to the
+	// replacements, the read fails closed as designed and the scenario is run
+	// again, at most three times; a read that fails inside the bound is a
+	// failure at once.
+	const bound = 250 * time.Millisecond
+	for attempt := 1; ; attempt++ {
+		path := filepath.Join(t.TempDir(), "record.json")
+		if err := os.WriteFile(path, []byte(`{"v":1}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		checks := swapAfterStatStaged(t, path, 2, []byte(`{"v":1}`))
+		began := time.Now()
+		data, exists, err := readEnterpriseHookPublishedRecord(path, "hook guardian activation", 1024, nil)
+		if err != nil && errors.Is(err, safefile.ErrReadIdentityChanged) && time.Since(began) >= bound && attempt < 3 {
+			t.Logf("attempt %d used the whole %s retry bound (%s); running the scenario again", attempt, bound, time.Since(began))
+			continue
+		}
+		if err != nil || !exists || string(data) != `{"v":1}` {
+			t.Fatalf("read after replacements = %q, exists=%t, %v; want the record", data, exists, err)
+		}
+		if *checks != 3 {
+			t.Fatalf("name checked %d times, want 3 (two replaced, one stable)", *checks)
+		}
+		return
 	}
 }
 
@@ -88,9 +133,7 @@ func TestPublishedRecordReadRefusesALinkOrAnotherTypeAtOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	link := filepath.Join(dir, "link.json")
-	if err := os.Symlink(target, link); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
-	}
+	testenv.Symlink(t, target, link)
 	directory := filepath.Join(dir, "directory.json")
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		t.Fatal(err)
@@ -204,9 +247,6 @@ func publishTestGuardianGeneration(t *testing.T, dataDir string, rows []enterpri
 }
 
 func TestGuardianGenerationIsRepublishedOnlyWhenItChangesOrAges(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("enterprise hook guardian persistence is unsupported on native Windows; lifecycle gate coverage remains active")
-	}
 	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	originalOwnership := enterpriseHookAuthorizationOwnershipSetter
 	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
@@ -259,9 +299,6 @@ func TestGuardianGenerationIsRepublishedOnlyWhenItChangesOrAges(t *testing.T) {
 }
 
 func TestRestartedGuardianPublishesFreshGenerationForUnchangedOutcome(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("enterprise hook guardian persistence is unsupported on native Windows; lifecycle gate coverage remains active")
-	}
 	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	originalOwnership := enterpriseHookAuthorizationOwnershipSetter
 	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
@@ -339,9 +376,6 @@ func guardianFreshCoverage(t *testing.T, dataDir string, startedAfter time.Time,
 
 func useGuardianPublishFixture(t *testing.T) string {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("enterprise hook guardian persistence is unsupported on native Windows; lifecycle gate coverage remains active")
-	}
 	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	originalOwnership := enterpriseHookAuthorizationOwnershipSetter
 	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }

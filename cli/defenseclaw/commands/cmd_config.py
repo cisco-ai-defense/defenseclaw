@@ -776,6 +776,33 @@ def _shadowed_mode_notes(changes: list) -> list[str]:
         return []
 
 
+#: Classifiers that run inside the gateway: it reads routing.enabled on a reload
+#: without a restart with them. vllm_sr (and any other value, or none) starts a
+#: router container at boot, so a change stays restart-bound (rel-1-0-10
+#: GAP-1669). RESTART_KEYS stays the conservative list: it cannot see the
+#: classifier.
+_IN_GATEWAY_ROUTING_CLASSIFIERS = frozenset({"rules", "systemone"})
+
+
+def _routing_enabled_applies_on_reload(pending: list[str], changed: list[str], path: str) -> str:
+    """The in-gateway classifier config.yaml names when routing.enabled is the
+    only routing key this write changed (it applies on reload), else ""."""
+    if "routing.enabled" not in pending:
+        return ""
+    if any(key.startswith("routing.") and key != "routing.enabled" for key in changed):
+        return ""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            document = yaml.safe_load(handle)
+    except (OSError, yaml.YAMLError):
+        return ""
+    routing = document.get("routing") if isinstance(document, dict) else None
+    classifier = routing.get("classifier") if isinstance(routing, dict) else None
+    if isinstance(classifier, str) and classifier.strip() in _IN_GATEWAY_ROUTING_CLASSIFIERS:
+        return classifier.strip()
+    return ""
+
+
 def _shadowed_hilt_notes(changes: list) -> list[str]:
     if not any(
         getattr(change, "path", "") == "guardrail.hilt.enabled" and change.value is False
@@ -1461,6 +1488,13 @@ def _write_config_change(
     for note in _seed_moved_data_dir(changes, str(getattr(before_cfg, "data_dir", "") or "")):
         click.echo(note, err=note.startswith("warning:"))
     pending = result.restart_required
+    classifier = _routing_enabled_applies_on_reload(pending, result.changed, path)
+    if classifier:
+        click.echo(
+            "routing.enabled applies on reload: the gateway reads it without a restart "
+            f"with the {classifier} classifier."
+        )
+        pending = [key for key in pending if key != "routing.enabled"]
     if pending:
         click.echo(f"Restart the gateway to apply {', '.join(pending)}: defenseclaw-gateway restart")
     for note in _refresh_stopped_gateway_hooks(before_cfg):

@@ -76,8 +76,15 @@ type SubstrateFacts struct {
 	Paths []SubstratePathFact     `json:"paths,omitempty"`
 	Files []SubstrateAttachedFile `json:"files,omitempty"`
 	// Skills fingerprints every skill folder (A5's kit, GAP-0039).
-	Skills    []SubstrateSkillFingerprint `json:"skills,omitempty"`
-	Truncated bool                        `json:"truncated,omitempty"`
+	Skills []SubstrateSkillFingerprint `json:"skills,omitempty"`
+	// ProjectHooks are the project settings files that declare hooks the
+	// actor's managed settings ignore (the kit's SessionStart fact,
+	// GAP-0479): recorded, never run.
+	ProjectHooks []kit.ProjectHooks `json:"project_hooks,omitempty"`
+	// Proofs are the laptop's file-system proofs the kit made in the
+	// actor's file system (kit.ProofPrivateKeyRead, substrate-1 GAP-0471).
+	Proofs    []string `json:"proofs,omitempty"`
+	Truncated bool     `json:"truncated,omitempty"`
 }
 
 // SubstrateSkillFingerprint is one skill folder's content digest
@@ -101,19 +108,22 @@ type SubstrateSkillFingerprint struct {
 
 // SubstratePathFact is one path argument as the actor resolves it.
 type SubstratePathFact struct {
-	Field     string   `json:"field"`
-	Path      string   `json:"path"`
-	Abs       string   `json:"abs"`
-	Resolved  string   `json:"resolved,omitempty"`
-	LinkChain []string `json:"link_chain,omitempty"`
-	Type      string   `json:"type"`
-	Mode      string   `json:"mode,omitempty"`
-	UID       int      `json:"uid"`
-	GID       int      `json:"gid"`
-	NLink     uint64   `json:"nlink,omitempty"`
-	Size      int64    `json:"size,omitempty"`
-	InsideCWD bool     `json:"inside_cwd"`
-	Error     string   `json:"error,omitempty"`
+	Field       string   `json:"field"`
+	Path        string   `json:"path"`
+	Abs         string   `json:"abs"`
+	Resolved    string   `json:"resolved,omitempty"`
+	Entry       string   `json:"entry,omitempty"`
+	PrivateHome bool     `json:"private_home,omitempty"`
+	Protected   bool     `json:"protected,omitempty"`
+	LinkChain   []string `json:"link_chain,omitempty"`
+	Type        string   `json:"type"`
+	Mode        string   `json:"mode,omitempty"`
+	UID         int      `json:"uid"`
+	GID         int      `json:"gid"`
+	NLink       uint64   `json:"nlink,omitempty"`
+	Size        int64    `json:"size,omitempty"`
+	InsideCWD   bool     `json:"inside_cwd"`
+	Error       string   `json:"error,omitempty"`
 }
 
 // SubstrateAttachedFile is a file the kit read for the gateway.
@@ -197,9 +207,36 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 				return
 			}
 		}
+		reg, hasReg := substrateRegistrationFrom(r.Context())
+		var exposed map[string]string
+		if hasReg {
+			exposed = st.exposedValues(reg.Profile)
+		}
+		// GAP-1149: the event name is the actor's own text, and it reaches
+		// the decision row, the hook audit envelope and the masked-secret row
+		// as it is. An event name is a short identifier that holds no exposed
+		// actor_secrets value; anything else is refused before any row,
+		// log or header carries it.
+		if !substrateEventNameOK(env.Event, exposed) || !substrateEventHeadersOK(r.Header, exposed) {
+			st.logRefusal("hook envelope of %s refused: its event name is not an event name", route.connector)
+			writeSubstrateRefusal(w, http.StatusBadRequest, "envelope_event_invalid")
+			return
+		}
+		// GAP-0504: an exposed actor_secrets value never reaches the hook
+		// rows (tool results, typed prompts).
+		if hasReg {
+			if masked, names := substrateMaskExposed(env.Payload, exposed); len(names) > 0 {
+				env.Payload = masked
+				st.logRefusal("hook payload of %s/%s carried the exposed value(s) %s (actor_secrets); replaced before evaluation and audit",
+					reg.Atespace, reg.Name, strings.Join(names, ", "))
+				st.auditExposedMasked(r.Context(), reg, env.Event, names)
+			}
+		}
 		// The facts stay on the envelope (substrateEnvelopeFrom); the skill
 		// scan below reads the attached files from it.
-		ctx := context.WithValue(r.Context(), substrateEnvelopeKey{}, env)
+		ctx := withSkillPostStart(context.WithValue(r.Context(), substrateEnvelopeKey{}, env))
+		// The kit's proofs and link targets the policy reads (GAP-0471).
+		ctx = withSubstrateGuestClaims(ctx, env)
 		r = r.WithContext(ctx)
 		r.Body = io.NopCloser(bytes.NewReader(env.Payload))
 		r.ContentLength = int64(len(env.Payload))
@@ -209,6 +246,7 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 			r.Header.Set("X-DefenseClaw-Hook-Event", env.Event)
 		}
 		if route.class == sandboxauth.RouteHook {
+			st.substrateRecordProjectHooks(ctx, env)
 			msg := st.substrateMCPRefusal(ctx, env)
 			if msg == "" {
 				msg = st.substrateSkillWriteRefusal(ctx, env)
@@ -222,7 +260,21 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 				}
 				return
 			}
-			answer := withSubstrateAnswer(w, r, next, st.substrateSkills(ctx, env.Connector, env.Facts))
+			sk := st.substrateSkills(ctx, env.Connector, env.Facts)
+			if reg, ok := substrateRegistrationFrom(ctx); ok {
+				cs, known := st.calloutStatus()
+				sk.calloutNote = substrateCalloutNote(cs, known, reg)
+			}
+			if msg := st.substrateSkillUseGate(ctx, env, &sk); msg != "" {
+				st.logRefusal("%s", msg)
+				writeSubstrateSkillRefusal(w, msg, sk.held)
+				if reg, ok := substrateRegistrationFrom(ctx); ok {
+					body, _ := json.Marshal(map[string]string{"reason": kit.MCPRefusedCode, "message": msg})
+					st.substrateRecordDecision(ctx, reg, env.Event, body)
+				}
+				return
+			}
+			answer := withSubstrateAnswer(w, r, next, sk)
 			if reg, ok := substrateRegistrationFrom(ctx); ok {
 				st.substrateRecordDecision(ctx, reg, env.Event, answer)
 			}
@@ -279,6 +331,27 @@ func (a *APIServer) serveSubstrateRelayVerify(st *substrateState, w http.Respons
 		writeSubstrateRefusal(w, http.StatusForbidden, "session_not_owner")
 		return
 	}
+	// A session minted before its person's sign-ins were ended is refused,
+	// and so is every session while this replica's list is stale (B5.1).
+	if status, reason := st.substrateRevocationRefusal(s.Person, "", s.IssuedAt); status != 0 {
+		a.substrateAuditRelayDenied(st, r, "MEDIUM", reason, target, s.Person)
+		writeSubstrateRefusal(w, status, reason)
+		return
+	}
+	// So is a session of an ended sign-in: a plain logout ends that one
+	// token, and an end by time covers the sign-in's own issue time, so a
+	// session a lagging replica handed out after the end is refused too
+	// (GAP-0744). A session minted by released 1.0.10 names no sign-in, and
+	// lives at most MaxSessionLifetime (1 h) across the upgrade; Issue never
+	// mints one now (RV4-03). Compat shim for sessions minted by released
+	// 1.0.10: remove in 1.0.12 and refuse a session that names no sign-in.
+	if s.SignInKey != "" {
+		if status, reason := st.substrateRevocationRefusal(s.Person, s.SignInKey, s.SignInIssuedAt); status != 0 {
+			a.substrateAuditRelayDenied(st, r, "MEDIUM", reason, target, s.Person)
+			writeSubstrateRefusal(w, status, reason)
+			return
+		}
+	}
 	// The admin listener issues a session only to the actor's own person,
 	// and the check above holds a token minted any other way to that too.
 	w.Header().Set("Content-Type", "application/json")
@@ -286,10 +359,56 @@ func (a *APIServer) serveSubstrateRelayVerify(st *substrateState, w http.Respons
 	out := map[string]any{
 		"person": s.Person, "actor": s.ActorRef, "actor_uid": s.ActorUID, "jti": s.TokenID, "expires": s.Expires,
 	}
+	// The relay serves a token only on the routes of its own dc.scope (B3),
+	// and reads the scope from this answer on a relay-TLS kit (GAP-0815):
+	// without it a stream token would be a terminal token there.
+	if s.Scope != "" {
+		out["scope"] = s.Scope
+	}
 	// A --task run's relay checks the task it runs is the one the
 	// launcher registered (GAP-0071): the digest, never the text.
 	if reg, ok := substrateRegistrationFrom(r.Context()); ok && reg.TaskDigest != "" {
 		out["task_digest"] = reg.TaskDigest
 	}
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// substrateEventMaxLen bounds an event name: the longest a connector
+// declares is about 20 characters.
+const substrateEventMaxLen = 64
+
+// substrateEventHeaders are the request headers the hook handlers read an
+// event name from (agent_hook.go), which the actor sets.
+var substrateEventHeaders = []string{"X-DefenseClaw-Hook-Event", "X-DefenseClaw-Copilot-Event", "X-DefenseClaw-Antigravity-Event"}
+
+// substrateEventNameOK reports that event is "" or an event name: letters,
+// digits and _ . : - only, at most substrateEventMaxLen long, starting with a
+// letter, and holding none of the actor's exposed values (GAP-1149).
+func substrateEventNameOK(event string, exposed map[string]string) bool {
+	if event == "" {
+		return true
+	}
+	if len(event) > substrateEventMaxLen || !isASCIILetterByte(event[0]) {
+		return false
+	}
+	for i := 0; i < len(event); i++ {
+		c := event[i]
+		if !isASCIILetterByte(c) && (c < '0' || c > '9') && c != '_' && c != '.' && c != ':' && c != '-' {
+			return false
+		}
+	}
+	_, names := substrateMaskExposed([]byte(event), exposed)
+	return len(names) == 0
+}
+
+// substrateEventHeadersOK checks every event header of h (substrateEventNameOK).
+func substrateEventHeadersOK(h http.Header, exposed map[string]string) bool {
+	for _, name := range substrateEventHeaders {
+		for _, v := range h.Values(name) {
+			if !substrateEventNameOK(strings.TrimSpace(v), exposed) {
+				return false
+			}
+		}
+	}
+	return true
 }

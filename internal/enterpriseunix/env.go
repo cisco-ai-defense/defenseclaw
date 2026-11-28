@@ -202,6 +202,11 @@ type Env struct {
 	Services      ServiceManager
 	Accounts      AccountManager
 	MachinePolicy MachinePolicyManager
+	// adoptMachinePolicyEdits is set only while reconcile republishes vendor
+	// machine policy: the publish takes an administrator's edit of a shared
+	// policy file (Codex requirements.toml) as the new administrator text,
+	// where every other publish puts back what DefenseClaw last wrote.
+	adoptMachinePolicyEdits bool
 	// MacFleetPythonCheck verifies the managed macOS interpreter and PyYAML.
 	// Nil uses Fleet's production trust and isolated import checks; tests may
 	// substitute a probe for an absent macOS framework on non-macOS hosts.

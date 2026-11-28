@@ -1,4 +1,15 @@
 ---
+# Source: defenseclaw-substrate/templates/secret-bindings.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: defenseclaw-user-secrets
+  labels:
+    app.kubernetes.io/managed-by: defenseclaw
+    app.kubernetes.io/part-of: defenseclaw
+  annotations:
+    helm.sh/resource-policy: keep
+---
 # Source: defenseclaw-substrate/templates/networkpolicy.yaml
 # Deny every ingress to this release's pods; the policies below open only
 # what each listener needs.
@@ -9,10 +20,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
 spec:
   podSelector:
     matchLabels:
@@ -31,10 +42,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 spec:
   podSelector:
@@ -88,10 +99,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: leader
 spec:
   podSelector:
@@ -143,10 +154,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: callout
 spec:
   podSelector:
@@ -192,10 +203,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: controller
 spec:
   podSelector:
@@ -250,10 +261,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 spec:
   podSelector:
@@ -293,10 +304,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: callout
 spec:
   podSelector:
@@ -327,10 +338,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: leader
 spec:
   podSelector:
@@ -358,10 +369,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: callout
 spec:
   minAvailable: 1
@@ -379,10 +390,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 spec:
   minAvailable: 1
@@ -406,10 +417,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
 automountServiceAccountToken: false
 ---
@@ -421,10 +432,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 automountServiceAccountToken: false
 ---
@@ -436,10 +447,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: controller
 automountServiceAccountToken: false
 ---
@@ -451,10 +462,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: callout
 automountServiceAccountToken: false
 ---
@@ -466,10 +477,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: callout
 data:
   callout.yaml: |
@@ -499,10 +510,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
 data:
   config.yaml: |
     config_version: 9
@@ -511,6 +522,68 @@ data:
         redaction_profile: sensitive
       local:
         max_store_mb: 1024
+      pricing:
+        models:
+        - cache_read_per_mtok: 0.1
+          cache_write_per_mtok: 1.25
+          input_per_mtok: 1
+          model: claude-haiku-4-5*
+          output_per_mtok: 5
+          provider: anthropic
+        - cache_read_per_mtok: 0.1
+          cache_write_per_mtok: 1.25
+          input_per_mtok: 1
+          model: claude-haiku-4-5*
+          output_per_mtok: 5
+          provider: bedrock
+        - cache_read_per_mtok: 0.3
+          cache_write_per_mtok: 3.75
+          input_per_mtok: 3
+          model: claude-sonnet-4-5*
+          output_per_mtok: 15
+          provider: anthropic
+        - cache_read_per_mtok: 0.3
+          cache_write_per_mtok: 3.75
+          input_per_mtok: 3
+          model: claude-sonnet-4-5*
+          output_per_mtok: 15
+          provider: bedrock
+        - cache_read_per_mtok: 0.5
+          cache_write_per_mtok: 6.25
+          input_per_mtok: 5
+          model: claude-opus-4-5*
+          output_per_mtok: 25
+          provider: anthropic
+        - cache_read_per_mtok: 0.5
+          cache_write_per_mtok: 6.25
+          input_per_mtok: 5
+          model: claude-opus-4-5*
+          output_per_mtok: 25
+          provider: bedrock
+        - cache_read_per_mtok: 0.125
+          input_per_mtok: 1.25
+          model: gpt-5
+          output_per_mtok: 10
+          provider: openai
+        - cache_read_per_mtok: 0.125
+          input_per_mtok: 1.25
+          model: gpt-5-20*
+          output_per_mtok: 10
+          provider: openai
+        - cache_read_per_mtok: 0.175
+          input_per_mtok: 1.75
+          model: gpt-5.2
+          output_per_mtok: 14
+          provider: openai
+        - cache_read_per_mtok: 0.175
+          input_per_mtok: 1.75
+          model: gpt-5.2-20*
+          output_per_mtok: 14
+          provider: openai
+        unknown_model: omit
+        version: 2026-11-21.1
+      tokenomics:
+        enabled: true
     substrate:
       api:
         address: api.ate-system.svc:443
@@ -528,6 +601,11 @@ data:
       identity:
         audience: defenseclaw
         issuer: https://idp.ate-system.svc
+        revocation:
+          enabled: true
+          max_stale: 60s
+          max_tokens_per_person: 64
+          sync_interval: 5s
         token_lifetime_seconds: 300
       idle_suspend_after: 30m
       launcher_atespaces: {}
@@ -535,6 +613,9 @@ data:
       services:
         actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local
         admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local
+      skills:
+        scan:
+          enabled: false
       supported_versions: '>=1.0.0 <1.1.0'
       unattended:
         ask_timeout: 30m
@@ -548,13 +629,30 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 data:
   admin_url: "https://defenseclaw.example.com"
+---
+# Source: defenseclaw-substrate/templates/secret-bindings.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: defenseclaw-secret-bindings
+  namespace: defenseclaw-system
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.11"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.11
+    app.kubernetes.io/component: gateway
+  annotations:
+    helm.sh/resource-policy: keep
 ---
 # Source: defenseclaw-substrate/templates/leader.yaml
 apiVersion: v1
@@ -564,10 +662,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: leader
   annotations:
     helm.sh/resource-policy: keep
@@ -591,10 +689,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -613,10 +711,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 rules:
 - apiGroups: [""]
@@ -636,10 +734,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 rules:
 - apiGroups: [coordination.k8s.io]
@@ -660,6 +758,11 @@ rules:
   resources: [configmaps]
   resourceNames: [defenseclaw-config]
   verbs: [get]
+# The self-service binding store (B1): only the gateway writes it.
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [defenseclaw-secret-bindings]
+  verbs: [get, update]
 ---
 # Source: defenseclaw-substrate/templates/rbac.yaml
 # The controller reads and clears admin policy_conflict resets (the gateway
@@ -672,10 +775,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: controller
 rules:
 - apiGroups: [""]
@@ -686,6 +789,59 @@ rules:
   resources: [configmaps]
   resourceNames: [defenseclaw-config]
   verbs: [get]
+# The self-service binding store (B1): the controller renders it.
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [defenseclaw-secret-bindings]
+  verbs: [get]
+---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+# The controller reads which egress callout Substrate uses from
+# atenet-egress's live Envoy config (GAP-0505): when it is not the
+# DefenseClaw callout, actor policies follow the fail mode. get on that one
+# ConfigMap in the Substrate namespace, nothing else there (it holds no
+# secret: certificates come through SDS files), for the controller alone:
+# the gateway reads the controller's result through the leader.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-defenseclaw-system-egress-read
+  namespace: ate-system
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.11"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.11
+    app.kubernetes.io/component: controller
+rules:
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [atenet-egress]
+  verbs: [get]
+---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-gateway-secrets
+  namespace: defenseclaw-user-secrets
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.11"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.11
+    app.kubernetes.io/component: gateway
+rules:
+- apiGroups: [""]
+  resources: [secrets]
+  verbs: [create]
+- apiGroups: [""]
+  resources: [secrets]
+  verbs: [get, patch]
 ---
 # Source: defenseclaw-substrate/templates/launcher-endpoint.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -695,10 +851,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -717,10 +873,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -739,10 +895,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: controller
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -753,6 +909,52 @@ subjects:
   name: defenseclaw-controller
   namespace: defenseclaw-system
 ---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-defenseclaw-system-egress-read
+  namespace: ate-system
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.11"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.11
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-defenseclaw-system-egress-read
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-controller
+  namespace: defenseclaw-system
+---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-gateway-secrets
+  namespace: defenseclaw-user-secrets
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.11"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.11
+    app.kubernetes.io/component: gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-gateway-secrets
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-gateway
+  namespace: defenseclaw-system
+---
 # Source: defenseclaw-substrate/templates/callout.yaml
 apiVersion: v1
 kind: Service
@@ -761,10 +963,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: callout
 spec:
   type: ClusterIP
@@ -793,10 +995,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
     defenseclaw.cisco.com/listener: actor
 spec:
@@ -820,10 +1022,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
     defenseclaw.cisco.com/listener: admin
 spec:
@@ -846,10 +1048,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: leader
 spec:
   type: ClusterIP
@@ -873,10 +1075,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: callout
 spec:
   revisionHistoryLimit: 5
@@ -897,7 +1099,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: callout
       annotations:
-        checksum/config: ec8155fd6c953eedc5693a5f4afe7970eb25da98926a3c34813dc47a9bcad53f
+        checksum/config: c9c57ca828db2bc410d612da253b5beb0e258369032c6d752bd780de8fed286d
         checksum/callout: f7cdb658cdfbf042caf6a3a3f30615a583619ffba264322d362a0247c2a5b49a
     spec:
       
@@ -923,7 +1125,7 @@ spec:
       
       initContainers:
       - name: home-dir
-        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.11
         imagePullPolicy: IfNotPresent
         args:
         - substrate-datadir
@@ -947,7 +1149,7 @@ spec:
           mountPath: /var/lib/defenseclaw/run
       containers:
       - name: callout
-        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.11
         imagePullPolicy: IfNotPresent
         args:
         - substrate-extproc
@@ -1093,10 +1295,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: controller
 spec:
   replicas: 1
@@ -1115,7 +1317,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: controller
       annotations:
-        checksum/config: ec8155fd6c953eedc5693a5f4afe7970eb25da98926a3c34813dc47a9bcad53f
+        checksum/config: c9c57ca828db2bc410d612da253b5beb0e258369032c6d752bd780de8fed286d
     spec:
       
       serviceAccountName: defenseclaw-controller
@@ -1131,7 +1333,7 @@ spec:
       
       initContainers:
       - name: home-dir
-        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.11
         imagePullPolicy: IfNotPresent
         args:
         - substrate-datadir
@@ -1155,7 +1357,7 @@ spec:
           mountPath: /var/lib/defenseclaw/run
       containers:
       - name: controller
-        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.11
         imagePullPolicy: IfNotPresent
         args:
         - substrate-controller
@@ -1277,10 +1479,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 spec:
   revisionHistoryLimit: 5
@@ -1301,7 +1503,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: gateway
       annotations:
-        checksum/config: ec8155fd6c953eedc5693a5f4afe7970eb25da98926a3c34813dc47a9bcad53f
+        checksum/config: c9c57ca828db2bc410d612da253b5beb0e258369032c6d752bd780de8fed286d
     spec:
       
       serviceAccountName: defenseclaw-gateway
@@ -1326,7 +1528,7 @@ spec:
       
       initContainers:
       - name: home-dir
-        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.11
         imagePullPolicy: IfNotPresent
         args:
         - substrate-datadir
@@ -1350,7 +1552,7 @@ spec:
           mountPath: /var/lib/defenseclaw/run
       containers:
       - name: gateway
-        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.11
         imagePullPolicy: IfNotPresent
         args:
         - serve
@@ -1433,6 +1635,9 @@ spec:
         - name: relay-session
           mountPath: /var/run/secrets/defenseclaw-relay-session
           readOnly: true
+        - name: relay-ca
+          mountPath: /var/run/secrets/defenseclaw-relay-ca
+          readOnly: true
         - name: llm-credentials
           mountPath: /var/run/secrets/defenseclaw-llm
           readOnly: true
@@ -1513,6 +1718,11 @@ spec:
           secretName: defenseclaw-relay-session
           optional: true
           defaultMode: 0440
+      - name: relay-ca
+        secret:
+          secretName: defenseclaw-relay-ca
+          optional: true
+          defaultMode: 0440
       - name: llm-credentials
         secret:
           secretName: defenseclaw-llm
@@ -1557,10 +1767,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: leader
 spec:
   replicas: 1
@@ -1579,7 +1789,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: leader
       annotations:
-        checksum/config: ec8155fd6c953eedc5693a5f4afe7970eb25da98926a3c34813dc47a9bcad53f
+        checksum/config: c9c57ca828db2bc410d612da253b5beb0e258369032c6d752bd780de8fed286d
     spec:
       
       serviceAccountName: defenseclaw-gateway
@@ -1595,7 +1805,7 @@ spec:
       
       initContainers:
       - name: home-dir
-        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.11
         imagePullPolicy: IfNotPresent
         args:
         - substrate-datadir
@@ -1619,7 +1829,7 @@ spec:
           mountPath: /var/lib/defenseclaw/run
       containers:
       - name: leader
-        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.11
         imagePullPolicy: IfNotPresent
         args:
         - serve
@@ -1693,6 +1903,9 @@ spec:
           readOnly: true
         - name: relay-session
           mountPath: /var/run/secrets/defenseclaw-relay-session
+          readOnly: true
+        - name: relay-ca
+          mountPath: /var/run/secrets/defenseclaw-relay-ca
           readOnly: true
         - name: llm-credentials
           mountPath: /var/run/secrets/defenseclaw-llm
@@ -1772,6 +1985,11 @@ spec:
           secretName: defenseclaw-relay-session
           optional: true
           defaultMode: 0440
+      - name: relay-ca
+        secret:
+          secretName: defenseclaw-relay-ca
+          optional: true
+          defaultMode: 0440
       - name: llm-credentials
         secret:
           secretName: defenseclaw-llm
@@ -1809,10 +2027,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: callout
 spec:
   scaleTargetRef:
@@ -1837,10 +2055,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 spec:
   scaleTargetRef:
@@ -1867,10 +2085,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
   annotations:
     nginx.ingress.kubernetes.io/backend-protocol: HTTPS
@@ -1901,10 +2119,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-upgrade,pre-rollback
@@ -1922,10 +2140,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
@@ -1944,10 +2162,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
@@ -1963,10 +2181,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-upgrade,pre-rollback
@@ -1989,10 +2207,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
@@ -2015,10 +2233,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
@@ -2027,7 +2245,7 @@ metadata:
 rules:
 - apiGroups: [""]
   resources: [secrets]
-  resourceNames: ["defenseclaw-relay-session"]
+  resourceNames: ["defenseclaw-relay-session", "defenseclaw-relay-ca"]
   verbs: [get]
 - apiGroups: [""]
   resources: [secrets]
@@ -2043,10 +2261,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-delete
@@ -2067,6 +2285,12 @@ rules:
 - apiGroups: [""]
   resources: [pods]
   verbs: [list]
+# Delete the Jobs (and, by propagation, the pods) of earlier failed hooks,
+# by name: setup.LeftoverHookJobs (GAP-0609).
+- apiGroups: [batch]
+  resources: [jobs]
+  resourceNames: [defenseclaw-chain-key, defenseclaw-relay-session, defenseclaw-pre-upgrade, defenseclaw-pre-rollback, defenseclaw-bootstrap]
+  verbs: [delete]
 ---
 # Source: defenseclaw-substrate/templates/hooks/rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -2077,10 +2301,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-delete
@@ -2104,10 +2328,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-upgrade,pre-rollback
@@ -2130,10 +2354,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
@@ -2156,10 +2380,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
@@ -2182,10 +2406,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-delete
@@ -2209,10 +2433,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-delete
@@ -2235,10 +2459,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
@@ -2269,7 +2493,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: chain-key
-        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.11
         imagePullPolicy: IfNotPresent
         args:
         - substrate-chart
@@ -2281,9 +2505,9 @@ spec:
         # outlive the release (Helm keeps hook resources), and each hook
         # must see its own release's plan (the target one in a rollback).
         - name: DEFENSECLAW_CHART_PLAN
-          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": []\n}"
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.11\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.11\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\",\n    \"user_secrets\": true,\n    \"user_secrets_namespace\": \"defenseclaw-user-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_ca_secret\": \"defenseclaw-relay-ca\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": []\n}"
         - name: DEFENSECLAW_CHART_CONFIG
-          value: "config_version: 9\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  local:\n    max_store_mb: 1024\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces: {}\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
+          value: "config_version: 9\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  local:\n    max_store_mb: 1024\n  pricing:\n    models:\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: anthropic\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: bedrock\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: anthropic\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: bedrock\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: anthropic\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: bedrock\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5-20*\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2\n      output_per_mtok: 14\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2-20*\n      output_per_mtok: 14\n      provider: openai\n    unknown_model: omit\n    version: 2026-11-21.1\n  tokenomics:\n    enabled: true\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    revocation:\n      enabled: true\n      max_stale: 60s\n      max_tokens_per_person: 64\n      sync_interval: 5s\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces: {}\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  skills:\n    scan:\n      enabled: false\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
           value: /tmp/defenseclaw
         - name: POD_NAMESPACE
@@ -2351,10 +2575,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
@@ -2385,7 +2609,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: relay-session
-        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.11
         imagePullPolicy: IfNotPresent
         args:
         - substrate-chart
@@ -2397,9 +2621,9 @@ spec:
         # outlive the release (Helm keeps hook resources), and each hook
         # must see its own release's plan (the target one in a rollback).
         - name: DEFENSECLAW_CHART_PLAN
-          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": []\n}"
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.11\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.11\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\",\n    \"user_secrets\": true,\n    \"user_secrets_namespace\": \"defenseclaw-user-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_ca_secret\": \"defenseclaw-relay-ca\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": []\n}"
         - name: DEFENSECLAW_CHART_CONFIG
-          value: "config_version: 9\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  local:\n    max_store_mb: 1024\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces: {}\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
+          value: "config_version: 9\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  local:\n    max_store_mb: 1024\n  pricing:\n    models:\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: anthropic\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: bedrock\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: anthropic\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: bedrock\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: anthropic\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: bedrock\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5-20*\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2\n      output_per_mtok: 14\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2-20*\n      output_per_mtok: 14\n      provider: openai\n    unknown_model: omit\n    version: 2026-11-21.1\n  tokenomics:\n    enabled: true\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    revocation:\n      enabled: true\n      max_stale: 60s\n      max_tokens_per_person: 64\n      sync_interval: 5s\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces: {}\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  skills:\n    scan:\n      enabled: false\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
           value: /tmp/defenseclaw
         - name: POD_NAMESPACE
@@ -2467,10 +2691,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-upgrade
@@ -2501,7 +2725,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: pre-upgrade
-        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.11
         imagePullPolicy: IfNotPresent
         args:
         - substrate-chart
@@ -2513,9 +2737,9 @@ spec:
         # outlive the release (Helm keeps hook resources), and each hook
         # must see its own release's plan (the target one in a rollback).
         - name: DEFENSECLAW_CHART_PLAN
-          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": []\n}"
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.11\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.11\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\",\n    \"user_secrets\": true,\n    \"user_secrets_namespace\": \"defenseclaw-user-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_ca_secret\": \"defenseclaw-relay-ca\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": []\n}"
         - name: DEFENSECLAW_CHART_CONFIG
-          value: "config_version: 9\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  local:\n    max_store_mb: 1024\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces: {}\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
+          value: "config_version: 9\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  local:\n    max_store_mb: 1024\n  pricing:\n    models:\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: anthropic\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: bedrock\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: anthropic\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: bedrock\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: anthropic\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: bedrock\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5-20*\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2\n      output_per_mtok: 14\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2-20*\n      output_per_mtok: 14\n      provider: openai\n    unknown_model: omit\n    version: 2026-11-21.1\n  tokenomics:\n    enabled: true\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    revocation:\n      enabled: true\n      max_stale: 60s\n      max_tokens_per_person: 64\n      sync_interval: 5s\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces: {}\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  skills:\n    scan:\n      enabled: false\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
           value: /tmp/defenseclaw
         - name: POD_NAMESPACE
@@ -2583,10 +2807,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-rollback
@@ -2617,7 +2841,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: pre-rollback
-        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.11
         imagePullPolicy: IfNotPresent
         args:
         - substrate-chart
@@ -2629,9 +2853,9 @@ spec:
         # outlive the release (Helm keeps hook resources), and each hook
         # must see its own release's plan (the target one in a rollback).
         - name: DEFENSECLAW_CHART_PLAN
-          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": []\n}"
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.11\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.11\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\",\n    \"user_secrets\": true,\n    \"user_secrets_namespace\": \"defenseclaw-user-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_ca_secret\": \"defenseclaw-relay-ca\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": []\n}"
         - name: DEFENSECLAW_CHART_CONFIG
-          value: "config_version: 9\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  local:\n    max_store_mb: 1024\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces: {}\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
+          value: "config_version: 9\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  local:\n    max_store_mb: 1024\n  pricing:\n    models:\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: anthropic\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: bedrock\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: anthropic\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: bedrock\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: anthropic\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: bedrock\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5-20*\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2\n      output_per_mtok: 14\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2-20*\n      output_per_mtok: 14\n      provider: openai\n    unknown_model: omit\n    version: 2026-11-21.1\n  tokenomics:\n    enabled: true\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    revocation:\n      enabled: true\n      max_stale: 60s\n      max_tokens_per_person: 64\n      sync_interval: 5s\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces: {}\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  skills:\n    scan:\n      enabled: false\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
           value: /tmp/defenseclaw
         - name: POD_NAMESPACE
@@ -2699,10 +2923,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-delete
@@ -2733,7 +2957,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: pre-delete
-        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.11
         imagePullPolicy: IfNotPresent
         args:
         - substrate-chart
@@ -2745,9 +2969,9 @@ spec:
         # outlive the release (Helm keeps hook resources), and each hook
         # must see its own release's plan (the target one in a rollback).
         - name: DEFENSECLAW_CHART_PLAN
-          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": []\n}"
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.11\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.11\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\",\n    \"user_secrets\": true,\n    \"user_secrets_namespace\": \"defenseclaw-user-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_ca_secret\": \"defenseclaw-relay-ca\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": []\n}"
         - name: DEFENSECLAW_CHART_CONFIG
-          value: "config_version: 9\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  local:\n    max_store_mb: 1024\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces: {}\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
+          value: "config_version: 9\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  local:\n    max_store_mb: 1024\n  pricing:\n    models:\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: anthropic\n    - cache_read_per_mtok: 0.1\n      cache_write_per_mtok: 1.25\n      input_per_mtok: 1\n      model: claude-haiku-4-5*\n      output_per_mtok: 5\n      provider: bedrock\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: anthropic\n    - cache_read_per_mtok: 0.3\n      cache_write_per_mtok: 3.75\n      input_per_mtok: 3\n      model: claude-sonnet-4-5*\n      output_per_mtok: 15\n      provider: bedrock\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: anthropic\n    - cache_read_per_mtok: 0.5\n      cache_write_per_mtok: 6.25\n      input_per_mtok: 5\n      model: claude-opus-4-5*\n      output_per_mtok: 25\n      provider: bedrock\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.125\n      input_per_mtok: 1.25\n      model: gpt-5-20*\n      output_per_mtok: 10\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2\n      output_per_mtok: 14\n      provider: openai\n    - cache_read_per_mtok: 0.175\n      input_per_mtok: 1.75\n      model: gpt-5.2-20*\n      output_per_mtok: 14\n      provider: openai\n    unknown_model: omit\n    version: 2026-11-21.1\n  tokenomics:\n    enabled: true\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    revocation:\n      enabled: true\n      max_stale: 60s\n      max_tokens_per_person: 64\n      sync_interval: 5s\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces: {}\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  skills:\n    scan:\n      enabled: false\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
           value: /tmp/defenseclaw
         - name: POD_NAMESPACE

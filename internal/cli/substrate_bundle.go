@@ -417,6 +417,15 @@ func substrateProfileResolver(ctx context.Context, cfg *config.Config, live func
 	res := bundle.NewResolver(cfg)
 	res.Managed = managed.IsManagedEnterprise(cfg.DeploymentMode)
 	m := &bundle.Manager{Store: store, Resolver: res, Inbox: b.EffectiveInbox(), Interval: b.EffectiveRefreshInterval(), Sink: sink}
+	if b.OCI.Enabled {
+		// GAP-0437 (Preview): stage bundles pulled by digest, verified by the
+		// same Store.Apply as the inbox. A client that cannot be built (CA or
+		// credentials file unreadable) stops the controller: fail closed.
+		if m.OCI, err = bundle.NewOCIClient(b.OCI); err != nil {
+			return nil, fmt.Errorf("substrate.bundles.oci: %w", err)
+		}
+		m.OCIStages = substrateOCIStages(cfg)
+	}
 	if err := m.Start(ctx); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil, err

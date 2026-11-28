@@ -54,6 +54,14 @@ unverified assets; partial credentials fail in every mode. Certificates are
 imported into a temporary keychain, sensitive temporary files are removed on
 exit, and the original user keychain search list is restored.
 
+## Files the administrator repair holds
+
+When the administrator repair hands a root-owned file back to your account, it first moves the file into a root-only holding folder, `/private/var/db/com.cisco.defenseclaw.macos.GatewayAdmin`, changes it there and moves it back under its own name. A file that cannot go back stays in that folder with a record of where it came from, and the repair summary names the folder and the file. The next repair of the same folder returns it. If something else already uses the file's name, the file goes back next to it as `<name>.defenseclaw-kept`.
+
+The holding folder is on the startup disk with the account homes. A file in a home on another volume cannot be moved into it, so the repair does not hand that file over and lists it as refused.
+
+When a repair ends with nothing held, it removes the holding folder. Before you remove DefenseClawMac, run the repair once more: it returns every held file or lists the ones it could not. If the folder is still there afterward, its files are the ones the summary named; move each back by hand as root, then remove the folder with `sudo rmdir`.
+
 ## Requirements
 
 - Apple Silicon Mac (`arm64`)

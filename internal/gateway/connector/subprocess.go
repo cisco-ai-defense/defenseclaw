@@ -103,7 +103,9 @@ type templateData struct {
 	FailMode            string // Rendered non-outage mode; per-user hooks bake "closed" and ask the current config for a classified outage.
 	Managed             bool
 	// ManagedShellGuard renders the managed shell prologue (fail-mode exit
-	// guard, stderr hygiene) into a Secure Client macOS connector hook.
+	// guard, stderr hygiene) into a Secure Client macOS connector hook. The
+	// other renders that are not Secure Client ones carry the shell exit
+	// guard instead (shell-exit-guard, GAP-1734).
 	ManagedShellGuard bool
 	SecureClient      bool // render-time profile marker for Unix shell identity headers
 	// SecureClientDelivery marks a Secure Client render on a verified install.
@@ -2095,7 +2097,9 @@ const hookScriptMaxBytes = 1 << 20
 // launcher fails, whatever the mode in 0.8.10 and for a rendered open after
 // it; its closed form is the template's. Copilot's (copilot-hook.ps1, 1.0.0
 // on) printed nothing, so Copilot ran the tool; its closed form prints
-// Copilot's native denial for a tool boundary (copilotAdapterClosedFailure).
+// Copilot's native denial for a tool boundary and the prompt's replacement
+// (copilotAdapterClosedFailure); a closed form of 1.0.0 to 1.0.11, which left
+// a prompt unchanged, gets the replacement too (GAP-2137).
 // Each match is one line, so an adapter written with CRLF line ends is
 // closed too.
 var bakedAdapterFailModeOpens = strings.NewReplacer(
@@ -2105,6 +2109,7 @@ var bakedAdapterFailModeOpens = strings.NewReplacer(
 	"$exitCode = 0\r\n", "$exitCode = 2\r\n",
 	"$exitCode = 0\n", "$exitCode = 2\n",
 	copilotAdapterOpenFailure, copilotAdapterClosedFailure,
+	copilotAdapterClosedFailureToolsOnly, copilotAdapterClosedFailure,
 	copilotAdapterReleasedRead+"\r\n"+copilotAdapterReleasedWrite, copilotAdapterReleasedRead+copilotAdapterCrashCheck+"\r\n"+copilotAdapterReleasedWrite,
 	copilotAdapterReleasedRead+"\n"+copilotAdapterReleasedWrite, copilotAdapterReleasedRead+copilotAdapterCrashCheck+"\n"+copilotAdapterReleasedWrite,
 )
@@ -2128,10 +2133,21 @@ const (
 	copilotAdapterOpenFailure = `[Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed open: ' + $_.Exception.Message)`
 	// copilotAdapterClosedFailure is the catch block for a closed mode:
 	// Copilot ignores a failed hook process but honors its native denial,
-	// so a tool boundary gets one (the native hook's failNativeDecision).
-	copilotAdapterClosedFailure = `[Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed closed: ' + $_.Exception.Message); ` +
+	// so a tool boundary gets one (the native hook's failNativeDecision),
+	// and a Copilot CLI prompt gets DefenseClaw's notice in its place, as the
+	// native hook answers a closed failure (copilotFailedPromptReplacement,
+	// GAP-2137).
+	copilotAdapterClosedFailure = copilotAdapterClosedFailureLead +
+		` elseif ($Event -ceq 'userPromptTransformed') { [Console]::Out.Write('{"modifiedTransformedPrompt":"DefenseClaw blocked the current user message. ` +
+		`Do not answer it or call tools for it. Reply only: DefenseClaw blocked this prompt: its DefenseClaw hook failed closed."}') } }`
+	// copilotAdapterClosedFailureToolsOnly is the closed catch block of
+	// 1.0.0 to 1.0.11, which answered only a tool boundary; the refresh
+	// rewrites it to copilotAdapterClosedFailure. It is not a substring of
+	// that form, so a refreshed adapter is not changed again.
+	copilotAdapterClosedFailureToolsOnly = copilotAdapterClosedFailureLead + ` }`
+	copilotAdapterClosedFailureLead      = `[Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed closed: ' + $_.Exception.Message); ` +
 		`if (-not $responseWritten) { if ($Event -ceq 'preToolUse') { [Console]::Out.Write('{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}') } ` +
-		`elseif ($Event -ceq 'permissionRequest') { [Console]::Out.Write('{"behavior":"deny","message":"DefenseClaw hook failed closed"}') } }`
+		`elseif ($Event -ceq 'permissionRequest') { [Console]::Out.Write('{"behavior":"deny","message":"DefenseClaw hook failed closed"}') }`
 )
 
 // closeBakedHookFailMode rewrites the open a hook script or adapter bakes as
@@ -2525,7 +2541,12 @@ func readStableManagedRuntimeFileForOwner(
 ) ([]byte, bool, error) {
 	var data []byte
 	var exists bool
-	err := safefile.RetryTransientRead(func() error {
+	retry := safefile.RetryTransientRead
+	if allowMissing {
+		// A missing optional runtime file is an answer: one confirming look.
+		retry = safefile.RetryOptionalRead
+	}
+	err := retry(func() error {
 		var readErr error
 		data, exists, readErr = readStableManagedRuntimeFileForOwnerOnce(
 			path, label, maxBytes, expectedOwnerSID,
@@ -2564,7 +2585,7 @@ func readStableManagedRuntimeFileForOwnerOnce(
 	}
 	file, err := openConnectorStateFileWithRetry(path)
 	if err != nil {
-		return nil, false, err
+		return nil, false, safefile.NameVanished(err)
 	}
 	defer file.Close()
 	opened, err := file.Stat()
@@ -2617,7 +2638,7 @@ func readStableManagedRuntimeFileForOwnerOnce(
 	}
 	current, err := os.Lstat(path)
 	if err != nil {
-		return nil, false, fmt.Errorf("%s changed after open: %w", label, err)
+		return nil, false, fmt.Errorf("%s changed after open: %w", label, safefile.NameVanished(err))
 	}
 	if current.Mode()&os.ModeSymlink != 0 || !current.Mode().IsRegular() ||
 		!os.SameFile(opened, current) ||

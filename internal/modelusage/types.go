@@ -75,6 +75,16 @@ type CallFacts struct {
 	// model.usage log, so per-user panels show a name, not a uid; "" when no
 	// name resolved, and the id stays). It is never stored or used as a key.
 	SubjectName string
+	// OwnerKey and OwnerKind name the usage owner when it is not the
+	// subject: an Agent Substrate actor call is owned by its person's key
+	// (kind substrate_person). Only OwnerID reads them; telemetry and every
+	// other reader keep Subject, the verified subject hook events carry.
+	OwnerKey, OwnerKind string
+
+	// Actor, BatchID and Atespace name the Agent Substrate actor of the call
+	// (from its registration, never from headers); empty off a cluster. Only
+	// the cluster usage rows carry them.
+	Actor, BatchID, Atespace string
 
 	// Correlation of a call imported from the OTLP telemetry of the agent
 	// (Engine.RecordNative): the session, turn and agent it joined on the hook
@@ -136,7 +146,7 @@ type Record struct {
 	Usage     Usage
 	Cost      Cost
 	Status    int
-	Outcome   string // completed | failed | cancelled
+	Outcome   string // completed | failed | cancelled (ErrorType cancelled or blocked)
 	ErrorType string
 	TTFB      time.Duration
 	Total     time.Duration
@@ -149,6 +159,16 @@ type Record struct {
 	// provider name (else other). The local store and the labels key on these,
 	// never on the client-chosen model string.
 	ModelKey, ProviderKey string
+	// openingUsage is set when Usage is only the opening count of a stream
+	// that ended before its final usage: what the call cost is unknown.
+	openingUsage bool
+	// answered is set when the provider itself answered the gateway's call
+	// (UpstreamHeader: the provider's status and headers, or on the
+	// translated chat stream the adapter's first chunk or answer), never by
+	// a header the gateway sends of its own before it calls the provider
+	// (GAP-0628, rel-1-0-10:GAP-2233). It holds whatever TTFB the clock
+	// measured: on Windows an answer within one clock tick has a TTFB of 0.
+	answered bool
 }
 
 // DropSource is a sink that counts records it lost (cumulative, by kind).
@@ -175,6 +195,14 @@ type Recorder interface {
 // does it for requests it no longer needs). The upstream did not fail, so the
 // record is cancelled, not failed (GAP-0631).
 var ErrClientGone = errors.New("client closed the connection")
+
+// ErrStreamBlocked is the error of a call whose stream the gateway ended
+// itself (a guardrail block) after the provider began answering: the
+// provider billed the output it generated up to the cut, which no usage the
+// agent got counts. The record is cancelled with error type blocked, and a
+// call without the provider's final usage is of unknown cost
+// (substrate-1:GAP-1119).
+var ErrStreamBlocked = errors.New("the gateway ended the stream (guardrail block)")
 
 type Call interface {
 	UpstreamHeader(status int, h http.Header)

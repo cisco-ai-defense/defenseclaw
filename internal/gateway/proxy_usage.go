@@ -77,6 +77,19 @@ func usageIdentity(ctx context.Context, f *modelusage.CallFacts) {
 	if s, ok := verifiedSubjectFromContext(ctx); ok {
 		f.Subject, f.SubjectKind, f.IdentityVerified = s.UserID, s.Source, true
 		f.SubjectName = s.UserName
+		if key, ok := substrateActorPersonKey(ctx); ok {
+			// The owner of an actor call is its person's key, the same
+			// one the usage API reads for that person. Subject stays the
+			// verified subject, so model.usage user.id matches the hook
+			// and llm events of the same actor.
+			f.OwnerKey, f.OwnerKind = key, substrateUsageOwnerKind
+		}
+	}
+	if reg, ok := substrateRegistrationFrom(ctx); ok && isSubstrateActorRequest(ctx) {
+		// The cluster usage rows are by actor, batch and atespace, from the
+		// registration on the actor listener, never from headers. An
+		// attributed actor has them too (no person).
+		f.Actor, f.BatchID, f.Atespace = reg.Name, reg.BatchID, reg.Atespace
 	}
 	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && f.IdentityVerified {
 		f.ProfileName, f.ProfileDigest = resolved.decision.Name, resolved.decision.Digest
@@ -98,14 +111,35 @@ type usageResponseWriter struct {
 
 	mu     sync.Mutex
 	header bool
-	body   []byte
-	over   bool
-	ended  bool
+	// own is set where the gateway answers the agent with a header of its
+	// own before it calls the provider (the translated chat stream,
+	// GAP-0628). That header and the bytes the gateway writes are not the
+	// provider answering: upstreamAnswered tells the record when the
+	// provider did, with the header the gateway sent (ownHeader).
+	// rel-1-0-10:GAP-2233.
+	own       bool
+	ownHeader http.Header
+	body      []byte
+	over      bool
+	ended     bool
+	// endErr is how the forwarded call broke off, set by the stream code
+	// (setUsageEndErr); end(nil) ends the record with it (GAP-1112).
+	endErr error
+	// blocked is set once the gateway ends the stream itself
+	// (usageStreamBlocked): what it writes after that is its own block, not
+	// the provider's answer, and is not read for usage.
+	blocked bool
 }
 
 func (u *usageResponseWriter) WriteHeader(status int) {
 	u.mu.Lock()
-	if !u.header {
+	switch {
+	case u.header:
+	case u.own:
+		if u.ownHeader == nil {
+			u.ownHeader = u.Header().Clone()
+		}
+	default:
 		u.header = true
 		u.call.UpstreamHeader(status, u.Header())
 	}
@@ -115,13 +149,16 @@ func (u *usageResponseWriter) WriteHeader(status int) {
 
 func (u *usageResponseWriter) Write(p []byte) (int, error) {
 	u.mu.Lock()
-	if !u.header {
+	if !u.header && !u.own {
 		u.header = true
 		u.call.UpstreamHeader(http.StatusOK, u.Header())
 	}
-	if u.streaming {
+	switch {
+	case u.blocked:
+		// The gateway's own block: never the provider's usage.
+	case u.streaming:
 		u.call.Chunk(p)
-	} else if !u.over {
+	case !u.over:
 		if len(u.body)+len(p) > usageBodyCap {
 			u.over, u.body = true, nil
 		} else {
@@ -148,11 +185,150 @@ func (u *usageResponseWriter) end(err error) {
 		return
 	}
 	u.ended = true
+	if err == nil {
+		err = u.endErr
+	}
 	if !u.streaming && len(u.body) > 0 {
 		u.call.Body(u.body)
 	}
 	u.body = nil
 	u.call.End(err)
+}
+
+// usageWriterOf finds the usage writer under w (through Unwrap).
+func usageWriterOf(w http.ResponseWriter) *usageResponseWriter {
+	for i := 0; i < 8 && w != nil; i++ {
+		if uw, ok := w.(*usageResponseWriter); ok {
+			return uw
+		}
+		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return nil
+		}
+		w = u.Unwrap()
+	}
+	return nil
+}
+
+// setUsageEndErr tells the usage record of the call answering through w how
+// the call broke off, so the deferred end of the record carries it instead of
+// nil (GAP-1112). The rule: a streamed call that breaks off after the
+// upstream began answering ends with the error it saw. The upstream body
+// failing is upstream_error; the caller going away (its context done or a
+// write to it failing, modelusage.ErrClientGone) is cancelled. Either way a
+// call with no final output usage is of unknown cost, never the input-only
+// total (modelusage.chargeBudgets). The first error wins; a call that
+// completed passes none and stays known.
+func setUsageEndErr(w http.ResponseWriter, err error) {
+	if err == nil {
+		return
+	}
+	uw := usageWriterOf(w)
+	if uw == nil {
+		return
+	}
+	uw.mu.Lock()
+	if uw.endErr == nil && !uw.ended {
+		uw.endErr = err
+	}
+	uw.mu.Unlock()
+}
+
+// usageStreamBlocked tells the usage record of the call answering through w
+// that the gateway ends the stream itself (a guardrail block) after the
+// provider began answering. The record ends cancelled (error type blocked)
+// unless it already broke off another way, and the block the gateway writes
+// next (a block tail with an Anthropic message_delta usage, a Gemini
+// finishReason, a [DONE]) is never read as the provider's usage, so a call
+// cut before the provider's final usage is of unknown cost
+// (substrate-1:GAP-1119).
+func usageStreamBlocked(w http.ResponseWriter) {
+	uw := usageWriterOf(w)
+	if uw == nil {
+		return
+	}
+	uw.mu.Lock()
+	if uw.endErr == nil && !uw.ended {
+		uw.endErr = modelusage.ErrStreamBlocked
+	}
+	uw.blocked = true
+	uw.mu.Unlock()
+}
+
+// setUsageUpstreamStatus puts the status the upstream answered with on the
+// usage record before the proxy writes an error reply of its own, so that
+// reply is not taken for the upstream's status (a 2xx whose body then
+// failed is of unknown cost, not an http_502 failure).
+func setUsageUpstreamStatus(w http.ResponseWriter, status int, h http.Header) {
+	uw := usageWriterOf(w)
+	if uw == nil {
+		return
+	}
+	uw.mu.Lock()
+	if !uw.header {
+		uw.header = true
+		uw.call.UpstreamHeader(status, h)
+	}
+	uw.mu.Unlock()
+}
+
+// usageOwnHeader marks the usage record of the call answering through w: the
+// header the gateway sends next is its own, sent before it calls the provider
+// (GAP-0628), not the provider answering. The record learns that the provider
+// answered from upstreamAnswered on the writer it returns (nil when no record
+// is kept; upstreamAnswered on nil does nothing). Without this, a provider
+// call that fails before any answer (a refused connect, a 429 the adapter
+// returns as an error) ends as a call the provider answered and then broke
+// off: of unknown cost, and the actor's next call is denied although the
+// provider billed nothing (rel-1-0-10:GAP-2233).
+func usageOwnHeader(w http.ResponseWriter) *usageResponseWriter {
+	uw := usageWriterOf(w)
+	if uw == nil {
+		return nil
+	}
+	uw.mu.Lock()
+	uw.own = true
+	uw.mu.Unlock()
+	return uw
+}
+
+// upstreamAnsweredKey keys, on the context of one provider call, the
+// function a provider adapter calls when the provider answered.
+type upstreamAnsweredKey struct{}
+
+// withUpstreamAnswered returns ctx carrying answered for the provider
+// adapter (markUpstreamAnswered).
+func withUpstreamAnswered(ctx context.Context, answered func(status int)) context.Context {
+	return context.WithValue(ctx, upstreamAnsweredKey{}, answered)
+}
+
+// markUpstreamAnswered is called by a provider adapter when the provider
+// answered the call, with the HTTP status it answered with, also when the
+// stream then broke off before its first event. A 2xx stream that breaks off
+// is of unknown cost; an error status is a failed call (http_NNN) the
+// provider billed nothing for; a call the provider never answered (a refused
+// connect) gets no mark (rel-1-0-10:GAP-2233, GAP-2238). Without a hook on
+// ctx it does nothing.
+func markUpstreamAnswered(ctx context.Context, status int) {
+	if answered, ok := ctx.Value(upstreamAnsweredKey{}).(func(int)); ok {
+		answered(status)
+	}
+}
+
+// upstreamAnswered tells the usage record that the provider answered with
+// status: the adapter said so (markUpstreamAnswered), delivered its first
+// chunk or returned its answer (200). The first call counts; later ones and
+// a writer whose upstream header the record already has do nothing.
+func (u *usageResponseWriter) upstreamAnswered(status int) {
+	if u == nil {
+		return
+	}
+	u.mu.Lock()
+	if !u.header {
+		u.header = true
+		u.call.UpstreamHeader(status, u.ownHeader)
+	}
+	u.mu.Unlock()
 }
 
 // beginUsage starts the usage record of one forwarded call and returns the
@@ -274,8 +450,8 @@ func isUsageOnlyChunk(payload string) bool {
 // recordChatUsage hands usage the proxy already parsed (Bifrost) to the
 // record of the call answering through w.
 func recordChatUsage(w http.ResponseWriter, u *ChatUsage) {
-	uw, ok := w.(*usageResponseWriter)
-	if !ok || u == nil {
+	uw := usageWriterOf(w)
+	if uw == nil || u == nil {
 		return
 	}
 	uw.call.Usage(modelusage.ParsedUsage{Input: u.PromptTokens, Output: u.CompletionTokens, Source: "provider"})

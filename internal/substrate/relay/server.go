@@ -57,7 +57,10 @@ type Options struct {
 	// (TamperReportPath, GAP-0120); default GatewayTamper over the kit
 	// transport.
 	Tamper func(ctx context.Context, connector, reason string) error
-	Now    func() time.Time
+	// Certs is the TLS serving certificate of a kit that serves TLS
+	// (B3.5); a resume asks for a new one ahead of the next attach.
+	Certs *CertSource
+	Now   func() time.Time
 	// sep runs everything the relay starts as the agent's user (GAP-0116;
 	// Main sets it from separate). nil: the relay's own user.
 	sep *separation
@@ -84,7 +87,11 @@ type Server struct {
 
 	mu    sync.Mutex
 	polls map[string]*pollAttachment
-	tasks map[string]*task
+	// mcpOpen holds the names with an mcp stream (one each, mcp.go);
+	// mcpCfgMu serialises the agent MCP configuration edits.
+	mcpOpen  map[string]bool
+	mcpCfgMu sync.Mutex
+	tasks    map[string]*task
 	// used are the session token IDs that opened an attachment or a task,
 	// with their expiry: a token opens one (GAP-0070).
 	used map[string]time.Time
@@ -370,6 +377,11 @@ func (s *Server) watchResume() {
 		}
 		s.log.Info("relay.resume", "gap_ms", gap.Milliseconds())
 		s.preconnect(context.Background())
+		if c := s.opts.Certs; c != nil {
+			if err := c.Warm(context.Background()); err != nil {
+				s.log.Warn("relay.tls_cert", "state", "renew_failed", "reason", err.Error())
+			}
+		}
 	}
 }
 
@@ -414,6 +426,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST "+Path(RouteExec), s.fileExec)
 	mux.HandleFunc("PUT "+Path(RouteFiles), s.filePut)
 	mux.HandleFunc("GET "+Path(RouteFiles), s.fileGet)
+	mux.HandleFunc("GET "+Path(RoutePort+"/{port}"), s.servePort)
+	mux.HandleFunc("GET "+Path(RouteMCP+"/{name}"), s.serveMCP)
 	return mux
 }
 
@@ -421,6 +435,14 @@ func (s *Server) Handler() http.Handler {
 // open set the token opens something (an attachment or a task) and may do
 // so once.
 func (s *Server) auth(w http.ResponseWriter, r *http.Request, what string, open bool) (Session, bool) {
+	return s.authScope(w, r, what, open, "")
+}
+
+// authScope is auth for a route that serves one token scope (B3 dc.scope):
+// "" for the terminal, task and file routes, "port:N" or "mcp:NAME" for a
+// stream. A token serves only the routes of its own scope, so a stream token
+// never opens a terminal and a terminal token never opens a stream.
+func (s *Server) authScope(w http.ResponseWriter, r *http.Request, what string, open bool, scope string) (Session, bool) {
 	if s.opts.Verifier == nil {
 		s.log.Warn("relay.refused", "what", what, "reason", "no session verifier configured")
 		http.Error(w, "relay: no session verifier is configured", http.StatusServiceUnavailable)
@@ -430,6 +452,11 @@ func (s *Server) auth(w http.ResponseWriter, r *http.Request, what string, open 
 	if err != nil {
 		s.log.Warn("relay.refused", "what", what, "reason", err.Error())
 		http.Error(w, "relay: "+err.Error(), http.StatusUnauthorized)
+		return Session{}, false
+	}
+	if sess.Scope != scope {
+		s.log.Warn("relay.refused", "what", what, "reason", "token scope", "scope", sess.Scope, "person", sess.Person, "jti", sess.TokenID)
+		http.Error(w, "relay: the session token is not for this route", http.StatusForbidden)
 		return Session{}, false
 	}
 	if open {
@@ -632,7 +659,7 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 	// The attachment ends with its token (GAP-0070); the launcher
 	// reconnects with a new one.
 	expiry := time.AfterFunc(s.untilExpiry(sess), func() {
-		send(Control{Type: CtlError, Message: "session token expired"})
+		send(Control{Type: CtlError, Message: SessionExpiredMessage})
 		a.Close()
 	})
 	defer expiry.Stop()
@@ -752,7 +779,7 @@ loop:
 		case <-p.done:
 			break loop
 		case <-expiry.C:
-			p.out.Append(EncodeControl(Control{Type: CtlError, Message: "session token expired"}))
+			p.out.Append(EncodeControl(Control{Type: CtlError, Message: SessionExpiredMessage}))
 			p.end()
 			break loop
 		case <-t.C:

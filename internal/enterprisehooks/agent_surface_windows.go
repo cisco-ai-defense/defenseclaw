@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/claudedesktop"
 	"github.com/defenseclaw/defenseclaw/internal/codesig"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -443,7 +444,7 @@ func newestWindowsExtensionDir(root, id string) (string, string, error) {
 	best, bestVersion := "", ""
 	for _, entry := range entries {
 		name := entry.Name()
-		if !entry.IsDir() || !strings.HasPrefix(strings.ToLower(name), prefix) || obsolete[name] {
+		if !entry.IsDir() || !strings.HasPrefix(asciifold.Lower(name), prefix) || obsolete[name] {
 			continue
 		}
 		version := name[len(prefix):]

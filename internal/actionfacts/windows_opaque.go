@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 )
 
 // windowsPowerShellOpaqueEnd finds the end of one balanced value without
@@ -299,7 +301,7 @@ func windowsPowerShellNumericWord(word string) bool {
 	if _, err := strconv.ParseFloat(word, 64); err == nil {
 		return true
 	}
-	lower := strings.ToLower(word)
+	lower := asciifold.Lower(word)
 	for _, suffix := range []string{"uy", "us", "ul", "un", "kb", "mb", "gb", "tb", "pb", "y", "s", "l", "n", "u", "d", "m"} {
 		if !strings.HasSuffix(lower, suffix) {
 			continue

@@ -428,7 +428,7 @@ func TestToolChainRootScopeUpgradeFromReleasedStores(t *testing.T) {
 				t.Fatalf("%s has more migrations than this build", released.name)
 			}
 			path := filepath.Join(t.TempDir(), "audit.db")
-			old, err := NewStore(path)
+			old, err := NewStore(realMigrationPath(path))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -454,7 +454,7 @@ func TestToolChainRootScopeUpgradeFromReleasedStores(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			upgraded, err := NewStore(path)
+			upgraded, err := NewStore(realMigrationPath(path))
 			if err != nil {
 				t.Fatal(err)
 			}

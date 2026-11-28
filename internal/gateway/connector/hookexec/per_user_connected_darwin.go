@@ -69,12 +69,18 @@ func tupleStillQueued(client, server *net.TCPAddr) bool {
 // of its family, or the dual-stack wildcard) and no other process of this
 // account does. Only the processes of this account are listed, so a listener
 // of another account is never found; none found is false.
-func listenersHeldOnlyByPID(pid int, server *net.TCPAddr) bool {
+// onHeld, when not nil, is called once pid is shown to hold the listening
+// socket on the dialled address itself (darwinPIDHoldsListener), before the
+// other processes of the account are read.
+func listenersHeldOnlyByPID(pid int, server *net.TCPAddr, onHeld func()) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	ips := []net.IP{server.IP, net.IPv6unspecified}
 	if server.IP.To4() != nil {
 		ips = []net.IP{server.IP, net.IPv4zero, net.IPv6unspecified}
+	}
+	if onHeld != nil && darwinPIDHoldsListener(ctx, pid, server) {
+		onHeld()
 	}
 	found := false
 	for _, ip := range ips {

@@ -40,11 +40,34 @@ func TestCLIRestartProcessProbe(t *testing.T) {
 	if err := daemon.RegisterCurrentProcess(); err != nil {
 		os.Exit(3)
 	}
+	// The probe lives only as long as the test process that started it
+	// (GAP-1056): a test binary cut off by its timeout or killed runs no
+	// cleanup, and its probes slept forever with ppid 1, keeping the fds it
+	// inherited (a gate box's heavy-slot lock) open. The parent is read
+	// before the marker: one that exits as soon as it sees the marker would
+	// otherwise be gone already, and the probe would take ppid 1 for its
+	// parent and never exit (RV-T6A).
+	parent := os.Getppid()
 	if err := os.WriteFile(marker, []byte("running\n"), 0o600); err != nil {
 		os.Exit(2)
 	}
+	gap1056AfterMarker()
 	for {
-		time.Sleep(time.Second)
+		time.Sleep(200 * time.Millisecond)
+		if os.Getppid() != parent {
+			os.Exit(0)
+		}
+	}
+}
+
+// gap1056PauseEnv makes the probe pause after it wrote its marker, as a
+// scheduler that runs the parent first does: the GAP-1056 test's parent exits
+// as soon as it sees the marker.
+const gap1056PauseEnv = "DC_TEST_GAP1056_PAUSE"
+
+func gap1056AfterMarker() {
+	if os.Getenv(gap1056PauseEnv) != "" {
+		time.Sleep(500 * time.Millisecond)
 	}
 }
 
@@ -88,6 +111,7 @@ func TestRunRestartRefusesUnsafeIdentityBeforeStoppingHealthyGateway(t *testing.
 		t.Fatalf("start CLI restart probe: %v", err)
 	}
 	// Register before any Fatalf so a failed wait never leaks the probe.
+	reapCLIProbe(t, pid)
 	t.Cleanup(func() {
 		_ = os.Remove(filepath.Join(dataDir, daemon.WatchdogPIDFileName))
 		_ = d.Stop(3 * time.Second)
@@ -120,6 +144,7 @@ func TestRunStartRefusesUnsafeIdentityBeforeAlreadyRunningFastPath(t *testing.T)
 		t.Fatalf("start CLI start probe: %v", err)
 	}
 	// Register before any Fatalf so a failed wait never leaks the probe.
+	reapCLIProbe(t, pid)
 	t.Cleanup(func() {
 		_ = os.Remove(filepath.Join(dataDir, daemon.WatchdogPIDFileName))
 		_ = d.Stop(3 * time.Second)

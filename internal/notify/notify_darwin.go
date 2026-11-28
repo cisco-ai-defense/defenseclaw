@@ -27,6 +27,12 @@ var osascriptRun = func(args ...string) error {
 	return exec.Command("osascript", args...).Run()
 }
 
+// toolCheck says whether osascript, the tool desktop delivery needs, is on PATH.
+func toolCheck() error {
+	_, err := exec.LookPath("osascript")
+	return err
+}
+
 // appleScriptQuote produces a quoted AppleScript string literal.
 // AppleScript only recognizes \" and \\ inside double-quoted strings;
 // json.Marshal's \u003c / \u003e escapes for angle brackets are not

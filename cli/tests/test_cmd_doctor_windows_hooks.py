@@ -2932,6 +2932,58 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertEqual(check.state, "policy-blocked", check.detail)
         self.assertIn("administrator-managed settings source", check.detail)
 
+    def test_claude_managed_enterprise_hklm_merge_keeps_the_file_matrix(self) -> None:
+        # GAP-1731: an HKLM policy with managedSourcesBehavior: merge (or only
+        # source-control keys) leaves the file-based drop-in in force; a plain
+        # HKLM policy still hides it.
+        runtime = self._runtime()
+        config = self._config("claudecode", f'"{runtime}"', claude_contract="claudecode-hooks-v2")
+        document = json.loads(config.read_text(encoding="utf-8"))
+        for groups in document["hooks"].values():
+            for group in groups:
+                for handler in group["hooks"]:
+                    handler["args"].append("--enterprise-managed")
+        config.write_text(json.dumps(document), encoding="utf-8")
+        lock_path = self.data / "hook_contract_lock.json"
+
+        def client(version: str) -> None:
+            lock = json.loads(lock_path.read_text(encoding="utf-8"))
+            lock["connectors"]["claudecode"]["raw_agent_version"] = f"{version} (Claude Code)"
+            lock["connectors"]["claudecode"]["normalized_agent_version"] = version
+            lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+        def check_with(hklm):
+            def registry_policy(hive_name: str):
+                return hklm if hive_name == "HKEY_LOCAL_MACHINE" else None
+
+            with (
+                patch("defenseclaw.doctor_hooks._read_claude_registry_policy", side_effect=registry_policy),
+                patch("defenseclaw.doctor_hooks._default_claude_managed_settings_paths", return_value=(str(config),)),
+                patch("defenseclaw.doctor_hooks._default_claude_remote_settings_path", return_value=str(self.root / "no-remote.json")),
+            ):
+                return self._validate("claudecode", config, managed_settings_paths=None, managed_enterprise=True)
+
+        client("2.1.250")
+        merged = check_with({"managedSourcesBehavior": "merge", "permissions": {"deny": ["Bash(curl:*)"]}})
+        self.assertEqual(merged.state, "healthy", merged.detail)
+        self.assertIn("merged with", merged.detail)
+        control_only = check_with({"managedSourcesBehavior": "merge"})
+        self.assertEqual(control_only.state, "healthy", control_only.detail)
+        shadowed = check_with({"permissions": {"deny": ["Bash(curl:*)"]}})
+        self.assertEqual(shadowed.state, "policy-blocked", shadowed.detail)
+        self.assertIn("no hooks table", shadowed.detail)
+        disabled = check_with({"managedSourcesBehavior": "merge", "disableAllHooks": True})
+        self.assertEqual(disabled.state, "policy-blocked", disabled.detail)
+        # Claude Code below 2.1.242 ignores merge, as the Go audit says; a
+        # control-only policy is still skipped on any client.
+        client("2.1.219")
+        older = check_with({"managedSourcesBehavior": "merge", "permissions": {"deny": ["Bash(curl:*)"]}})
+        self.assertEqual(older.state, "policy-blocked", older.detail)
+        self.assertIn("ignores managedSourcesBehavior: merge", older.detail)
+        self.assertIn("2.1.242", older.detail)
+        older_control_only = check_with({"managedSourcesBehavior": "merge"})
+        self.assertEqual(older_control_only.state, "healthy", older_control_only.detail)
+
     def test_codex_requires_complete_trusted_event_matrix(self) -> None:
         runtime = self._runtime()
         config = self._config("codex", f'"{runtime}" hook --connector codex')

@@ -315,10 +315,7 @@ func inspectSandboxCopy(ctx context.Context, ex Execer, rec *CopyRecord, last *P
 	if kv["copy"] == "missing" {
 		return copyUnchanged, false, nil
 	}
-	head := rec.Head
-	if rec.Kind == CopyPlain {
-		head = rec.Baseline
-	}
+	head := rec.sandboxHead()
 	tree := kv["tree"]
 	matched := tree != "" && last != nil && last.ResultTree != "" && kv["head"] == last.SandboxHead && tree == last.ResultTree
 	switch {

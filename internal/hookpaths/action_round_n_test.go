@@ -94,19 +94,39 @@ func TestR104RoundNUnreadableSiblingKeepsGlobMatch(t *testing.T) {
 
 // GAP-1481, the bound form of the same class: a match past the directory
 // read bound was dropped and the name fallback (keyl* names no key)
-// allowed the write.
+// allowed the write. The link sits in the folder the walk reads first, then
+// in the one it reads last (directory order: ext4 lists by hash, NTFS by
+// name), past the read bound: a write into the pattern is a protected target
+// on every OS either way (rel-1-0-10:GAP-2300; a capped walk is TRUNCATED
+// only in a read-only statement, GAP-1324).
 func TestR104RoundNGlobPastReadBoundIsUnproved(t *testing.T) {
 	_, home, cwd := globFactsFixture(t, false)
 	key := filepath.Join(home, ".ssh", "authorized_keys")
+	many := filepath.Join(cwd, "many")
 	for i := 0; i <= actionGlobMaxReads+4; i++ {
-		if err := os.MkdirAll(filepath.Join(cwd, "many", fmt.Sprintf("d%03d", i)), 0o700); err != nil {
+		if err := os.MkdirAll(filepath.Join(many, fmt.Sprintf("d%03d", i)), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
-	testSymlink(t, key, filepath.Join(cwd, "many", fmt.Sprintf("d%03d", actionGlobMaxReads+4), "keylink"))
-	for _, command := range []string{`cp payload many/*/keyl*`, `cd many && cp payload */keyl*`} {
-		if got := posixShellDecision(command, cwd, home); got != "protected-target" {
-			t.Errorf("%s: ActionCommandDecision = %q, want protected-target", command, got)
+	directory, err := os.Open(many)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, err := directory.Readdirnames(-1)
+	_ = directory.Close()
+	if err != nil || len(names) != actionGlobMaxReads+5 {
+		t.Fatalf("folders %d (%v), want %d", len(names), err, actionGlobMaxReads+5)
+	}
+	for _, folder := range []string{names[0], names[len(names)-1]} {
+		link := filepath.Join(many, folder, "keylink")
+		testSymlink(t, key, link)
+		for _, command := range []string{`cp payload many/*/keyl*`, `cd many && cp payload */keyl*`} {
+			if got := posixShellDecision(command, cwd, home); got != "protected-target" {
+				t.Errorf("link in %s: %s: ActionCommandDecision = %q, want protected-target", folder, command, got)
+			}
+		}
+		if err := os.Remove(link); err != nil {
+			t.Fatal(err)
 		}
 	}
 	// Within the bound an ordinary pattern stays allowed.

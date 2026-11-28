@@ -29,10 +29,12 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/calloutapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
@@ -65,6 +67,12 @@ type SubstrateCreate struct {
 	// Unattended is a --task or --batch run (fail closed, D8).
 	Unattended bool     `json:"unattended,omitempty"`
 	Secrets    []string `json:"secrets,omitempty"`
+	// AcknowledgeSignin is the person's yes to the open-source sign-in
+	// warning (GAP-0482). A create whose agent signs in to a vendor account
+	// (or keeps the hook in a folder it owns) and does not carry it is
+	// answered 428 signin_ack_required with the warning, before any actor
+	// exists; the acknowledged create is audited.
+	AcknowledgeSignin bool `json:"acknowledge_signin,omitempty"`
 	// Atespace is filled by the gateway from the profile; a request value
 	// is refused unless it is one of the profile's launcher atespaces.
 	Atespace string `json:"atespace,omitempty"`
@@ -92,6 +100,7 @@ type SubstrateCreated struct {
 	HarnessVersion string
 	HookContract   string
 	KitVersion     string
+	RelayStreams   string
 	// SandboxClass is the class the actor runs in (gvisor or microvm).
 	SandboxClass string
 }
@@ -105,9 +114,29 @@ type SubstrateActorActions interface {
 	Delete(ctx context.Context, atespace, name string) error
 }
 
-// SubstrateUsage answers usage for one owner ("" for every owner).
+// SubstrateSnapshotCounter is optional on SubstrateActorActions: how many
+// snapshots the cluster holds for an actor. Status shows the count and a
+// delete names how many it removed (GAP-0474).
+type SubstrateSnapshotCounter interface {
+	Snapshots(ctx context.Context, atespace, name string) (int, error)
+}
+
+// substrateSnapshots is the actor's snapshot count, ok false when the
+// actions cannot count them or the cluster did not answer.
+func (st *substrateState) substrateSnapshots(ctx context.Context, reg registry.Registration) (int, bool) {
+	sc, ok := st.cfg.Actions.(SubstrateSnapshotCounter)
+	if !ok {
+		return 0, false
+	}
+	n, err := sc.Snapshots(ctx, reg.Atespace, reg.Name)
+	return n, err == nil
+}
+
+// SubstrateUsage answers a usage query: one owner's rows, or every owner's
+// for an administrator (SubstrateUsageQuery.All). The owner is set by the
+// handler from the verified person, never by the request.
 type SubstrateUsage interface {
-	Usage(ctx context.Context, ownerID, batchID string) (any, error)
+	Usage(ctx context.Context, q SubstrateUsageQuery) (SubstrateUsageAnswer, error)
 }
 
 // SubstrateProfileResolver picks the profile and launcher atespace of a
@@ -132,7 +161,7 @@ func substrateCallerFrom(ctx context.Context) (substrateCaller, bool) {
 
 // ownerOf is the registry owner key of a person.
 func ownerOf(p identity.Person) registry.Person {
-	return registry.Person{Kind: p.Kind, Issuer: p.Issuer, Subject: p.Subject, Principal: p.Principal, Groups: p.Groups}
+	return registry.Person{Kind: p.Kind, Issuer: p.Issuer, Subject: p.Subject, Principal: p.Principal, EmailUnverified: p.EmailUnverified, Groups: p.Groups}
 }
 
 func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
@@ -143,6 +172,10 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	mux.HandleFunc("DELETE /api/v1/substrate/actors/{atespace}/{name}", a.substrateDeleteActor(st))
 	mux.HandleFunc("POST /api/v1/substrate/actors/{atespace}/{name}/policy/reset", a.substratePolicyReset(st))
 	mux.HandleFunc("POST /api/v1/substrate/actors/{atespace}/{name}/recover", a.substrateRecoverActor(st))
+	mux.HandleFunc("POST /api/v1/substrate/actors/{atespace}/{name}/snapshot", a.substrateSnapshotActor(st))
+	mux.HandleFunc("POST /api/v1/substrate/actors/{atespace}/{name}/push", a.substrateGitPush(st))
+	mux.HandleFunc("DELETE /api/v1/substrate/actors/{atespace}/{name}/push/{grant}", a.substrateGitPushClose(st))
+	mux.HandleFunc("POST /api/v1/substrate/actors/{atespace}/{name}/workspace-event", a.substrateWorkspaceEvent(st))
 	mux.HandleFunc("POST /api/v1/substrate/session-cert", a.substrateSessionCert(st))
 	mux.HandleFunc("/api/v1/substrate/actors/{atespace}/{name}/attach", a.substrateAttach(st))
 	mux.HandleFunc("/api/v1/substrate/actors/{atespace}/{name}/attach/{rest...}", a.substrateAttach(st))
@@ -150,11 +183,26 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	mux.HandleFunc("GET /api/v1/substrate/batches/{id}", a.substrateGetBatch(st))
 	mux.HandleFunc("GET /api/v1/substrate/usage", a.substrateUsage(st))
 	mux.HandleFunc("GET /api/v1/substrate/doctor", a.substrateDoctor(st))
+	mux.HandleFunc("GET /api/v1/substrate/launcher", func(w http.ResponseWriter, _ *http.Request) {
+		writeSubstrateJSON(w, http.StatusOK, map[string]any{
+			"workspace_max_bytes": substrateWorkspaceMax(st.cfg.WorkspaceMaxBytes),
+			"key_replay":          substrateKeyReplay(st.cfg.KeyReplay),
+			"upload_scan":         substrateUploadScan(st.cfg.UploadScan),
+			"files":               map[string]bool{"push": substrateSwitch(st.cfg.FilesPush), "sync": substrateSwitch(st.cfg.FilesSync)},
+			"git":                 substrateLauncherGit(st.cfg.Git),
+		})
+	})
+	mux.HandleFunc("POST /api/v1/substrate/signin/revoke", a.substrateSigninRevoke(st))
+	mux.HandleFunc("/api/v1/substrate/admin/revocations", a.substrateAdminRevocations(st))
 	mux.HandleFunc("GET /api/v1/substrate/asks", a.substrateListAsks(st))
 	mux.HandleFunc("POST /api/v1/substrate/asks/{id}", a.substrateDecideAsk(st))
+	mux.HandleFunc("GET /api/v1/substrate/approvals", a.substrateListApprovals(st))
+	mux.HandleFunc("DELETE /api/v1/substrate/approvals/{atespace}/{name}/{host}", a.substrateRevokeApproval(st))
 	mux.HandleFunc("GET /api/v1/substrate/decisions", a.substrateDecisions(st))
 	mux.HandleFunc("GET /api/v1/substrate/policy/explain", a.substratePolicyExplain(st))
 	mux.HandleFunc("GET /api/v1/substrate/secrets", a.substrateListSecrets(st))
+	mux.HandleFunc("POST /api/v1/substrate/secrets", a.substrateAddSecret(st))
+	mux.HandleFunc("GET /api/v1/substrate/secret-templates", a.substrateSecretTemplates(st))
 	mux.HandleFunc("PUT /api/v1/substrate/secrets/{name}", a.substrateSetSecret(st))
 	mux.HandleFunc("DELETE /api/v1/substrate/secrets/{name}", a.substrateRemoveSecret(st))
 	mux.HandleFunc("POST /api/v1/substrate/secrets/{name}/test", a.substrateTestSecret(st))
@@ -182,7 +230,7 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 			// long-poll frames and a streaming tar upload. Person sign-in and
 			// ownership are checked as for every admin route; the JSON body
 			// gate and the 1 MiB cap do not fit it, so it has its own.
-			r.Body = http.MaxBytesReader(w, r.Body, substrateAttachBodyCap(r, st.cfg.WorkspaceMaxBytes))
+			r.Body = http.MaxBytesReader(w, r.Body, substrateAttachBodyCap(r, substrateWorkspaceMax(st.cfg.WorkspaceMaxBytes)))
 			attach.ServeHTTP(w, r)
 			return
 		}
@@ -281,6 +329,13 @@ func (a *APIServer) substrateAdminAuthenticate(st *substrateState, next http.Han
 			writeSubstrateJSONError(w, status, reason)
 			return
 		}
+		// An ended sign-in, or a list this replica cannot trust, is
+		// refused before any route (B5.1).
+		if status, reason := st.substrateRevocationRefusal(p.ID(), p.TokenKey, p.IssuedAt); status != 0 {
+			st.authRefused(r, substrateListenerAdmin, identity.Reason(reason))
+			writeSubstrateJSONError(w, status, reason)
+			return
+		}
 		r.Header.Del("Authorization")
 		next.ServeHTTP(w, r.WithContext(withSubstratePerson(r.Context(), p, st.cfg.IsAdmin(p))))
 	})
@@ -295,26 +350,88 @@ func substrateVisible(c substrateCaller, reg registry.Registration) bool {
 // says what its asks do (D12, GAP-0388): unattended_asks deny or queue from
 // its profile, and with queue how long an ask waits for a person. An actor
 // in policy_conflict carries the controller's mark (GAP-0398).
-func (st *substrateState) actorView(reg registry.Registration) map[string]any {
-	v := map[string]any{
-		"atespace": reg.Atespace, "name": reg.Name, "uid": reg.UID, "registration_key": reg.Key,
-		"profile": reg.Profile, "connector": reg.Connector, "template": reg.Template,
-		"batch_id": reg.BatchID, "unattended": reg.Unattended, "created_at": reg.CreatedAt,
-		"owner": reg.Person.Principal, "deleted": reg.Deleted,
-		"attribution": substrateAttribution(reg), "foreign": reg.Attributed,
+// readViewBudgets reads the budget keys of regs before their views.
+func (st *substrateState) readViewBudgets(ctx context.Context, regs ...registry.Registration) {
+	if st.readBudgets != nil {
+		st.readBudgets(ctx, regs)
+	}
+}
+
+// substrateActorRow is one actor of a list answer: the JSON of actorView
+// as a typed struct, fields in key order as a map encodes them, so a list
+// of 2,100 agents builds and key-sorts no map per agent (GAP-1019).
+// TestSubstrateActorRowMatchesView pins the two to the same bytes.
+type substrateActorRow struct {
+	Activity          *substrateActivityOut `json:"activity,omitempty"`
+	AskTimeoutSeconds *int64                `json:"ask_timeout_seconds,omitempty"`
+	Atespace          string                `json:"atespace"`
+	Attribution       string                `json:"attribution"`
+	BatchID           string                `json:"batch_id"`
+	Budget            string                `json:"budget,omitempty"`
+	Connector         string                `json:"connector"`
+	CreatedAt         time.Time             `json:"created_at"`
+	Deleted           bool                  `json:"deleted"`
+	Foreign           bool                  `json:"foreign"`
+	Name              string                `json:"name"`
+	Owner             string                `json:"owner"`
+	PolicyConflict    map[string]any        `json:"policy_conflict,omitempty"`
+	Profile           string                `json:"profile"`
+	RegistrationKey   string                `json:"registration_key"`
+	State             string                `json:"state,omitempty"`
+	Template          string                `json:"template"`
+	UID               string                `json:"uid"`
+	Unattended        bool                  `json:"unattended"`
+	UnattendedAsks    string                `json:"unattended_asks,omitempty"`
+}
+
+// actorRow is reg as list, status and the other actor answers show it.
+func (st *substrateState) actorRow(reg registry.Registration) substrateActorRow {
+	row := substrateActorRow{
+		Atespace: reg.Atespace, Name: reg.Name, UID: reg.UID, RegistrationKey: reg.Key,
+		Profile: reg.Profile, Connector: reg.Connector, Template: reg.Template,
+		BatchID: reg.BatchID, Unattended: reg.Unattended, CreatedAt: reg.CreatedAt,
+		Owner: reg.Person.Principal, Deleted: reg.Deleted,
+		Attribution: substrateAttribution(reg), Foreign: reg.Attributed,
+		PolicyConflict: substratePolicyConflictView(reg),
 	}
 	if reg.Unattended {
 		var rule SubstrateUnattendedAsk // no rule: deny (D12)
 		if st.cfg.UnattendedAsk != nil {
 			rule = st.cfg.UnattendedAsk(reg.Profile)
 		}
-		v["unattended_asks"] = "deny"
+		row.UnattendedAsks = "deny"
 		if rule.Queue {
-			v["unattended_asks"], v["ask_timeout_seconds"] = "queue", int64(rule.Timeout/time.Second)
+			secs := int64(rule.Timeout / time.Second)
+			row.UnattendedAsks, row.AskTimeoutSeconds = "queue", &secs
 		}
 	}
-	if pc := substratePolicyConflictView(reg); pc != nil {
-		v["policy_conflict"] = pc
+	if st.budget != nil && !reg.Deleted {
+		row.Budget = st.budget(reg)
+	}
+	return row
+}
+
+// actorView is actorRow as a map, for the answers that add keys to it.
+func (st *substrateState) actorView(reg registry.Registration) map[string]any {
+	row := st.actorRow(reg)
+	v := map[string]any{
+		"atespace": row.Atespace, "name": row.Name, "uid": row.UID, "registration_key": row.RegistrationKey,
+		"profile": row.Profile, "connector": row.Connector, "template": row.Template,
+		"batch_id": row.BatchID, "unattended": row.Unattended, "created_at": row.CreatedAt,
+		"owner": row.Owner, "deleted": row.Deleted,
+		"attribution": row.Attribution, "foreign": row.Foreign,
+	}
+	if row.UnattendedAsks != "" {
+		v["unattended_asks"] = row.UnattendedAsks
+	}
+	if row.AskTimeoutSeconds != nil {
+		v["ask_timeout_seconds"] = *row.AskTimeoutSeconds
+	}
+	if row.PolicyConflict != nil {
+		v["policy_conflict"] = row.PolicyConflict
+	}
+	if row.Budget != "" {
+		v["budget"] = row.Budget
 	}
 	return v
 }
@@ -439,8 +556,16 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 		// vendor account, before any actor exists. The connector is now the
 		// template's whenever the template has one; it is checked again
 		// below on what the created actor runs.
-		if d := st.cfg.signinDecision(req.Connector, req.Secrets); !d.Allowed {
-			writeSubstrateSigninRefusal(w, d)
+		preDecision := st.cfg.signinDecision(req.Connector, req.Secrets)
+		if !preDecision.Allowed {
+			writeSubstrateSigninRefusal(w, preDecision)
+			return
+		}
+		if preDecision.Warn && !req.AcknowledgeSignin {
+			// GAP-0482: open source asks first. The warning goes back
+			// before anything is created or uploaded; the launcher asks the
+			// person and sends the create again with their yes.
+			writeSubstrateSigninAckRequired(w, preDecision)
 			return
 		}
 		createStart := time.Now()
@@ -469,13 +594,21 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			writeSubstrateSigninRefusal(w, signinDecision)
 			return
 		}
+		if signinDecision.Warn && !req.AcknowledgeSignin {
+			// The actor runs another connector than the one checked above
+			// (a template with no label): it never ran, so remove it and
+			// ask as above.
+			_ = st.cfg.Actions.Delete(context.WithoutCancel(r.Context()), created.Atespace, created.Name)
+			writeSubstrateSigninAckRequired(w, signinDecision)
+			return
+		}
 		if signinDecision.Warn {
 			fmt.Fprintf(os.Stderr, "[substrate] warning: %s/%s: %s\n", created.Atespace, created.Name, signinDecision.Message)
 		}
 		reg := registry.Registration{
 			Atespace: created.Atespace, Name: created.Name, UID: created.UID, Person: req.Owner,
 			Profile: profile, Template: created.Template, TemplateDigest: created.TemplateDigest,
-			KitVersion: created.KitVersion, Connector: created.Connector, HarnessVersion: created.HarnessVersion,
+			KitVersion: created.KitVersion, RelayStreams: created.RelayStreams, Connector: created.Connector, HarnessVersion: created.HarnessVersion,
 			HookContract: created.HookContract, BatchID: req.BatchID, Unattended: req.Unattended,
 			SandboxClass: created.SandboxClass,
 			Secrets:      append([]string(nil), req.Secrets...),
@@ -523,6 +656,11 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 				writeSubstrateJSONError(w, http.StatusServiceUnavailable, "no_free_worker")
 				return
 			}
+			if errors.Is(err, ErrSubstrateResumeBusy) {
+				// GAP-0468: busy, not broken; the person can retry.
+				writeSubstrateJSONError(w, http.StatusServiceUnavailable, "resume_busy")
+				return
+			}
 			writeSubstrateJSONError(w, http.StatusBadGateway, "resume_failed")
 			return
 		}
@@ -530,12 +668,16 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 		out := st.actorView(reg)
 		if signinDecision.Warn {
 			createWarnings = append(createWarnings, signinDecision.Message)
+			st.auditSigninAcknowledged(r.Context(), c, reg, signinDecision)
 		}
 		if len(createWarnings) > 0 {
 			out["warnings"] = createWarnings
 		}
 		if st.cfg.Sessions != nil && !req.Unattended {
-			tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), 0)
+			// The token ends with the caller's sign-in, at the latest
+			// (GAP-0588); with no time left the answer carries none and
+			// the launcher attaches through the attach route.
+			tok, exp, err := st.cfg.Sessions.IssueUntil(identity.SignInOf(c.person), substrateSessionActor(reg), 0, c.person.SessionBound())
 			if err == nil {
 				out["session_token"], out["session_expires"] = tok, exp
 			}
@@ -555,6 +697,14 @@ func (c SubstrateConfig) substrateProfiles() SubstrateProfileResolver {
 	}
 }
 
+// substrateRegistryReadWindow is how long list and status wait for the
+// leader's registry. A leader change takes about 5 s to answer again, so the
+// read retries inside this window; after it the call fails at once with
+// registrations_unavailable and the plain "try again in a minute" message,
+// instead of holding the person for the CLI's whole 30 s timeout
+// (GAP-1089). A var so a test can shorten it.
+var substrateRegistryReadWindow = 8 * time.Second
+
 func (a *APIServer) substrateListActors(st *substrateState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, _ := substrateCallerFrom(r.Context())
@@ -563,20 +713,30 @@ func (a *APIServer) substrateListActors(st *substrateState) http.HandlerFunc {
 		if everyone {
 			f.OwnerID = ""
 		}
-		regs, err := st.cfg.Registrations.List(r.Context(), f)
+		readCtx, cancel := context.WithTimeout(r.Context(), substrateRegistryReadWindow)
+		regs, err := st.cfg.Registrations.List(readCtx, f)
+		cancel()
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "registrations_unavailable")
 			return
 		}
 		// GAP-0167: the person sees which agents hold a worker.
 		states := substrateLiveStates(r.Context(), st.cfg.Lookup, regs)
-		out := make([]map[string]any, 0, len(regs))
+		st.readViewBudgets(r.Context(), regs...)
+		feed := st.activityFor(r.Context(), f.OwnerID, everyone, false)
+		// Typed rows and one allocation for the activity (GAP-1019).
+		var acts []substrateActivityOut
+		if feed != nil {
+			acts = make([]substrateActivityOut, len(regs))
+		}
+		out := make([]substrateActorRow, len(regs))
 		for i, reg := range regs {
-			v := st.actorView(reg)
-			if states[i] != "" {
-				v["state"] = states[i]
+			out[i] = st.actorRow(reg)
+			out[i].State = states[i]
+			if feed != nil && !reg.Deleted {
+				feed.fill(&acts[i], reg.UID, states[i])
+				out[i].Activity = &acts[i]
 			}
-			out = append(out, v)
 		}
 		if f.OwnerID == "" {
 			a.substrateAuditAdminRead(st, r, "actors", len(out), "")
@@ -696,7 +856,9 @@ func (a *APIServer) substrateFind(st *substrateState, r *http.Request, atespace,
 	if err != nil {
 		return registry.Registration{}, http.StatusServiceUnavailable, "control_api_unavailable"
 	}
-	reg, ok, err := st.cfg.Registrations.Get(r.Context(), atespace, live.UID)
+	readCtx, cancel := context.WithTimeout(r.Context(), substrateRegistryReadWindow)
+	reg, ok, err := st.cfg.Registrations.Get(readCtx, atespace, live.UID)
+	cancel()
 	if err != nil {
 		return registry.Registration{}, http.StatusServiceUnavailable, "registrations_unavailable"
 	}
@@ -719,8 +881,14 @@ func (a *APIServer) substrateGetActor(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, status, reason)
 			return
 		}
+		c, _ := substrateCallerFrom(r.Context())
 		a.substrateAuditAdminTarget(st, r, reg, "actor", "INFO")
+		st.readViewBudgets(r.Context(), reg)
 		v := st.actorView(reg)
+		// What a delete would remove with it (GAP-0474).
+		if n, ok := st.substrateSnapshots(r.Context(), reg); ok {
+			v["snapshots"] = n
+		}
 		// GAP-0410: status shows a crashed agent as crashed.
 		if st.cfg.Lookup == nil {
 			writeSubstrateJSON(w, http.StatusOK, v)
@@ -728,6 +896,10 @@ func (a *APIServer) substrateGetActor(st *substrateState) http.HandlerFunc {
 		}
 		if live, err := st.cfg.Lookup.LookupActor(r.Context(), reg.Atespace, reg.Name); err == nil && live.UID == reg.UID {
 			v["state"] = strings.ToLower(string(live.State))
+		}
+		if feed := st.activityFor(r.Context(), ownerOf(c.person).ID(), c.admin, true); feed != nil {
+			s, _ := v["state"].(string)
+			v["activity"] = feed.view(reg, s)
 		}
 		writeSubstrateJSON(w, http.StatusOK, v)
 	}
@@ -745,10 +917,16 @@ func (a *APIServer) substrateDeleteActor(st *substrateState) http.HandlerFunc {
 			return
 		}
 		a.substrateAuditAdminTarget(st, r, reg, "delete", "HIGH")
+		// The snapshots go with the actor: count them first, so the
+		// launcher and the audit row say how many were removed (GAP-0474).
+		snaps, counted := st.substrateSnapshots(r.Context(), reg)
 		if err := st.cfg.Actions.Delete(r.Context(), reg.Atespace, reg.Name); err != nil {
 			writeSubstrateJSONError(w, http.StatusBadGateway, "delete_failed")
 			return
 		}
+		// The cluster has deleted the actor: record it now, so the row exists
+		// even when the registration write below fails (GAP-0667).
+		a.substrateAuditDeleted(st, r, reg, snaps, counted)
 		reg.Deleted = true
 		if err := st.cfg.Registrations.Put(r.Context(), reg); err != nil {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "registration_failed")
@@ -757,8 +935,40 @@ func (a *APIServer) substrateDeleteActor(st *substrateState) http.HandlerFunc {
 		if inv, ok := st.cfg.Actors.(interface{ Invalidate(string, string) }); ok {
 			inv.Invalidate(reg.Atespace, reg.Name)
 		}
-		writeSubstrateJSON(w, http.StatusOK, st.actorView(reg))
+		v := st.actorView(reg)
+		if counted {
+			v["snapshots"] = snaps
+		}
+		writeSubstrateJSON(w, http.StatusOK, v)
 	}
+}
+
+// substrateAuditDeleted writes the person-level audit row of a delete: who
+// deleted which actor (UID) and how many snapshots went with it, so the
+// audit store, not only the controller's sandbox event, records the purge
+// (GAP-0474). snapshots is -1 in the row when the cluster did not count
+// them.
+func (a *APIServer) substrateAuditDeleted(st *substrateState, r *http.Request, reg registry.Registration, snaps int, counted bool) {
+	if st.audit == nil {
+		return
+	}
+	c, _ := substrateCallerFrom(r.Context())
+	who := c.person.Principal
+	if who == "" {
+		who = ownerOf(c.person).ID()
+	}
+	what := "the agent and its snapshots"
+	if counted {
+		what = fmt.Sprintf("the agent and %d snapshot(s)", snaps)
+	} else {
+		snaps = -1
+	}
+	summary := fmt.Sprintf("%s deleted %s/%s (uid %s): %s, with the checkpoints inside it", who, reg.Atespace, reg.Name, reg.UID, what)
+	st.audit(context.WithoutCancel(r.Context()), "INFO", summary, map[string]any{
+		"event": "actor_deleted", "atespace": reg.Atespace, "actor": reg.Atespace + "/" + reg.Name, "actor_uid": reg.UID,
+		"principal": c.person.Principal, "person_id": ownerOf(c.person).ID(), "owner": reg.Person.Principal,
+		"by_admin": c.admin && !substrateOwnedBy(c, reg), "snapshots": snaps, "batch_id": reg.BatchID,
+	})
 }
 
 func (a *APIServer) substrateSessionCert(st *substrateState) http.HandlerFunc {
@@ -787,8 +997,13 @@ func (a *APIServer) substrateSessionCert(st *substrateState) http.HandlerFunc {
 			ttl = substrateSessionMaxTTL
 		}
 		// The token names the person as issuer#subject: two issuers may
-		// use the same subject (GAP-0061).
-		tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), ttl)
+		// use the same subject (GAP-0061). It ends with the caller's
+		// sign-in, at the latest (GAP-0588).
+		tok, exp, err := st.cfg.Sessions.IssueUntil(identity.SignInOf(c.person), substrateSessionActor(reg), ttl, c.person.SessionBound())
+		if errors.Is(err, identity.ErrSessionBound) {
+			writeSubstrateRefusal(w, http.StatusUnauthorized, string(identity.ReasonExpired))
+			return
+		}
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "session_refused")
 			return
@@ -819,6 +1034,7 @@ func (a *APIServer) substrateBatches(st *substrateState, r *http.Request, batchI
 	if substrateAllView(r) {
 		a.substrateAuditAdminRead(st, r, "batches", len(regs), "")
 	}
+	st.readViewBudgets(r.Context(), regs...)
 	out := map[substrateBatchKey][]map[string]any{}
 	for _, reg := range regs {
 		if reg.BatchID != "" {
@@ -886,25 +1102,86 @@ func (a *APIServer) substrateGetBatch(st *substrateState) http.HandlerFunc {
 
 func (a *APIServer) substrateUsage(st *substrateState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if st.cfg.UsageDisabled {
+			writeSubstrateJSONError(w, http.StatusNotImplemented, "usage_disabled")
+			return
+		}
 		if st.cfg.Usage == nil {
 			writeSubstrateJSONError(w, http.StatusNotImplemented, "usage_unavailable")
 			return
 		}
-		c, _ := substrateCallerFrom(r.Context())
-		owner := ownerOf(c.person).ID()
-		if c.admin && r.URL.Query().Get("all") == "1" {
-			owner = ""
+		c, ok := substrateCallerFrom(r.Context())
+		qs := r.URL.Query()
+		all := ok && c.admin && qs.Get("all") == "1"
+		owner := ""
+		if !all {
+			// "" means every owner: a caller with no person (or a route
+			// without the person middleware) must not read it.
+			if owner = substrateUsageOwner(ownerOf(c.person)); !ok || owner == "" {
+				writeSubstrateJSONError(w, http.StatusForbidden, "usage_forbidden")
+				return
+			}
+			if !c.admin && substrateUsersSeeNone(a.liveConfig()) {
+				// routing.admin.visibility.users_see: none hides a person's own usage too.
+				writeSubstrateJSONError(w, http.StatusForbidden, "usage_hidden")
+				return
+			}
 		}
-		u, err := st.cfg.Usage.Usage(r.Context(), owner, r.URL.Query().Get("batch"))
+		since, err := parseSubstrateUsageSince(qs.Get("since"))
+		limit, _ := strconv.Atoi(qs.Get("limit"))
 		if err != nil {
+			writeSubstrateJSONError(w, http.StatusBadRequest, "usage_bad_since")
+			return
+		}
+		u, err := st.cfg.Usage.Usage(r.Context(), SubstrateUsageQuery{
+			Owner: owner, All: all, By: qs.Get("by"), Since: since, Batch: qs.Get("batch"), Limit: limit})
+		switch {
+		case errors.Is(err, errSubstrateUsageBy):
+			writeSubstrateJSONError(w, http.StatusBadRequest, "usage_bad_by")
+			return
+		case errors.Is(err, errSubstrateUsageAdminOnly):
+			writeSubstrateJSONError(w, http.StatusForbidden, "usage_forbidden")
+			return
+		case err != nil:
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "usage_unavailable")
 			return
 		}
-		if owner == "" {
-			a.substrateAuditAdminRead(st, r, "usage", 1, "")
+		if all {
+			a.substrateAuditAdminRead(st, r, "usage", len(u.Rows), "")
 		}
 		writeSubstrateJSON(w, http.StatusOK, u)
 	}
+}
+
+// substrateUsersSeeNone reports routing.admin.visibility.users_see: none.
+func substrateUsersSeeNone(cfg *config.Config) bool {
+	return cfg != nil && cfg.Routing.Admin != nil && cfg.Routing.Admin.Visibility.EffectiveUsersSee() == config.RoutingUsersSeeNone
+}
+
+var (
+	errSubstrateUsageBy        = errors.New("usage: unknown rollup")
+	errSubstrateUsageAdminOnly = errors.New("usage: administrators only")
+)
+
+// parseSubstrateUsageSince reads ?since= as a Go duration or Nd days ("" is
+// the default of 24 h).
+func parseSubstrateUsageSince(v string) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, nil
+	}
+	if strings.HasSuffix(v, "d") {
+		n, err := strconv.Atoi(strings.TrimSuffix(v, "d"))
+		if err != nil || n <= 0 {
+			return 0, errors.New("bad since")
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, errors.New("bad since")
+	}
+	return d, nil
 }
 
 // substrateCalloutAuthorized compares the callout's service token in
@@ -925,4 +1202,41 @@ func substrateCalloutAuthorized(st *substrateState, r *http.Request) bool {
 func readAllLimited(r io.Reader, n int64) ([]byte, bool) {
 	b, err := io.ReadAll(io.LimitReader(r, n+1))
 	return b, err == nil && int64(len(b)) <= n
+}
+
+// substrateSwitch reads a live admin switch; on when not wired.
+func substrateSwitch(read func() bool) bool { return read == nil || read() }
+
+// substrateLauncherGit is substrate.git as launchers use it: the effective
+// rewrite map (the default when unset), the two switches and the
+// cluster's push_branch (a profile can tighten it; the push route decides).
+func substrateLauncherGit(read func() config.SubstrateGitConfig) map[string]any {
+	var g config.SubstrateGitConfig
+	if read != nil {
+		g = read()
+	}
+	return map[string]any{"https_rewrite": g.EffectiveHTTPSRewrite(), "submodules": g.SubmodulesOn(), "lfs": g.LFSOn(),
+		"push_branch_effective": g.EffectivePushBranch()}
+}
+
+// substrateUploadScan is substrate.launcher.upload_scan for launchers, its
+// defaults filled in (replace, token, 8 MiB, 120s) when not wired or unset.
+func substrateUploadScan(read func() config.SubstrateUploadScanConfig) map[string]any {
+	var u config.SubstrateUploadScanConfig
+	if read != nil {
+		u = read()
+	}
+	return map[string]any{
+		"max_file_bytes": u.EffectiveMaxFileBytes(), "time_budget": u.EffectiveTimeBudget().String(),
+		"secret_action": u.EffectiveSecretAction(), "placeholder_form": u.EffectivePlaceholderForm(),
+	}
+}
+
+// substrateKeyReplay is substrate.launcher.key_replay for launchers; ask when
+// the listener has no live reader.
+func substrateKeyReplay(read func() string) string {
+	if read == nil {
+		return config.SubstrateKeyReplayAsk
+	}
+	return read()
 }

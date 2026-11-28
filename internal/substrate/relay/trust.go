@@ -6,13 +6,12 @@ package relay
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // claudeStateMaxBytes bounds the Claude Code state file the relay rewrites.
@@ -33,83 +32,62 @@ const claudeStateMaxBytes = 64 << 20
 // The rest of the file is kept as it is. A file that is not a regular file
 // (a link the agent put there) is left alone.
 func claudeTrust(file, root, dir string) error {
+	return editJSONDoc(file, "claude trust", func(doc map[string]any) bool {
+		projects, _ := doc["projects"].(map[string]any)
+		if projects == nil {
+			projects = map[string]any{}
+		}
+		changed := false
+		for _, k := range trustFolders(root, dir) {
+			p, _ := projects[k].(map[string]any)
+			if p == nil {
+				p = map[string]any{}
+			}
+			if ok, _ := p["hasTrustDialogAccepted"].(bool); ok {
+				continue
+			}
+			p["hasTrustDialogAccepted"] = true
+			projects[k] = p
+			changed = true
+		}
+		doc["projects"] = projects
+		return changed
+	})
+}
+
+// editJSONDoc applies edit to the JSON object in file (a missing or empty
+// file is {}) and writes it back, 0600 through a temporary file, when edit
+// reports a change. Numbers are written back as they were read. claude
+// trust and the MCP bridge entries (mcpconfig.go) share it.
+func editJSONDoc(file, what string, edit func(doc map[string]any) bool) error {
+	raw, err := readConfigFile(file)
+	if err != nil {
+		return fmt.Errorf("%s: %w", what, err)
+	}
 	doc := map[string]any{}
-	fi, err := os.Lstat(file)
-	switch {
-	case err == nil:
-		if !fi.Mode().IsRegular() {
-			return fmt.Errorf("claude trust: %s is not a regular file", file)
+	if len(bytes.TrimSpace(raw)) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		if err := dec.Decode(&doc); err != nil {
+			return fmt.Errorf("%s: %s: %w", what, file, err)
 		}
-		if fi.Size() > claudeStateMaxBytes {
-			return fmt.Errorf("claude trust: %s is larger than %d bytes", file, claudeStateMaxBytes)
+		if doc == nil { // the file holds null
+			doc = map[string]any{}
 		}
-		raw, err := os.ReadFile(file)
-		if err != nil {
-			return fmt.Errorf("claude trust: %w", err)
-		}
-		if len(bytes.TrimSpace(raw)) > 0 {
-			dec := json.NewDecoder(bytes.NewReader(raw))
-			dec.UseNumber() // numbers are written back as they were read
-			if err := dec.Decode(&doc); err != nil {
-				return fmt.Errorf("claude trust: %s: %w", file, err)
-			}
-			if doc == nil { // the file holds null
-				doc = map[string]any{}
-			}
-		}
-	case errors.Is(err, fs.ErrNotExist):
-	default:
-		return fmt.Errorf("claude trust: %w", err)
 	}
-	projects, _ := doc["projects"].(map[string]any)
-	if projects == nil {
-		projects = map[string]any{}
-	}
-	changed := false
-	for _, k := range trustFolders(root, dir) {
-		p, _ := projects[k].(map[string]any)
-		if p == nil {
-			p = map[string]any{}
-		}
-		if ok, _ := p["hasTrustDialogAccepted"].(bool); ok {
-			continue
-		}
-		p["hasTrustDialogAccepted"] = true
-		projects[k] = p
-		changed = true
-	}
-	if !changed {
+	if !edit(doc) {
 		return nil
 	}
-	doc["projects"] = projects
 	out, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
-		return fmt.Errorf("claude trust: %w", err)
+		return fmt.Errorf("%s: %w", what, err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(file), ".claude.json.dc-*")
-	if err != nil {
-		return fmt.Errorf("claude trust: %w", err)
-	}
-	defer os.Remove(tmp.Name())
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return fmt.Errorf("claude trust: %w", err)
-	}
-	if _, err := tmp.Write(append(out, '\n')); err != nil {
-		tmp.Close()
-		return fmt.Errorf("claude trust: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("claude trust: %w", err)
-	}
-	if err := os.Rename(tmp.Name(), file); err != nil {
-		return fmt.Errorf("claude trust: %w", err)
+	if err := writeConfigFile(file, append(out, '\n')); err != nil {
+		return fmt.Errorf("%s: %w", what, err)
 	}
 	return nil
 }
 
-// trustFolders are dir and each folder above it up to root (when dir is
-// inside root), each also as the path it really is when that differs.
 func trustFolders(root, dir string) []string {
 	root, dir = filepath.Clean(root), filepath.Clean(dir)
 	var out []string
@@ -120,7 +98,7 @@ func trustFolders(root, dir string) []string {
 	}
 	for d := dir; ; d = filepath.Dir(d) {
 		add(d)
-		if real, err := filepath.EvalSymlinks(d); err == nil {
+		if real, err := winpath.EvalLinks(d); err == nil {
 			add(real)
 		}
 		if d == root || !strings.HasPrefix(d, root+string(filepath.Separator)) || filepath.Dir(d) == d {

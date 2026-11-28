@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
@@ -25,7 +26,7 @@ import (
 func checkOpenCodeServiceConfigFolders(home, path string, follow bool) ([]string, error) {
 	for _, dir := range []string{filepath.Join(home, ".config"), filepath.Dir(path)} {
 		if follow {
-			resolved, err := filepath.EvalSymlinks(dir)
+			resolved, err := winpath.EvalLinks(dir)
 			if err != nil {
 				if os.IsNotExist(err) {
 					continue

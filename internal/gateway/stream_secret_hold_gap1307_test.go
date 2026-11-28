@@ -464,3 +464,31 @@ func TestGAP1320MaskedReleaseSendsNoRawRunStart(t *testing.T) {
 		}
 	}
 }
+
+// TestGAP2170BedrockUnsignedQuietHoldKeepsMaskedBytes keeps Converse clients
+// active during an unsigned answer run. Signed reasoning remains queued intact.
+func TestGAP2170BedrockUnsignedQuietHoldKeepsMaskedBytes(t *testing.T) {
+	prose := gap0429Pieces(retestFiller(1500)[:1500], 24, nil)
+	pieces := append(append([]string(nil), prose...), "Port 8080", " is open.\n")
+	rows := []gap1265Row{}
+	for _, pack := range []string{"default", "strict"} {
+		rows = append(rows, gap1265Row{
+			name: "answer-digit-run", tier: pack, pack: pack,
+			pieces: pieces, at: len(pieces) - 1,
+			pause: streamKeepAliveAfter + 400*time.Millisecond,
+		})
+	}
+	results, _ := gap1307Serve(t, gap1307Path{
+		name:   "passthrough/" + gap1307Converse.name,
+		format: gap1307Converse, text: gap1307ConverseText, masked: true,
+	}, rows)
+	for i, res := range results {
+		if res.first < 0 {
+			t.Errorf("%s: no bytes reached client during quiet hold", rows[i].tier)
+		}
+		want := strings.Join(prose, "") + "Port **** is open.\n"
+		if res.got != want {
+			t.Errorf("%s: unsigned answer run was not masked during quiet hold (got %d, want %d bytes)", rows[i].tier, len(res.got), len(want))
+		}
+	}
+}

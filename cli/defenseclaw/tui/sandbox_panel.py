@@ -1450,7 +1450,7 @@ class SandboxPanelMixin:
             title=f"Confirm: delete {ref}",
             summary="This is a destructive action and cannot be undone.",
             details=(f"Will run: defenseclaw {' '.join(argv)}",),
-            consequence=f"{ref} and its snapshots are removed from the cluster. Changes you did not pull (P) are lost.",
+            consequence=f"{ref}, its snapshots and the checkpoints saved inside it are removed from the cluster. Changes you did not pull (P) are lost.",
             actions=(
                 ConsequenceAction(
                     action_id="back", hotkey="b", label="Go back", description="Closes this without running anything."

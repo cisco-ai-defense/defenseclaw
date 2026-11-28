@@ -13,6 +13,7 @@
 package enterpriseunix
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,6 +84,7 @@ const (
 	codeOpenShell             = "openshell_failed"
 	codeOpenShellPrerequisite = "openshell_prerequisite_missing"
 	codeOpenShellPinRaised    = "openshell_pin_raised"
+	codeOpenShellDowngrade    = "openshell_downgrade"
 	codeLauncherConflict      = "openshell_launcher_conflict"
 	codeSandboxGroups         = "sandbox_user_groups"
 	codeSandboxPending        = "sandbox_pending_restart"
@@ -138,6 +140,10 @@ type openshellSettings struct {
 	// required_for, which the docker_group_members advisory then covers
 	// (GAP-0554).
 	RequiredFor bool
+	// AllowDowngrade is enterprise.openshell.allow_downgrade: a setup pin
+	// below a release an account ran is applied, with a warning per
+	// account, instead of refused (rel-1-0-10:GAP-1781).
+	AllowDowngrade bool
 }
 
 // openshellSettingsOf applies the defaults: prerequisite mode, the macOS
@@ -156,7 +162,7 @@ func openshellSettingsOf(goos string, cfg *config.Config) openshellSettings {
 	s.Driver = o.SandboxDriver(goos)
 	s.Fallback = o.SandboxDriverFallback(goos, cfg.OpenShell.Admin)
 	s.Version = strings.TrimSpace(o.Version)
-	if v, raised, possible := openshell.ManagedVersionPin(s.Version); raised {
+	if v, raised, possible := openshell.ManagedVersionPin(s.Version, s.Install == config.EnterpriseOpenShellInstallSetup); raised {
 		s.Version, s.RaisedFrom = v, s.Version
 	} else if !possible {
 		s.FloorConflict = true
@@ -168,6 +174,7 @@ func openshellSettingsOf(goos string, cfg *config.Config) openshellSettings {
 	s.E2fsprogsDir = o.E2fsprogsDir
 	s.TelemetryAllowed = cfg.OpenShell.Admin.AllowUpstreamTelemetry != nil && *cfg.OpenShell.Admin.AllowUpstreamTelemetry
 	s.RequiredFor = requiredForConfigured(cfg)
+	s.AllowDowngrade = o.AllowDowngrade
 	return s
 }
 
@@ -448,11 +455,20 @@ type desiredLink struct {
 
 // openshellPlan is what one apply installs for the sandbox subsystem.
 type openshellPlan struct {
-	settings openshellSettings
-	rendered openshell.RenderedGateway
-	files    []desiredFile
-	dirs     []desiredDir
-	links    []desiredLink
+	// downgraded are the accounts that already ran a release above the
+	// setup pin, which enterprise.openshell.allow_downgrade let through:
+	// ensure warns for each (rel-1-0-10:GAP-1781). The switch then removes
+	// their install record, so only this plan still knows them.
+	downgraded []accountAbovePin
+	// recordOnly are the accounts whose own install record names a release
+	// above the pin that this host never applied above it: ensure warns
+	// and does not refuse (accountAbovePin).
+	recordOnly []accountAbovePin
+	settings   openshellSettings
+	rendered   openshell.RenderedGateway
+	files      []desiredFile
+	dirs       []desiredDir
+	links      []desiredLink
 	// staleLinks are links the lifecycle owns that the plan no longer wants.
 	staleLinks []string
 	// digest is the digest of the rendered configuration.
@@ -470,7 +486,7 @@ type openshellPlan struct {
 // and links when openshell.enabled is set, and the links to remove when it
 // is not. Files the previous deployment wrote that are no longer wanted are
 // removed by the plan's stale list.
-func (l *lifecycle) planOpenShell(p *plan) error {
+func (l *lifecycle) planOpenShell(ctx context.Context, p *plan) error {
 	env := l.env
 	if p.payload != nil {
 		env.agentDigest = p.payload.Digests[binGateway]
@@ -503,6 +519,23 @@ func (l *lifecycle) planOpenShell(p *plan) error {
 	if settings.Install == config.EnterpriseOpenShellInstallSetup && openshell.TarballPins[settings.Version] == nil {
 		return fmt.Errorf("enterprise.openshell.version %q is not a release this DefenseClaw build can install in setup mode; set it to one of: %s",
 			settings.Version, strings.Join(openshell.PinnedTarballReleases(), ", "))
+	}
+	// OpenShell has no down migration: a pin below a release an account
+	// already ran leaves that account's gateway unable to open its
+	// database (rel-1-0-10:GAP-1781). describeOpenShell warns for each one
+	// that allow_downgrade lets through (op.downgraded).
+	// Only a release root applied counts: each account's record is capped
+	// at the setup pin this host last applied, so an unchanged pin never
+	// refuses, whatever an account writes in its own home.
+	if settings.Install == config.EnterpriseOpenShellInstallSetup {
+		applied := ""
+		if a := l.openShellAppliedForPlan(); a != nil && a.Install == config.EnterpriseOpenShellInstallSetup {
+			applied = a.Version
+		}
+		op.downgraded, op.recordOnly = splitAbovePin(env.accountsAboveSetupPin(ctx, settings.Version, applied, env.loadOpenShellState().SetupRan))
+		if len(op.downgraded) > 0 && !settings.AllowDowngrade {
+			return errors.New(setupPinDowngradeRefusal(settings.Version, op.downgraded))
+		}
 	}
 	root := rootOwner()
 	op.dirs = append(op.dirs, desiredDir{Path: env.openshellDir(), Mode: 0o755, Owner: root})
@@ -733,6 +766,14 @@ type openshellState struct {
 	Applied         *openshellApplied  `json:"applied,omitempty"`
 	Pending         map[string]pending `json:"pending,omitempty"`
 	GatewayIdentity string             `json:"gateway_identity,omitempty"`
+	// SetupRan is, by account uid, the setup-mode OpenShell release an
+	// account ran when a switch out of setup mode removed its install
+	// (and with it the install record accountsAboveSetupPin reads), capped
+	// at the setup pin root applied then; only accounts whose gateway
+	// database stayed. A later setup pin below it is refused like one
+	// below the record (rel-1-0-10:GAP-1799). The next setup-mode apply
+	// clears it: the account's daemon then writes a record of its own.
+	SetupRan map[string]string `json:"setup_ran,omitempty"`
 }
 
 // openshellApplied is the sandbox configuration the last committed
@@ -823,7 +864,7 @@ func (a *openshellApplied) switchKey() string {
 		// Moving any old requirement across the floor does require a switch;
 		// keep a running legacy sandbox until OpenShell reports it stopped.
 		version = ""
-		if _, raised, possible := openshell.ManagedVersionPin(a.Version); raised || !possible {
+		if _, raised, possible := openshell.ManagedVersionPin(a.Version, false); raised || !possible {
 			version = "below-floor"
 		}
 	}
@@ -851,6 +892,12 @@ type pending struct {
 	From *openshellApplied `json:"from,omitempty"`
 	// Sandboxes is how many ran when the change was last tried.
 	Sandboxes int `json:"sandboxes"`
+	// Running is how many of those Sandboxes were running (ready), when the
+	// last try counted them: the others hold the change without running (a
+	// sandbox in OpenShell's error state, or one the earlier setup left,
+	// that OpenShell does not report stopped). nil for a record written
+	// before it was kept (GAP-2058).
+	Running *int `json:"running,omitempty"`
 	// Hold is the named blocker and next step from the last failed status or
 	// drain check. It is shown on status and verify while the change waits.
 	Hold string `json:"hold,omitempty"`

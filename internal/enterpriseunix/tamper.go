@@ -316,6 +316,13 @@ func (l *lifecycle) restoreTamperedMachinePolicy(record *Deployment) bool {
 			}
 		}
 	}
+	// Verify accepts a Codex requirements file whose hooks are all there,
+	// but a line added after DefenseClaw's hooks block, or a changed managed
+	// line, is still not what DefenseClaw published, and the guardian asked
+	// for it to be put back (GAP-1928).
+	if contains(want, enterprisepolicy.ConnectorCodex) && env.codexRequirementsTampered(validated) != "" {
+		tamperedDropIn = true
+	}
 	result, err := env.MachinePolicy.Verify(validated.Loaded)
 	if isCoded(err, codeMachinePolicy) || (sameStrings(coveredMachinePolicy(want, result), want) && missingClaudeVersionFloor(result) == "" && !tamperedDropIn) {
 		return false
@@ -327,9 +334,9 @@ func (l *lifecycle) restoreTamperedMachinePolicy(record *Deployment) bool {
 	restored := false
 	for _, state := range published.States {
 		if state.Changed && contains(want, state.Connector) {
-			l.result.Changes = append(l.result.Changes, fmt.Sprintf(
+			l.result.Changes = append(l.result.Changes, publishedPolicyChange(state, fmt.Sprintf(
 				"put back DefenseClaw's %s machine policy (%s), which was changed or removed after the last lifecycle run",
-				state.Connector, strings.Join(state.Paths, ", ")))
+				state.Connector, strings.Join(state.Paths, ", "))))
 			restored = true
 		}
 	}
@@ -337,9 +344,9 @@ func (l *lifecycle) restoreTamperedMachinePolicy(record *Deployment) bool {
 }
 
 // TamperedFiles lists what the hook guardian finds changed since the last
-// lifecycle run that ensure puts back: a damaged hook binary, and a
-// DefenseClaw machine-policy drop-in whose bytes are not the ones the
-// lifecycle published.
+// lifecycle run that ensure puts back: a damaged hook binary, a DefenseClaw
+// machine-policy drop-in whose bytes are not the ones the lifecycle
+// published, and a Codex requirements file whose managed content is not.
 func (e *Env) TamperedFiles() []string {
 	e.fillDefaults()
 	var out []string
@@ -354,13 +361,56 @@ func (e *Env) TamperedFiles() []string {
 	if err != nil {
 		return out
 	}
-	for _, path := range enterprisepolicy.TamperedDropIns(opts) {
+	tampered := enterprisepolicy.TamperedDropIns(opts)
+	if enterprisepolicy.CodexRequirementsDrifted(opts) {
+		if path := e.codexRequirementsTampered(nil); path != "" {
+			tampered = append(tampered, path)
+		}
+	}
+	for _, path := range tampered {
 		if e.Root != "" {
 			path = strings.TrimPrefix(path, e.Root)
 		}
 		out = append(out, path)
 	}
 	return out
+}
+
+// codexRequirementsTampered is the Codex requirements file DefenseClaw
+// published when its managed content is no longer what DefenseClaw writes
+// (enterprisepolicy.TamperedCodexRequirements), rendered with the deployed
+// config: validated when the caller has it, else the installed config when
+// it is the one the deployment applied. Otherwise it is "": a config change
+// is the config-apply job's to apply anyway.
+func (e *Env) codexRequirementsTampered(validated *validatedConfig) string {
+	manager, ok := e.MachinePolicy.(*policyManager)
+	if !ok {
+		return ""
+	}
+	if validated == nil {
+		// The ownership record, not the deployment's machine-policy set,
+		// says DefenseClaw published the file (TamperedFiles reads it first):
+		// a run that failed on the file drops Codex from that set, and the
+		// guardian kept no watch on it after (a symbolic link put in its
+		// place, GAP-1968).
+		record, err := e.loadDeployment()
+		if err != nil || record == nil {
+			return ""
+		}
+		raw, err := readBounded(e.P(e.Layout.ConfigPath), maxInputBytes)
+		if err != nil || sha256Bytes(raw) != record.ConfigSHA256 {
+			return ""
+		}
+		if validated, err = e.validateConfig(raw); err != nil {
+			return ""
+		}
+	}
+	opts, err := manager.options(validated.Loaded)
+	if err != nil {
+		return ""
+	}
+	path, _ := enterprisepolicy.TamperedCodexRequirements(opts)
+	return path
 }
 
 // RequestTamperRestore starts the config-apply job without waiting for it;

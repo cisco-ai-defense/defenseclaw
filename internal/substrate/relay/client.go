@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
@@ -44,10 +45,11 @@ type AttachOptions struct {
 	// and says so) when no frame or pong arrives for KeepaliveDead.
 	// Defaults 10 s and 30 s.
 	KeepaliveEvery, KeepaliveDead time.Duration
-	// OnUnsent sees the size of every chunk of input that was read but
-	// could not be sent because the connection ended (GAP-0003), so the
-	// caller can say so instead of losing keys silently.
-	OnUnsent func(n int)
+	// OnUnsent sees a copy of every chunk of input that was read but could
+	// not be sent because the connection ended (GAP-0003), so the caller
+	// can say so or offer it again after a reconnect (B3.1) instead of
+	// losing keys silently. The copy is the caller's to keep and clear.
+	OnUnsent func(b []byte)
 	// Dir is the folder in the actor the agent starts in when it is not
 	// running yet (the copy of the project); "" keeps the relay default.
 	Dir string
@@ -78,6 +80,11 @@ type AttachResult struct {
 	Sent  int64
 	// Warning is the relay's hello warning (GAP-0151), "" for none.
 	Warning string
+	// Renew is set when the relay ended the attachment because its session
+	// token expired (SessionExpiredMessage), or the client ended it RenewLead
+	// before the end the gateway gave (SessionSecondsHeader): the launcher
+	// reconnects at once with a fresh token (GAP-0588).
+	Renew bool
 }
 
 // Attach connects in to the agent's terminal and copies in to the agent and
@@ -127,6 +134,15 @@ func pumpInput(in io.Reader, send func([]byte) error) (detached bool) {
 	}
 }
 
+// detachCloseWait bounds how long a detaching client waits for the relay to
+// answer its close frame before it drops the socket.
+const detachCloseWait = 2 * time.Second
+
+// RenewLead is how long before its session token ends an attachment is
+// renewed (SessionSecondsHeader). A token with less than RenewLead plus a
+// second left is renewed on SessionExpiredMessage.
+const RenewLead = 2 * time.Second
+
 func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions) (AttachResult, error) {
 	d := o.Dialer
 	if d == nil {
@@ -145,6 +161,18 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 		return AttachResult{}, err
 	}
 	defer conn.Close()
+	// The gateway says how long the session token lives: end the
+	// attachment cleanly just before, for a planned renew (GAP-0588).
+	var renew <-chan time.Time
+	if resp != nil {
+		if left, err := strconv.Atoi(resp.Header.Get(SessionSecondsHeader)); err == nil && left > 0 && left <= 24*3600 {
+			if d := time.Duration(left)*time.Second - RenewLead; d >= time.Second {
+				t := time.NewTimer(d)
+				defer t.Stop()
+				renew = t.C
+			}
+		}
+	}
 	var wmu sync.Mutex
 	send := func(frame []byte) error {
 		wmu.Lock()
@@ -164,7 +192,7 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(dead)) })
 	var res AttachResult
 	var resMu sync.Mutex // the reader goroutine writes res while the paths below read it
-	var sent atomic.Int64
+	var sent sendCount
 	done := make(chan struct{})
 	go func() {
 		t := time.NewTicker(every)
@@ -209,6 +237,8 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 					res.Session, res.Input, res.Warning = c.Session, c.Input, c.Warning
 				case CtlExit:
 					res.ExitCode = c.Code
+				case CtlError:
+					res.Renew = res.Renew || c.Message == SessionExpiredMessage
 				}
 				resMu.Unlock()
 			}
@@ -242,12 +272,35 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 			wmu.Lock()
 			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "detach"), time.Now().Add(time.Second))
 			wmu.Unlock()
+			// Let the relay answer the close before the socket is dropped.
+			// Closing a TCP connection at once while the relay's last frames
+			// are unread resets it, and a reset discards what the relay has
+			// received and not yet read: on Windows the detach frame was lost
+			// that way and the relay never saw the person detach (GAP-2164).
+			// The reader above ends when the relay's close frame arrives.
+			select {
+			case <-done:
+			case <-time.After(detachCloseWait):
+			case <-ctx.Done():
+			}
 		}
+	case <-renew:
+		// No detach: the agent keeps its terminal, and the launcher
+		// reconnects at once.
+		resMu.Lock()
+		res.Renew = true
+		resMu.Unlock()
+		wmu.Lock()
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "renew"), time.Now().Add(time.Second))
+		wmu.Unlock()
 	case <-ctx.Done():
 	}
+	// A write still in flight ends now, so settle does not wait on it.
+	_ = conn.Close()
+	n := sent.settle()
 	resMu.Lock()
 	defer resMu.Unlock()
-	res.Sent = sent.Load()
+	res.Sent = n
 	return res, nil
 }
 
@@ -280,18 +333,16 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 	path := RoutePoll + "/" + open.ID
 	var res AttachResult
 	var resMu sync.Mutex // the follower goroutine writes res while the paths below read it
-	var sent atomic.Int64
+	var sent sendCount
 	var outMu sync.Mutex
+	// sendCtx ends a write still in flight when the attachment ends, so
+	// settle does not wait on it.
+	sendCtx, stopSends := context.WithCancel(ctx)
+	defer stopSends()
 	send := func(frame []byte) error {
-		r, err := do(ctx, http.MethodPost, path, AppendStream(nil, frame))
-		if err != nil {
-			return err
-		}
-		r.Body.Close()
-		if r.StatusCode != http.StatusNoContent {
-			return fmt.Errorf("relay write status %d", r.StatusCode)
-		}
-		return nil
+		return pollWrite(ctx, sendCtx, func(wctx context.Context) (*http.Response, error) {
+			return do(wctx, http.MethodPost, path, AppendStream(nil, frame))
+		})
 	}
 	done := make(chan struct{})
 	go func() {
@@ -335,6 +386,8 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 						res.Session, res.Input, res.Warning = cc.Session, cc.Input, cc.Warning
 					case CtlExit:
 						res.ExitCode = cc.Code
+					case CtlError:
+						res.Renew = res.Renew || cc.Message == SessionExpiredMessage
 					}
 					resMu.Unlock()
 				}
@@ -371,22 +424,104 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 		}
 	case <-ctx.Done():
 	}
+	stopSends()
+	n := sent.settle()
 	resMu.Lock()
 	defer resMu.Unlock()
-	res.Sent = sent.Load()
+	res.Sent = n
 	return res, nil
 }
 
-// tracked wraps send so a chunk that fails is reported (OnUnsent) and one
-// that is written is counted in sent.
-func (o AttachOptions) tracked(sent *atomic.Int64, send func([]byte) error) func([]byte) error {
+// sendCount is the DATA bytes an attachment wrote (AttachResult.Sent). A
+// chunk is written and counted under mu, and settle ends the count once no
+// chunk is in flight: a chunk the input pump reads after that is not written
+// but reported (OnUnsent). So every chunk is either in Sent or reported,
+// never neither (GAP-1765: the relay can drop the connection on a chunk it
+// got before the write returned, and Sent was read before that chunk was
+// counted, so the keys lost with it were never reported).
+type sendCount struct {
+	mu    sync.Mutex
+	n     int64
+	ended bool
+}
+
+// errAttachEnded refuses a chunk read after the attachment ended.
+var errAttachEnded = errors.New("relay: the attachment ended")
+
+// errWriteUnanswered is a long-poll write that may have reached the relay
+// but got no answer: the end of the attachment cut it off, or the connection
+// failed, after the request went out. Whether it arrived is unknown, so
+// tracked counts it in Sent and does not report it unsent (the user would
+// type it twice); the relay's Received count on the next hello settles it
+// (rel-1-0-10:GAP-1765, GAP-1771).
+var errWriteUnanswered = errors.New("relay: no answer to a long-poll write")
+
+// pollWrite sends one long-poll write (post) and says how it ended. A write
+// the end of the attachment (sendCtx) stopped before it began sends no byte:
+// errAttachEnded, so the chunk is reported unsent (rel-1-0-10:GAP-1771: it
+// was counted in Sent). A write that failed with no answer once the
+// request had a connection and was not refused while being written is
+// errWriteUnanswered (the relay may have handed the keys to the agent; it
+// answers 204 after that). Each transport attempt is judged on its own (a
+// POST net/http retries on a fresh connection), so the last one decides
+// (rel-1-0-10:GAP-2155). Any other failure (no connection, the last
+// attempt's request write failed, the caller's ctx ended) is returned as is
+// and the chunk is reported unsent; if a cut by the caller's ctx did reach
+// the agent, the next hello's Received tells.
+func pollWrite(ctx, sendCtx context.Context, post func(context.Context) (*http.Response, error)) error {
+	if sendCtx.Err() != nil {
+		return errAttachEnded
+	}
+	var conn, writeFailed atomic.Bool
+	trace := &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) {
+			conn.Store(true)
+			writeFailed.Store(false) // a new attempt: its own write decides
+		},
+		WroteRequest: func(i httptrace.WroteRequestInfo) {
+			if i.Err != nil {
+				writeFailed.Store(true)
+			}
+		},
+	}
+	r, err := post(httptrace.WithClientTrace(sendCtx, trace))
+	if err != nil {
+		if ctx.Err() == nil && conn.Load() && !writeFailed.Load() {
+			return errWriteUnanswered
+		}
+		return err
+	}
+	r.Body.Close()
+	if r.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("relay write status %d", r.StatusCode)
+	}
+	return nil
+}
+
+// settle ends the count and returns it.
+func (c *sendCount) settle() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ended = true
+	return c.n
+}
+
+// tracked wraps send so a chunk that is written, or whose long-poll write got
+// no answer (errWriteUnanswered), is counted in sent, and one that fails or
+// comes after the attachment ended is reported (OnUnsent).
+func (o AttachOptions) tracked(sent *sendCount, send func([]byte) error) func([]byte) error {
 	return func(b []byte) error {
-		err := send(b)
+		sent.mu.Lock()
+		defer sent.mu.Unlock()
+		err := errAttachEnded
+		if !sent.ended {
+			err = send(b)
+		}
 		switch {
-		case err == nil:
-			sent.Add(int64(len(b)))
+		case err == nil, errors.Is(err, errWriteUnanswered):
+			sent.n += int64(len(b))
 		case o.OnUnsent != nil && len(b) > 0:
-			o.OnUnsent(len(b))
+			o.OnUnsent(append([]byte(nil), b...))
 		}
 		return err
 	}

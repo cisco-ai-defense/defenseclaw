@@ -1162,6 +1162,16 @@ func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifec
 	return append(args, windowsEnterpriseStandalonePowerShellArgs(opts)...)
 }
 
+// servicesStayStopped reports whether the run stages the deployment with
+// every managed service stopped and disabled on purpose, so its guardian has
+// not run and a later repair activates it: --no-start (NOSTART=1), or a
+// deferred-config install (Setup /install without CONFIG= and MANIFEST=),
+// which install-enterprise.ps1 stages with -NoStart too
+// (-NoStart:($NoStart -or $DeferredConfig), GAP-1749).
+func (opts *windowsEnterpriseLifecycleOptions) servicesStayStopped() bool {
+	return opts != nil && (opts.noStart || opts.deferredConfig)
+}
+
 func validateWindowsEnterpriseLifecycleSecurityOptions(
 	cmd *cobra.Command,
 	action string,

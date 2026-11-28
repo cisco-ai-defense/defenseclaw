@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // detectClaudeProjectSkills uses only projects named by this user's Claude
@@ -56,7 +58,7 @@ func (s *ContinuousDiscoveryService) detectClaudeProjectSkills() ([]AISignal, er
 			skipped = true
 			continue
 		}
-		resolved, err := filepath.EvalSymlinks(path)
+		resolved, err := winpath.EvalLinks(path)
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
 				skipped = true

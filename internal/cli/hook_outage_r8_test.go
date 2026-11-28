@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookcli"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestOpenClawOutageKnownWriteTargets(t *testing.T) {
@@ -29,9 +30,7 @@ func TestOpenClawOutageKnownWriteTargets(t *testing.T) {
 	}
 	ordinary := t.TempDir()
 	link := filepath.Join(ordinary, "config-link")
-	if err := os.Symlink(protected, link); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, protected, link)
 	cases := []struct {
 		name, command, value, want string
 	}{
@@ -85,9 +84,7 @@ func TestOpenClawOutageKnownAndNamedTargetBoundary(t *testing.T) {
 	}
 	ordinary := t.TempDir()
 	link := filepath.Join(ordinary, "config-link")
-	if err := os.Symlink(protected, link); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, protected, link)
 	branchy := ""
 	for i := 1; i <= 6; i++ {
 		branchy += fmt.Sprintf("if test -f marker%d; then V%d=a; else V%d=b; fi; ", i, i, i)

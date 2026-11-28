@@ -119,7 +119,7 @@ func TestRuntimeSyncLoopStartsOnlyWithBudgets(t *testing.T) {
 	rt.SetCounters(ctx, local, nil, time.Hour)
 	rt.For(adapterConfig([]config.RoutingAdminRule{{ID: "r", Match: config.RoutingAdminMatch{Connectors: []string{"codex"}}, Allow: []string{"fast"}}}, nil))
 	rt.mu.Lock()
-	running := rt.syncing
+	running := rt.syncW != nil
 	rt.mu.Unlock()
 	if running {
 		t.Fatal("no budgets: no sync goroutine")

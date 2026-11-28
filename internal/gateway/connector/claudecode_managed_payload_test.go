@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -22,11 +21,7 @@ import (
 
 func managedPayloadRepoFile(t *testing.T, relative string) string {
 	t.Helper()
-	_, source, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve test source")
-	}
-	return filepath.Join(filepath.Dir(source), "..", "..", "..", filepath.FromSlash(relative))
+	return filepath.Join(connectorRepoRoot(t), filepath.FromSlash(relative))
 }
 
 // goStringListVar reads the string literals of a package-level []string var

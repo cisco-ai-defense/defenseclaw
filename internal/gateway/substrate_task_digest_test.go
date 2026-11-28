@@ -24,6 +24,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/attach"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
+
+	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 )
 
 // GAP-0162: the session token the gateway issues on the attach route
@@ -121,7 +123,7 @@ func TestAttachTokenCarriesTheRegisteredTask(t *testing.T) {
 
 	// The token itself: issued for this registration it names the digest;
 	// an interactive registration gets none, so no task starts with it.
-	tok, _, err := f.sessions.Issue(alice.ID(), substrateSessionActor(reg), 0)
+	tok, _, err := f.sessions.Issue(identity.SignInOf(alice), substrateSessionActor(reg), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,13 +132,13 @@ func TestAttachTokenCarriesTheRegisteredTask(t *testing.T) {
 		t.Fatalf("session = %+v, %v", s, err)
 	}
 	reg.TaskDigest = ""
-	tok, _, _ = f.sessions.Issue(alice.ID(), substrateSessionActor(reg), 0)
+	tok, _, _ = f.sessions.Issue(identity.SignInOf(alice), substrateSessionActor(reg), 0)
 	if s, _ := f.sessions.Verify(tok); s.TaskDigest != "" {
 		t.Fatalf("interactive token names a task: %+v", s)
 	}
 	bad := reg
 	bad.TaskDigest = "not-a-digest"
-	if _, _, err := f.sessions.Issue(alice.ID(), substrateSessionActor(bad), 0); err == nil {
+	if _, _, err := f.sessions.Issue(identity.SignInOf(alice), substrateSessionActor(bad), 0); err == nil {
 		t.Fatal("a malformed digest was signed")
 	}
 }

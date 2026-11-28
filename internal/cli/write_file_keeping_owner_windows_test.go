@@ -193,7 +193,16 @@ func TestWriteFileKeepingDACLKeepsTheWritersOwnOwnerWhenTheSiblingHasIt(t *testi
 	if err := os.WriteFile(sibling, []byte("a: 1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	setTestFileDACL(t, sibling, "D:P(A;;FA;;;SY)(A;;FA;;;BA)")
+	// The sibling DACL names the account that runs the test too: a standard
+	// user is in neither SY nor BA, so the staged copy (which takes this DACL)
+	// could not be renamed into place by the account that owns it, and the
+	// test failed for a Limited token as a fixture limit, not a product answer
+	// (GAP-2111). An administrator is unaffected.
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	setTestFileDACL(t, sibling, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;"+user.User.Sid.String()+")")
 	next := filepath.Join(dir, "rejected-config.yaml")
 	if err := writeFileKeepingDACL(next, []byte("a: 2\n"), sibling); err != nil {
 		t.Fatal(err)

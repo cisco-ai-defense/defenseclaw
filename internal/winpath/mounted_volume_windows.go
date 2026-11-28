@@ -13,6 +13,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 )
 
 const maxMountedVolumeUTF16 = 32 * 1024
@@ -156,7 +158,7 @@ func isLocalDriveLetterSyntax(path string) bool {
 
 func validVolumeGUIDName(value string) bool {
 	const prefix = `\\?\Volume{`
-	if !strings.HasPrefix(strings.ToUpper(value), strings.ToUpper(prefix)) ||
+	if !strings.HasPrefix(asciifold.Lower(value), asciifold.Lower(prefix)) ||
 		!strings.HasSuffix(value, `}\`) {
 		return false
 	}
@@ -331,7 +333,7 @@ func effectiveDriveTargetByHandle(root string) (string, error) {
 		}
 		// The volume root: \Device\HarddiskVolumeN\ (one trailing separator).
 		target := strings.TrimSuffix(windows.UTF16ToString(buffer[:n]), `\`)
-		if !strings.HasPrefix(strings.ToUpper(target), `\DEVICE\`) || strings.Contains(target[len(`\Device\`):], `\`) {
+		if !strings.HasPrefix(asciifold.Lower(target), `\device\`) || strings.Contains(target[len(`\Device\`):], `\`) {
 			return "", fmt.Errorf("unexpected final path %q for %s", target, root)
 		}
 		return target, nil
@@ -385,7 +387,7 @@ func globalSymbolicLinkTarget(name string) (string, error) {
 		return "", fmt.Errorf("query \\GLOBAL??\\%s: %w", name, windows.NTStatus(status))
 	}
 	value := target.String()
-	if value == "" || !strings.HasPrefix(strings.ToUpper(value), `\DEVICE\`) || strings.IndexByte(value, 0) >= 0 {
+	if value == "" || !strings.HasPrefix(asciifold.Lower(value), `\device\`) || strings.IndexByte(value, 0) >= 0 {
 		return "", fmt.Errorf("expected one kernel device target for %s, got %q", name, value)
 	}
 	return value, nil

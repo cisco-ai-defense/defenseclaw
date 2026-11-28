@@ -23,6 +23,7 @@ SMOKE_DIR = ROOT / "packaging" / "windows" / "tests"
 STANDALONE_SMOKES = (
     "enterprise-profile-lifecycle-lock-smoke.ps1",
     "enterprise-profile-deployment-record-smoke.ps1",
+    "enterprise-profile-release-history-smoke.ps1",
     "enterprise-standalone-approved-policy-repair-smoke.ps1",
     "enterprise-standalone-claude-policy-binding-smoke.ps1",
     "enterprise-standalone-codex-vendor-folder-smoke.ps1",

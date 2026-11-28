@@ -668,3 +668,15 @@ func setOTLPTokenWindowsDACL(t *testing.T, path string, untrustedMask windows.AC
 		t.Fatalf("set DACL: %v", err)
 	}
 }
+
+// writeOTLPTokenEveryAccountCanRead writes token with a DACL that lets
+// Everyone read it: the NTFS form of mode 0644.
+func writeOTLPTokenEveryAccountCanRead(t *testing.T, path, token string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := setOTLPWindowsBroadDACL(path, windows.GENERIC_READ); err != nil {
+		t.Fatalf("install broad DACL: %v", err)
+	}
+}

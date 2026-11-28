@@ -36,6 +36,33 @@ var networkShareLinkWalk = runtime.GOOS == "windows"
 // the wait that bounds the read.
 var walkLstat = pathidentity.LstatPinned
 
+// knownFolderLstat, when set, is the read stillPlain makes of a known folder
+// in place of walkLstat (HoldKnownFolderReadsForTest).
+var knownFolderLstat func(name string) (os.FileInfo, error)
+
+// HoldKnownFolderReadsForTest holds every read stillPlain makes of a known
+// folder that hold reports, until restore, and sets networkShareAnswerWait
+// to wait: a gateway test judges a write target whose own folder does not
+// answer in time (rel-1-0-10:GAP-1804). The folders known to be no link are
+// forgotten when it starts and when it ends.
+func HoldKnownFolderReadsForTest(hold func(folder string) bool, wait time.Duration) (restore func()) {
+	end := make(chan struct{})
+	read, answerWait := walkLstat, networkShareAnswerWait
+	forgetPlainFolders()
+	knownFolderLstat = func(name string) (os.FileInfo, error) {
+		if hold(name) {
+			<-end
+		}
+		return read(name)
+	}
+	networkShareAnswerWait = wait
+	return func() {
+		knownFolderLstat, networkShareAnswerWait = nil, answerWait
+		close(end)
+		forgetPlainFolders()
+	}
+}
+
 // networkLinkHopLimit bounds the links one walk follows: the links the system
 // opens in one path (SystemLinkLimit: 63 on Windows, 40 on Linux, 32 on macOS).
 // A path past it is one no read can go through, an unread body. A walk that
@@ -362,6 +389,9 @@ func stillPlain(path string, known os.FileInfo) (same, answered bool) {
 	// comparison is made in the goroutine too: nothing of the folder is
 	// read after the wait.
 	lstat := walkLstat
+	if held := knownFolderLstat; held != nil {
+		lstat = held
+	}
 	// The goroutine reads nothing of its hook call while it waits for the
 	// read, so on Windows it lets the call's thread go for the grace wait and
 	// the read runs on that thread (releaseHookCallThread). A read that is

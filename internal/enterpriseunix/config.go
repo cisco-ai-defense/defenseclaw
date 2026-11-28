@@ -255,11 +255,17 @@ func (e *Env) auditStorePath(raw []byte) (string, error) {
 // the read-only commands that need what it enables (`enterprise secret
 // check`). A missing file is fs.ErrNotExist.
 func (e *Env) InstalledConfig() (*config.Config, error) {
-	raw, err := readBounded(e.P(e.Layout.ConfigPath), maxInputBytes)
+	raw, err := e.InstalledConfigBytes()
 	if err != nil {
 		return nil, err
 	}
 	return e.loadConfigCandidate(raw)
+}
+
+// InstalledConfigBytes reads the installed config.yaml as written, bounded.
+// A missing file is fs.ErrNotExist.
+func (e *Env) InstalledConfigBytes() ([]byte, error) {
+	return readBounded(e.P(e.Layout.ConfigPath), maxInputBytes)
 }
 
 // validateConfig checks the installed config.yaml bytes; see

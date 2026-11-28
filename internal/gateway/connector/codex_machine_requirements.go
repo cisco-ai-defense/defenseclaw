@@ -122,6 +122,12 @@ type WindowsCodexManagedRuntimeRegistry struct {
 	GatewayAddr        string
 	GatewayServiceName string
 	Targets            []WindowsCodexManagedRuntimeTarget
+	// HookExecutable is the hook image the protected runtime state records:
+	// the one the active requirements were verified against. It can be
+	// another image of this install's hook (GAP-0751); a writer that
+	// publishes for a different image republishes the requirements first
+	// (GAP-2056).
+	HookExecutable string
 	// AdminConflict names the administrator setting that turned DefenseClaw's
 	// managed Codex hooks off. Only a Secure Client host without the strict
 	// pin sets it; the registry is then inactive and Codex stays unhooked.
@@ -926,11 +932,10 @@ func reconcileWindowsCodexRequirements(
 		return nil, false, err
 	}
 
-	rendered, err := toml.Marshal(cfg)
+	rendered, err := renderCodexRequirementsPreserving(raw, cfg)
 	if err != nil {
 		return nil, false, fmt.Errorf("marshal Codex requirements: %w", err)
 	}
-	rendered = retainCodexTOMLBOM(raw, rendered)
 	if len(rendered) > windowsCodexMachineRequirementsLimit {
 		return nil, false, fmt.Errorf(
 			"rendered Codex requirements exceed %d bytes",
@@ -1011,6 +1016,81 @@ func windowsCodexRequirementsContainExactManagedHook(
 		}
 	}
 	return false, nil
+}
+
+// windowsCodexRequirementsMayHoldDefenseClaw reports whether a Codex
+// requirements document may hold content a DefenseClaw release wrote, read
+// broadly so that only a plainly administrator-authored file reports false
+// (GAP-1832): a document that does not parse, or a hooks table with a
+// windows_managed_dir or state key, or any key or string under hooks that
+// names DefenseClaw, in plain text or in a base64 PowerShell
+// -EncodedCommand script it carries. Every command any release renders
+// (bound cmd-direct, the encoded PowerShell bridge, the unbound and
+// call-operator forms, Secure Client) names defenseclaw-hook.exe or
+// defenseclaw-hook-guard.exe there. Comments, the shared isolation keys
+// (allow_managed_hooks_only, features.hooks) and the administrator's own
+// policy outside hooks are not DefenseClaw's and do not count.
+func windowsCodexRequirementsMayHoldDefenseClaw(raw []byte) bool {
+	cfg, err := parseWindowsCodexRequirements(raw)
+	if err != nil {
+		return true
+	}
+	hooks, ok := cfg["hooks"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	if _, ok := hooks["windows_managed_dir"]; ok {
+		return true
+	}
+	if _, ok := hooks["state"]; ok {
+		return true
+	}
+	return windowsCodexValueNamesDefenseClaw(hooks)
+}
+
+// windowsCodexValueNamesDefenseClaw walks a parsed TOML value and reports a
+// key or string that names DefenseClaw (windowsCodexTextNamesDefenseClaw).
+func windowsCodexValueNamesDefenseClaw(value interface{}) bool {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		for key, item := range typed {
+			if windowsCodexTextNamesDefenseClaw(key) || windowsCodexValueNamesDefenseClaw(item) {
+				return true
+			}
+		}
+	case []interface{}:
+		for _, item := range typed {
+			if windowsCodexValueNamesDefenseClaw(item) {
+				return true
+			}
+		}
+	case []map[string]interface{}:
+		for _, item := range typed {
+			if windowsCodexValueNamesDefenseClaw(item) {
+				return true
+			}
+		}
+	case string:
+		return windowsCodexTextNamesDefenseClaw(typed)
+	}
+	return false
+}
+
+// windowsCodexTextNamesDefenseClaw reports text that names DefenseClaw,
+// case-insensitively, in plain text or in the decoded script of any of its
+// whitespace-separated words that is a base64 PowerShell -EncodedCommand
+// argument (any spelling or abbreviation of the parameter).
+func windowsCodexTextNamesDefenseClaw(text string) bool {
+	if strings.Contains(strings.ToLower(text), "defenseclaw") {
+		return true
+	}
+	for _, field := range strings.Fields(text) {
+		script, ok := powershellDecodedCommand(strings.Trim(field, "\"\x27"))
+		if ok && strings.Contains(strings.ToLower(script), "defenseclaw") {
+			return true
+		}
+	}
+	return false
 }
 
 func removeWindowsCodexRequirementsOwnedChanges(
@@ -1131,11 +1211,10 @@ func removeWindowsCodexRequirementsOwnedChanges(
 		}
 	}
 
-	rendered, err := toml.Marshal(cfg)
+	rendered, err := renderCodexRequirementsPreserving(current, cfg)
 	if err != nil {
 		return nil, false, fmt.Errorf("marshal surgically cleaned Codex requirements: %w", err)
 	}
-	rendered = retainCodexTOMLBOM(current, rendered)
 	if len(rendered) > windowsCodexMachineRequirementsLimit {
 		return nil, false, fmt.Errorf(
 			"surgically cleaned Codex requirements exceed %d bytes",
@@ -1657,11 +1736,11 @@ func stripWindowsCodexLayout(raw []byte, hookBinary, managedDir string) ([]byte,
 	} else {
 		cfg["hooks"] = hooks
 	}
-	rendered, err := toml.Marshal(cfg)
+	rendered, err := renderCodexRequirementsPreserving(raw, cfg)
 	if err != nil {
 		return nil, false, fmt.Errorf("marshal Codex requirements without a managed layout: %w", err)
 	}
-	return retainCodexTOMLBOM(raw, rendered), true, nil
+	return rendered, true, nil
 }
 
 // windowsCodexAdoptPreimageBaseline extracts the shared isolation controls

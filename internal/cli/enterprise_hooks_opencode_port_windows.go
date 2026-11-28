@@ -175,8 +175,10 @@ func enterpriseHookStandaloneOpenCodePorts(ctx context.Context, manifest enterpr
 		port, err := readWindowsOpenCodePortAsAccount(ctx, profile)
 		if err != nil {
 			unknown[key] = true
-			unknownEntries = append(unknownEntries, enterprisehooks.WindowsOpenCodePortUnknown{SID: key, Path: file, Reason: err.Error(), Fix: "repair the account file or profile"})
-			problems = errors.Join(problems, fmt.Errorf("OpenCode service port for %s: cannot read %s as that account: %w; repair the account file or profile", key, file, err))
+			unknownEntries = append(unknownEntries, windowsOpenCodePortUnknownEntry(key, file, err))
+			if !windowsOpenCodePortAccountSignedOut(err) {
+				problems = errors.Join(problems, fmt.Errorf("OpenCode service port for %s: cannot read %s as that account: %w; repair the account file or profile", key, file, err))
+			}
 			continue
 		}
 		if port > 0 {
@@ -283,8 +285,10 @@ func enterpriseHookStandaloneOpenCodePorts(ctx context.Context, manifest enterpr
 		})
 		if err != nil {
 			file := enterprisepolicy.OpenCodeServiceConfigPath(profile.UserHome)
-			unknownEntries = append(unknownEntries, enterprisehooks.WindowsOpenCodePortUnknown{SID: key, Path: file, Reason: err.Error(), Fix: "repair the account file or profile"})
-			problems = errors.Join(problems, fmt.Errorf("OpenCode service port for %s: cannot write %s as that account: %w; repair the account file or profile", key, file, err))
+			unknownEntries = append(unknownEntries, windowsOpenCodePortUnknownEntry(key, file, err))
+			if !windowsOpenCodePortAccountSignedOut(err) {
+				problems = errors.Join(problems, fmt.Errorf("OpenCode service port for %s: cannot write %s as that account: %w; repair the account file or profile", key, file, err))
+			}
 			continue
 		}
 		available[key] = port
@@ -299,6 +303,25 @@ func enterpriseHookStandaloneOpenCodePorts(ctx context.Context, manifest enterpr
 		return available, errors.Join(problems, fmt.Errorf("OpenCode port warning summary: %w", err))
 	}
 	return available, problems
+}
+
+// windowsOpenCodePortAccountSignedOut reports an account file that cannot be
+// read or written only because the account is signed out and Windows gave no
+// S4U logon for it (an Active Directory account away from its domain
+// controller, a Microsoft Entra ID account). That account is pending, not
+// failed: verify keeps its warning and every guardian pass tries the file
+// again, but it is no state error, so it cannot hold the guardian in a retry
+// loop that contends the managed policy lock on every pass (GAP-1798).
+func windowsOpenCodePortAccountSignedOut(err error) bool {
+	return errors.Is(err, enterprisehooks.ErrEnrolledUserSignedOut)
+}
+
+func windowsOpenCodePortUnknownEntry(sid, file string, err error) enterprisehooks.WindowsOpenCodePortUnknown {
+	fix := "repair the account file or profile"
+	if windowsOpenCodePortAccountSignedOut(err) {
+		fix = enterprisehooks.EnrolledUserSignedOutFix(err)
+	}
+	return enterprisehooks.WindowsOpenCodePortUnknown{SID: sid, Path: file, Reason: err.Error(), Fix: fix}
 }
 
 // windowsOpenCodeClaimPath mirrors the per-user setup claim namespace.

@@ -50,7 +50,10 @@ type Replicas struct {
 
 // Leader is the gateway leader and its store.
 type Leader struct {
-	Ready       bool `json:"ready"`
+	Ready bool `json:"ready"`
+	// Desired is the leader's replica count, for doctor's components row
+	// (GAP-0593); not part of the status document.
+	Desired     int  `json:"-"`
 	LeaseHeld   bool `json:"lease_held"`
 	StoreSchema int  `json:"store_schema,omitempty"`
 }
@@ -110,7 +113,10 @@ type StatusDocument struct {
 	// PolicyConflicts counts the agents in policy_conflict per atespace
 	// (GAP-0398). Always set; optional in the contract.
 	PolicyConflicts *PolicyConflicts `json:"policy_conflicts,omitempty"`
-	Checks          []Check          `json:"checks"`
+	// Bundles are the signed policy bundles in force, one per stage; left
+	// out when substrate.bundles is off (GAP-0432).
+	Bundles []BundleStage `json:"bundles,omitempty"`
+	Checks  []Check       `json:"checks"`
 }
 
 // VerifyDocument is `defenseclaw substrate verify --json`: the checks and
@@ -125,7 +131,9 @@ type VerifyDocument struct {
 	OK                 bool    `json:"ok"`
 	// PolicyConflicts: as in the status document (GAP-0398).
 	PolicyConflicts *PolicyConflicts `json:"policy_conflicts,omitempty"`
-	Checks          []Check          `json:"checks"`
+	// Bundles: as in the status document (GAP-0432).
+	Bundles []BundleStage `json:"bundles,omitempty"`
+	Checks  []Check       `json:"checks"`
 }
 
 // Report is what the CLI collected for a status document beyond Observed.
@@ -363,6 +371,7 @@ func BuildStatus(o Observed, r Report) StatusDocument {
 		Atespaces:          atespaces,
 		Inventory:          inv,
 		PolicyConflicts:    policyConflicts(o),
+		Bundles:            bundleStages(o),
 		Checks:             checks,
 	}
 }
@@ -385,6 +394,7 @@ func BuildVerify(o Observed, productVersion string, now time.Time) VerifyDocumen
 		Cluster:            ClusterOf(o),
 		OK:                 ok,
 		PolicyConflicts:    policyConflicts(o),
+		Bundles:            bundleStages(o),
 		Checks:             checks,
 	}
 }

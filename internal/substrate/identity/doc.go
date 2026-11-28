@@ -21,10 +21,11 @@
 //     x-defenseclaw-actor header of every actor request (Agent Substrate
 //     v1.0.0 docs/guides/actor-jwts.md). OIDC discovery over TLS with the
 //     projected trust bundle, kid lookup with a rate-limited refetch,
-//     ES256 or RS256, aud, exp and nbf with 60 s skew, sub starting with
-//     actor/ (worker-for-actor/ tokens refused), and the actor UID checked
-//     live against the control API (cached 60 s), so a recreated
-//     same-name actor's old token is refused.
+//     ES256 or RS256, aud, exp (refused from the second it passes, no
+//     grace), nbf and iat with 60 s skew, sub starting with actor/
+//     (worker-for-actor/ tokens refused), and the actor UID checked live
+//     against the control API (cached 10 s), so a recreated same-name
+//     actor's old token is refused.
 //   - PersonVerifier: the admin listener's people (the launcher's OIDC
 //     device-flow tokens) and CI workloads (workload_oidc).
 //   - SessionSigner: the short-lived, person-bound relay session tokens

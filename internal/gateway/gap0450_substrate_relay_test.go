@@ -26,7 +26,7 @@ import (
 // substrateRelayLeader is a leader serving the telemetry relay, and a client.
 func substrateRelayLeader(t *testing.T) (*telemetryrelay.Store, *leader.Client) {
 	t.Helper()
-	store := &telemetryrelay.Store{}
+	store := &telemetryrelay.Store{ResumeWarmup: -1} // a leader past its GAP-0486 warm-up
 	srv := &leader.Server{IsLeader: func() bool { return true }}
 	telemetryrelay.Serve(srv, store)
 	hs := httptest.NewServer(srv)

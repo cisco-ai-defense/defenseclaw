@@ -15,7 +15,16 @@ import (
 func gap0322ClaudeRegistrationFixture(t *testing.T) (string, []string, string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skip("Unix registration")
+		// A Windows account registers the native launcher behind the cmd.exe
+		// guard. The launcher is a copy of the test binary that answers like
+		// the review fixture below (guardLauncherModeEnv).
+		account := t.TempDir()
+		dataDir := filepath.Join(account, ".defenseclaw")
+		launcher := copyTestBinaryAsLauncher(t, filepath.Join(account, ".local", "bin"))
+		t.Setenv(guardLauncherModeEnv, "review")
+		command, args := claudeCodeHookInvocation(SetupOpts{DataDir: dataDir, HookExecutable: launcher},
+			filepath.Join(dataDir, "hooks", "claude-code-hook.sh"))
+		return command, args, ""
 	}
 	account := t.TempDir()
 	t.Setenv("HOME", account)
@@ -74,7 +83,7 @@ func TestGAP0322ClaudeRegisteredLaunchUnderShellOptions(t *testing.T) {
 	if args == nil {
 		t.Fatal("Claude Code registration has no direct arguments")
 	}
-	for _, tc := range []struct {
+	cases := []struct {
 		name string
 		env  []string
 	}{
@@ -83,7 +92,24 @@ func TestGAP0322ClaudeRegisteredLaunchUnderShellOptions(t *testing.T) {
 		{"posix", []string{"SHELLOPTS=noexec:posix"}},
 		{"startup", []string{"SHELLOPTS=noexec", "BASH_ENV=" + startup}},
 		{"combined", []string{"SHELLOPTS=noexec", "BASH_ENV=" + startup, "FUNCNEST=1", "BASHOPTS=failglob:nullglob"}},
-	} {
+	}
+	if runtime.GOOS == "windows" {
+		// The command processor of Windows has no shell options; what an
+		// agent's environment can change is which processor, which
+		// extensions and which search path a start would use. The registered
+		// command names cmd.exe and the launcher by absolute path, so none of
+		// them may change the answer.
+		cases = []struct {
+			name string
+			env  []string
+		}{
+			{"comspec", []string{`COMSPEC=C:\no\such\cmd.exe`}},
+			{"pathext", []string{"PATHEXT=.BAT"}},
+			{"path", []string{"PATH=" + t.TempDir()}},
+			{"combined", []string{`COMSPEC=C:\no\such\cmd.exe`, "PATHEXT=.BAT", "PATH=" + t.TempDir(), "PROMPT=$G"}},
+		}
+	}
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, input := range []string{"protected", "down"} {
 				code, output := gap0322RunRegistered(t, command, args, input, tc.env...)
@@ -109,6 +135,10 @@ func TestGAP0322ClaudeOrdinaryRegistrationTwin(t *testing.T) {
 
 func TestGAP0322ClaudeMissingGuardFallbackRegistration(t *testing.T) {
 	command, args, _ := gap0322ClaudeRegistrationFixture(t)
+	if runtime.GOOS == "windows" {
+		gap0322WindowsRegistrationMatrixRefusesTampering(t, command, args)
+		return
+	}
 	opts := SetupOpts{DataDir: args[6], HookExecutable: args[1]}
 	hooks := map[string]interface{}{}
 	if err := appendClaudeCodeHookMatrixForSetup(hooks, command, args, opts); err != nil {

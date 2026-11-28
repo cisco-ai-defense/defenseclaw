@@ -26,6 +26,12 @@ backup. An edited profile is kept and reported.
 
 Run ``python -m defenseclaw.guardrail_profiles`` to print the digests of the
 bundled profiles; a release that changes a profile adds its digest here.
+
+A downgrade has the same problem the other way round (GAP-1077): the older
+release only knows the digests it shipped, so it reads an unedited profile of
+this release as the user's edit and keeps it. The older release cannot change,
+so the downgrade of this release puts the target release's own profiles in
+place of the unedited ones before it hands over (``restore_unedited_profiles``).
 """
 
 from __future__ import annotations
@@ -154,6 +160,12 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "ca7e62eec5d39e2f6f1f3eeec648c25c5bfd32c19d05380e19aa44aaa1bddf1e",
             # 1.0.10 (s7/rules-fu12, rel-1-0-10:GAP-1574): cognitive.yaml CRITICAL -> HIGH (87a7927568).
             "6a7668cde7efc0eb7ec557a04a205a7416a4edd9e6f0f39c0a9d7a8597f4b870",
+            # 1.0.11 (t6/close-auth CLOSE-AUTH stages 2/3, substrate-1 GAP-0727): SEC-AWS-SECRET also matches
+            # the spaced, dashed and quoted key spellings and an access-key id followed by its secret.
+            "b8d2429990d76d73d9ff909ed8f7f9b848d0bef33fe887b0ce4d69f6690f7cb0",
+            # 1.0.11 (det111/engine-train-9 T23E6, rel 7177ac08f9): tiers.yaml, the secrets.yaml rules and the
+            # commands.yaml changes of the T23e train.
+            "b217bb47a4f6e447cc0b5c1dd1586f064543dbd0e413de44fc57e5eb213909e9",
         }
     ),
     "permissive": frozenset(
@@ -262,6 +274,12 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/g0210port-r2 on rel da4177e225, rel-1-0-10:GAP-0210, GAP-1267, GAP-1268): SEC-HF-TOKEN and
             # the SEC-PASSWORD-ASSIGN value class (backticks, next line, comma) in secrets.yaml.
             "185cf3ac23ddfdb95542daad3d62f3e165da9d62edfc08802497c722ea367a10",
+            # 1.0.11 (t6/close-auth CLOSE-AUTH stages 2/3, substrate-1 GAP-0727): SEC-AWS-SECRET also matches
+            # the spaced, dashed and quoted key spellings and an access-key id followed by its secret.
+            "8d817b012e5e158bdcf6b95b5789e61f020729f58c673b0fbf4a0cd5c8c20171",
+            # 1.0.11 (det111/engine-train-9 T23E6, rel 7177ac08f9): tiers.yaml, the secrets.yaml rules and the
+            # commands.yaml changes of the T23e train.
+            "2322caa5e681f7f191ba2df924e9798dd4b19d92efbf65a775347f5b61f88686",
         }
     ),
     "strict": frozenset(
@@ -369,6 +387,12 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/g0210port-r2 on rel da4177e225, rel-1-0-10:GAP-0210, GAP-1267, GAP-1268): SEC-HF-TOKEN and
             # the SEC-PASSWORD-ASSIGN value class (backticks, next line, comma) in secrets.yaml.
             "51cc060958667eaea175b46c6ce542175e0af2667646ffe69b56b9a917218670",
+            # 1.0.11 (t6/close-auth CLOSE-AUTH stages 2/3, substrate-1 GAP-0727): SEC-AWS-SECRET also matches
+            # the spaced, dashed and quoted key spellings and an access-key id followed by its secret.
+            "43d89f5201e1a168203fd8fe26003217684f9d6a81a237b91392c428ab802288",
+            # 1.0.11 (det111/engine-train-9 T23E6, rel 7177ac08f9): tiers.yaml, the secrets.yaml rules and the
+            # commands.yaml changes of the T23e train.
+            "8245154b570ab339bf21786dd167b273b13ebc80eb2704e736cb2b9c071f9344",
         }
     ),
 }
@@ -380,6 +404,9 @@ class ProfileRefreshResult:
     kept_modified: list[str] = field(default_factory=list)
     backup_dir: str = ""
     errors: list[str] = field(default_factory=list)
+    # The digest each refreshed profile had right after the swap, so an undo
+    # puts a profile back only while it is still exactly that copy.
+    refreshed_digests: dict[str, str] = field(default_factory=dict)
 
 
 def _profile_files(root: Path) -> list[Path]:
@@ -409,13 +436,90 @@ def profile_digest(root: str | Path) -> str:
     return profile_digest_from_files({p.relative_to(root).as_posix(): p.read_bytes() for p in _profile_files(root)})
 
 
-def refresh_stock_profiles(policy_dir: str, backups_root: str) -> ProfileRefreshResult:
-    """Replace unedited seeded profiles that differ from the bundled ones."""
+def unedited_profiles(policy_dir: str) -> list[str]:
+    """The seeded profiles in ``policy_dir`` whose files are exactly those some release shipped."""
+
+    dest_root = Path(policy_dir) / "guardrail" if policy_dir else None
+    if dest_root is None or not dest_root.is_dir():
+        return []
+    names = []
+    for dst in sorted(dest_root.iterdir()):
+        if dst.is_symlink() or not dst.is_dir() or dst.name.startswith("."):
+            continue
+        try:
+            if profile_digest(dst) in STOCK_PROFILE_DIGESTS.get(dst.name, frozenset()):
+                names.append(dst.name)
+        except OSError:
+            continue
+    return names
+
+
+def restore_unedited_profiles(
+    policy_dir: str, backups_root: str, target_profiles: str | Path, result: ProfileRefreshResult | None = None
+) -> ProfileRefreshResult:
+    """Put a release's own profiles in place of the unedited seeded ones (GAP-1077).
+
+    A downgrade runs the older release's migrate, which keeps every profile
+    whose digest it does not know, and it does not know the digests of this
+    release. ``target_profiles`` is the older release's ``policies/guardrail``;
+    a profile the user edited is left as it is. A caller that passes ``result``
+    keeps what was swapped so far even when this is interrupted, to undo it.
+    """
+
+    return refresh_stock_profiles(policy_dir, backups_root, bundled=Path(target_profiles), result=result)
+
+
+def undo_profile_refresh(policy_dir: str, result: ProfileRefreshResult) -> tuple[list[str], list[str]]:
+    """Put back the profiles a refresh replaced, from its backup (GAP-1081).
+
+    Used when the downgrade that asked for the swap did not happen. A profile
+    changed since the swap is left alone. Returns the profiles put back and
+    the problems met.
+    """
+
+    restored: list[str] = []
+    problems: list[str] = []
+    dest_root = Path(policy_dir) / "guardrail"
+    for name in result.refreshed:
+        backup = Path(result.backup_dir) / name
+        dst = dest_root / name
+        staged = dst.with_name(f".{name}.undo")
+        try:
+            if not backup.is_dir():
+                problems.append(f"{name}: its backup is gone")
+                continue
+            if result.refreshed_digests.get(name) != profile_digest(dst):
+                problems.append(f"{name}: changed since the swap, left as it is")
+                continue
+            shutil.rmtree(staged, ignore_errors=True)
+            shutil.move(str(dst), str(staged))
+            try:
+                shutil.move(str(backup), str(dst))
+            except OSError:
+                shutil.move(str(staged), str(dst))
+                raise
+            shutil.rmtree(staged, ignore_errors=True)
+            restored.append(name)
+        except OSError as exc:
+            problems.append(f"{name}: {exc}")
+    try:
+        os.rmdir(result.backup_dir)  # only when every backup left it
+    except OSError:
+        pass
+    return restored, problems
+
+
+def refresh_stock_profiles(
+    policy_dir: str, backups_root: str, bundled: Path | None = None, result: ProfileRefreshResult | None = None
+) -> ProfileRefreshResult:
+    """Replace unedited seeded profiles that differ from ``bundled`` (this release's by default)."""
 
     from defenseclaw.paths import bundled_guardrail_profiles_dir
 
-    result = ProfileRefreshResult()
-    bundled = bundled_guardrail_profiles_dir()
+    if result is None:
+        result = ProfileRefreshResult()
+    if bundled is None:
+        bundled = bundled_guardrail_profiles_dir()
     if bundled is None or not policy_dir:
         return result
     dest_root = Path(policy_dir) / "guardrail"
@@ -438,6 +542,7 @@ def refresh_stock_profiles(policy_dir: str, backups_root: str) -> ProfileRefresh
                 os.makedirs(result.backup_dir, exist_ok=True)
             _swap_in(profile, dst, Path(result.backup_dir) / profile.name)
             result.refreshed.append(profile.name)
+            result.refreshed_digests[profile.name] = profile_digest(dst)
         except OSError as exc:
             result.errors.append(f"{profile.name}: {exc}")
     return result

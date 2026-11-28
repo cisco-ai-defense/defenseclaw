@@ -67,7 +67,7 @@ home `/var/empty`). Everything else runs as root.
 | Label | Runs as | What it does |
 | --- | --- | --- |
 | `com.cisco.defenseclaw.gateway` | `_defenseclaw` | Policy engine and hook API. Serves `127.0.0.1:18970`, which launchd holds for it, and binds `run/hook.sock` |
-| `com.cisco.defenseclaw.hook-guardian` | root | Always running. Reconciles each user's hooks every minute through a worker that runs as that user, which also runs the user's AI Discovery scan. Every 5 seconds it checks the hook binary and Claude Code's `90-defenseclaw.json` drop-in; if either is gone or changed it logs `tamper:` and starts `com.cisco.defenseclaw.apply`, whose `ensure` puts them back |
+| `com.cisco.defenseclaw.hook-guardian` | root | Always running. Reconciles each user's hooks every minute through a worker that runs as that user, which also runs the user's AI Discovery scan. Every 5 seconds it checks the hook binary, Claude Code's `90-defenseclaw.json` drop-in and DefenseClaw's part of Codex `requirements.toml`; if one is gone or changed it logs `tamper:` and starts `com.cisco.defenseclaw.apply`, whose `ensure` puts it back |
 | `com.cisco.defenseclaw.hook-enumerator` | root | Rewrites the target manifest every five minutes (in `auto` enrollment mode) |
 | `com.cisco.defenseclaw.sensor-helper` | root | Answers the gateway's fixed AI Discovery requests |
 | `com.cisco.defenseclaw.apply` | root | Runs `ensure --reason path` when `etc/config.yaml`, `etc/secrets` or `etc/policies` changes |
@@ -193,7 +193,10 @@ and rolls back on any failure. A failed apply fails the pkg install, and
 `/var/log/install.log` names the first error. No pkg? Use the
 [tarball](#3b-or-install-from-the-tarball). Exit codes of the
 lifecycle: `0` success or nothing to do, `1` failed (rolled back), `2` invalid
-arguments, `75` another run holds the lock.
+arguments, `75` another run holds the lock. That run can be the apply a new
+config starts: for a few seconds after `ensure --config`, `status` and `verify`
+report `lifecycle_busy` and exit `75`. Protection does not change while it
+runs; retry, as MDM detection scripts do.
 
 #### How the pkg install works
 

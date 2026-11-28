@@ -82,10 +82,23 @@ func mayHoldHostScript(source string) bool {
 		return false
 	}
 	lower := strings.ToLower(source)
-	for _, word := range []string{"powershell", "pwsh", "cmd", "iex", "invoke-expression", "{"} {
+	for _, word := range []string{"powershell", "pwsh", "cmd", "iex", "invoke-expression", "{", "start-process", "saps", "--%"} {
 		if strings.Contains(lower, word) {
 			return true
 		}
+	}
+	// The start alias of Start-Process, as a word (powerShellChildArgvCall).
+	for index := strings.Index(lower, "start"); index >= 0; {
+		end := index + len("start")
+		if (index == 0 || strings.ContainsRune(" \t;|&(", rune(lower[index-1]))) &&
+			end < len(lower) && (lower[end] == ' ' || lower[end] == '\t') {
+			return true
+		}
+		next := strings.Index(lower[end:], "start")
+		if next < 0 {
+			break
+		}
+		index = end + next
 	}
 	return false
 }
@@ -101,6 +114,9 @@ type hostUnwrap struct {
 	// size); caps names the bound (internal/guardrail/bounded).
 	limit bool
 	caps  bounded.CapSet
+	// floorRaiseOnly: a layer unwrapped is a blank-decoded -EncodedCommand
+	// body (psparse.NestedScript.BlankDecoded; Input.FloorRaiseOnly).
+	floorRaiseOnly bool
 }
 
 // maxHostMidListBody bounds the script text substituted into the middle of a
@@ -145,15 +161,15 @@ func unwrapHostSource(source string, dialect Dialect, depth int) (hostUnwrap, bo
 	for layer := 0; ; layer++ {
 		var next string
 		var nextDialect Dialect
-		var ok bool
+		var ok, blanked bool
 		switch result.dialect {
 		case DialectPowerShell:
 			var caps bounded.CapSet
-			next, nextDialect, ok, caps = unwrapPowerShellOnce(result.source)
+			next, nextDialect, ok, caps, blanked = unwrapPowerShellOnce(result.source)
 			result.caps = result.caps.Union(caps)
 			result.limit = result.limit || caps.Any()
 		case DialectCMD:
-			next, nextDialect, ok = unwrapCMDOnce(result.source)
+			next, nextDialect, ok, blanked = unwrapCMDOnce(result.source)
 		}
 		if !ok || strings.TrimSpace(next) == "" {
 			break
@@ -167,20 +183,35 @@ func unwrapHostSource(source string, dialect Dialect, depth int) (hostUnwrap, bo
 			break
 		}
 		result.source, result.dialect = next, nextDialect
+		result.floorRaiseOnly = result.floorRaiseOnly || blanked
 		result.layers++
 	}
 	return result, result.layers > 0 || result.limit
+}
+
+// raiseReadable reports whether a host script reading (a twin, which only adds
+// findings to the call) may read a parse: one with only lexical diagnostics
+// (an unterminated string, here-string or block comment) is read as psparse
+// read it at 1.0.10. Such a text is often a statement of a POSIX reading of a
+// Windows-host call, cut at a ; that PowerShell reads inside a string
+// (rel-1-0-10:GAP-1919): the statement reading before the open token is exact
+// and must keep its findings. Readers that cut a script or call it safe keep
+// requiring a clean parse.
+func raiseReadable(script *psparse.Script) bool {
+	return script != nil && script.OnlyLexicalDiagnostics()
 }
 
 // unwrapPowerShellOnce replaces the static host wrappers among the top-level
 // statements of a PowerShell source. A source that is one wrapper statement is
 // replaced whole (and may change grammar to cmd.exe's); wrappers among other
 // statements are replaced in place when their script is one simple line.
-func unwrapPowerShellOnce(source string) (string, Dialect, bool, bounded.CapSet) {
+// blanked is a replaced script that is a blank-decoded -EncodedCommand body
+// (psparse.NestedScript.BlankDecoded).
+func unwrapPowerShellOnce(source string) (string, Dialect, bool, bounded.CapSet, bool) {
 	var caps bounded.CapSet
 	script, _ := psparse.Parse(source, psparse.Options{Dialect: psparse.DialectUnknown})
-	if script == nil || len(script.Diagnostics) != 0 || len(script.Statements) == 0 {
-		return "", DialectNone, false, psparseBoundCaps(script)
+	if !raiseReadable(script) || len(script.Statements) == 0 {
+		return "", DialectNone, false, psparseBoundCaps(script), false
 	}
 	type edit struct {
 		start, end int
@@ -189,8 +220,9 @@ func unwrapPowerShellOnce(source string) (string, Dialect, bool, bounded.CapSet)
 	var edits []edit
 	whole := len(script.Statements) == 1
 	var wholeDialect Dialect
+	blanked := false
 	for _, statement := range script.Statements {
-		body, dialect, start, end, moves, ok := powerShellStatementWrapper(source, script, statement, whole)
+		body, dialect, start, end, moves, ok, bodyBlanked := powerShellStatementWrapper(source, script, statement, whole)
 		if !ok || moves && !whole {
 			// A launcher that starts its script in another folder is read
 			// in place only as the whole call: its Set-Location would move
@@ -209,18 +241,19 @@ func unwrapPowerShellOnce(source string) (string, Dialect, bool, bounded.CapSet)
 		}
 		edits = append(edits, edit{start: start, end: end, body: body})
 		wholeDialect = dialect
+		blanked = blanked || bodyBlanked
 	}
 	if len(edits) == 0 {
-		return "", DialectNone, false, caps
+		return "", DialectNone, false, caps, false
 	}
 	if whole {
-		return edits[0].body, wholeDialect, true, caps
+		return edits[0].body, wholeDialect, true, caps, blanked
 	}
 	next := source
 	for i := len(edits) - 1; i >= 0; i-- {
 		next = next[:edits[i].start] + edits[i].body + next[edits[i].end:]
 	}
-	return next, DialectPowerShell, true, caps
+	return next, DialectPowerShell, true, caps, blanked
 }
 
 // simpleHostBody reports a script that can stand between other statements of
@@ -237,13 +270,14 @@ func simpleHostBody(body string) bool {
 // powerShellStatementWrapper recognizes one top-level statement that only runs
 // a static nested script and returns that script, its grammar and the source
 // range of the statement; moves is a script that starts with the launcher's
-// move to its working directory.
+// move to its working directory; blanked is a blank-decoded -EncodedCommand
+// body (psparse.NestedScript.BlankDecoded).
 func powerShellStatementWrapper(
 	source string,
 	script *psparse.Script,
 	statement psparse.Statement,
 	whole bool,
-) (body string, dialect Dialect, start, end int, moves, ok bool) {
+) (body string, dialect Dialect, start, end int, moves, ok, blanked bool) {
 	pipeline, isPipeline := statement.(*psparse.Pipeline)
 	if !isPipeline || pipeline.ChainRHS != nil || pipeline.ChainOp != "" ||
 		pipeline.Background || len(pipeline.Redirs) != 0 || len(pipeline.Elements) != 1 {
@@ -265,7 +299,7 @@ func powerShellStatementWrapper(
 			return
 		}
 		body = source[blockStart+1 : blockEnd-1]
-		return body, DialectPowerShell, start, end, false, true
+		return body, DialectPowerShell, start, end, false, true, false
 	}
 	name, named := psparse.LiteralString(command.Name)
 	if !named {
@@ -326,7 +360,7 @@ func powerShellStatementWrapper(
 	default:
 		return
 	}
-	return found.Text, dialect, start, end, moves, true
+	return found.Text, dialect, start, end, moves, true, found.BlankDecoded
 }
 
 // launcherWorkingDirectory is the move a powershell or pwsh launcher call makes
@@ -446,16 +480,22 @@ func cmdJoinPayload(words []string) (string, bool) {
 // launcherWordsArePlain reports a launcher call whose words are switches and
 // string words only. A colon-glued switch value, a number literal or any other
 // expression is not reproduced as the native argv the launcher receives, so such
-// a call is not unwrapped.
+// a call is not unwrapped. One variable is: the value of -WorkingDirectory
+// ($env:X, psparse.FolderValueWord), which the caller's shell expands to the
+// one folder word the launcher receives. The reading moves to it as written
+// (launcherWorkingDirectory: Set-Location -LiteralPath $env:X), a folder the
+// gateway cannot know, so the script's relative paths keep the hook folder's
+// reading and are marked as in an unresolved folder; that launcher had no
+// reading at all before (rel-1-0-10:GAP-1556).
 func launcherWordsArePlain(command *psparse.Command) bool {
-	for _, element := range command.Elements {
+	for index, element := range command.Elements {
 		switch typed := element.(type) {
 		case *psparse.Parameter:
 			if typed.HasColon || typed.Colon != nil {
 				return false
 			}
 		case *psparse.Arg:
-			if _, isString := typed.Value.(*psparse.StringLit); !isString {
+			if _, isString := typed.Value.(*psparse.StringLit); !isString && !launcherWorkingDirectoryVariable(command, index) {
 				return false
 			}
 		case *psparse.StringLit:
@@ -464,6 +504,21 @@ func launcherWordsArePlain(command *psparse.Command) bool {
 		}
 	}
 	return true
+}
+
+// launcherWorkingDirectoryVariable reports a launcher word that is a variable
+// a folder word may be ($env:X, $HOME: psparse.FolderValueWord) given as the
+// value of a -WorkingDirectory switch (-wd or an abbreviation) right before it.
+func launcherWorkingDirectoryVariable(command *psparse.Command, index int) bool {
+	if index == 0 {
+		return false
+	}
+	switchWord, isParameter := command.Elements[index-1].(*psparse.Parameter)
+	if !isParameter || !workingDirectoryWord("-"+switchWord.Name) {
+		return false
+	}
+	variable, isVariable := command.Elements[index].(*psparse.Arg).Value.(*psparse.Variable)
+	return isVariable && psparse.FolderValueWord(variable)
 }
 
 // launcherNestedScripts is psparse.ExtractNestedScripts of script, with the
@@ -505,18 +560,19 @@ func commandHasEmptyWord(command *psparse.Command) bool {
 	return false
 }
 
-// unwrapCMDOnce unwraps a cmd.exe source that is one host launcher call.
-func unwrapCMDOnce(source string) (string, Dialect, bool) {
+// unwrapCMDOnce unwraps a cmd.exe source that is one host launcher call. The
+// last result is a blank-decoded -EncodedCommand body (hostScript).
+func unwrapCMDOnce(source string) (string, Dialect, bool, bool) {
 	argv, ok := soleCMDHostCall(source)
 	if !ok {
-		return "", DialectNone, false
+		return "", DialectNone, false, false
 	}
 	program := commandProgramForDialect(argv[0], DialectCMD)
 	script, ok := hostFromArgv(program, argv)
 	if !ok {
-		return "", DialectNone, false
+		return "", DialectNone, false, false
 	}
-	return script.body, script.dialect, true
+	return script.body, script.dialect, true, script.floorRaiseOnly
 }
 
 // soleCMDHostCall returns the argv of a cmd.exe source that is exactly one
@@ -609,8 +665,8 @@ func hostFromArgv(program string, argv []string) (hostScript, bool) {
 	}
 	switch program {
 	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
-		body, dialect, ok := powerShellHostBody(argv)
-		return hostScript{body: body, dialect: dialect}, ok
+		body, dialect, ok, blanked := powerShellHostBody(argv)
+		return hostScript{body: body, dialect: dialect, floorRaiseOnly: blanked}, ok
 	case "cmd", "cmd.exe":
 		body, dialect, ok := cmdHostBody(argv)
 		return hostScript{body: body, dialect: dialect}, ok
@@ -618,28 +674,32 @@ func hostFromArgv(program string, argv []string) (hostScript, bool) {
 	return hostScript{}, false
 }
 
-// hostScript is the script a launcher argv runs.
+// hostScript is the script a launcher argv runs. floorRaiseOnly: it is a
+// blank-decoded -EncodedCommand body (psparse.NestedScript.BlankDecoded;
+// Input.FloorRaiseOnly).
 type hostScript struct {
-	body    string
-	dialect Dialect
+	body           string
+	dialect        Dialect
+	floorRaiseOnly bool
 }
 
 // powerShellHostBody asks psparse what a powershell/pwsh argv runs. The argv
 // is spelled as one call of single-quoted literals, so the verdict is the host
 // command-line rules of psparse (parameter abbreviations, -Command joins,
 // -EncodedCommand decoding, stdin and stop-parse reads, legacy quoting) and
-// nothing else.
-func powerShellHostBody(argv []string) (string, Dialect, bool) {
+// nothing else. The last result is a blank-decoded -EncodedCommand body
+// (psparse.NestedScript.BlankDecoded).
+func powerShellHostBody(argv []string) (string, Dialect, bool, bool) {
 	for _, word := range argv {
 		if word == "" {
 			// An empty argument is passed differently across PowerShell
 			// versions, so the script it belongs to stays opaque.
-			return "", DialectNone, false
+			return "", DialectNone, false, false
 		}
 	}
 	location, readable := argvWorkingDirectory(argv)
 	if !readable {
-		return "", DialectNone, false
+		return "", DialectNone, false, false
 	}
 	// The call is rendered by the one PowerShell renderer (the launcher as a
 	// literal behind the call operator, then each word as an inert literal),
@@ -652,7 +712,7 @@ func powerShellHostBody(argv []string) (string, Dialect, bool) {
 	}
 	script, _ := psparse.Parse(builder.String(), psparse.Options{Dialect: psparse.DialectUnknown})
 	if script == nil || len(script.Diagnostics) != 0 {
-		return "", DialectNone, false
+		return "", DialectNone, false, false
 	}
 	var found *psparse.NestedScript
 	nested := launcherNestedScripts(script)
@@ -662,14 +722,14 @@ func powerShellHostBody(argv []string) (string, Dialect, bool) {
 			continue
 		}
 		if found != nil {
-			return "", DialectNone, false
+			return "", DialectNone, false, false
 		}
 		found = &nested[i]
 	}
 	if found == nil || !found.Static || strings.TrimSpace(found.Text) == "" {
-		return "", DialectNone, false
+		return "", DialectNone, false, false
 	}
-	return location + found.Text, DialectPowerShell, true
+	return location + found.Text, DialectPowerShell, true, found.BlankDecoded
 }
 
 // argvWorkingDirectory is launcherWorkingDirectory for a launcher argv: the
@@ -769,19 +829,20 @@ func soleHostCall(out *parseOutput) (hostScript, bool) {
 }
 
 // posixSoleHostCallSource is the script text of a POSIX source that is one
-// static launcher call.
-func posixSoleHostCallSource(source string) (string, Dialect, bool) {
+// static launcher call; blanked is a blank-decoded -EncodedCommand body
+// (hostScript).
+func posixSoleHostCallSource(source string) (body string, dialect Dialect, ok, blanked bool) {
 	lower := strings.ToLower(source)
 	if !strings.Contains(lower, "powershell") && !strings.Contains(lower, "pwsh") &&
 		!strings.Contains(lower, "cmd") {
-		return "", DialectNone, false
+		return "", DialectNone, false, false
 	}
 	out := parsePOSIX(source, 1, 0)
 	script, ok := soleHostCall(&out)
 	if !ok {
-		return "", DialectNone, false
+		return "", DialectNone, false, false
 	}
-	return script.body, script.dialect, true
+	return script.body, script.dialect, true, script.floorRaiseOnly
 }
 
 // powerShellVerbNoun is a cmdlet name in the approved-verb form
@@ -1228,6 +1289,9 @@ func HostScriptReadings(input Input, facts Facts, depth int, listed bool) HostSc
 	}
 	var dialect Dialect
 	layers := 0 // launchers already resolved from the argv or the POSIX call
+	// blanked: a launcher resolved here runs a blank-decoded -EncodedCommand
+	// body (Input.FloorRaiseOnly).
+	blanked := false
 	switch {
 	case len(input.Argv) != 0:
 		program := commandProgramForDialect(input.Argv[0], DialectPowerShell)
@@ -1235,7 +1299,7 @@ func HostScriptReadings(input Input, facts Facts, depth int, listed bool) HostSc
 		if !ok {
 			return reading
 		}
-		source, dialect, layers = script.body, script.dialect, 1
+		source, dialect, layers, blanked = script.body, script.dialect, 1, script.floorRaiseOnly
 	case source == "" || len(source) > maxCommandBytes:
 		return reading
 	default:
@@ -1243,13 +1307,13 @@ func HostScriptReadings(input Input, facts Facts, depth int, listed bool) HostSc
 		if dialect == DialectPOSIX || dialect == DialectNone || dialect == DialectMixed {
 			body, bodyDialect, ok := rawCMDLauncherLine(source)
 			if !ok {
-				body, bodyDialect, ok = posixSoleHostCallSource(source)
+				body, bodyDialect, ok, blanked = posixSoleHostCallSource(source)
 			}
 			if !ok {
 				// The home the shell expands in the launcher's words
 				// (pwsh -Command "... $HOME/f ..."), spelled out.
 				if homed, spelled := posixLauncherHomeSource(source, input.ActiveHome); spelled {
-					body, bodyDialect, ok = posixSoleHostCallSource(homed)
+					body, bodyDialect, ok, blanked = posixSoleHostCallSource(homed)
 				}
 			}
 			if !ok {
@@ -1295,6 +1359,7 @@ func HostScriptReadings(input Input, facts Facts, depth int, listed bool) HostSc
 			twin.Command = withoutUnreachableStatements(unwrapped.source)
 		}
 		twin.DialectHint = unwrapped.dialect
+		twin.FloorRaiseOnly = twin.FloorRaiseOnly || blanked || unwrapped.floorRaiseOnly
 		// The twin is the script a launcher runs.
 		twin.PowerShellLauncherBody = true
 		reading.Twins = append(reading.Twins, twin)
@@ -1347,6 +1412,7 @@ func HostScriptReadings(input Input, facts Facts, depth int, listed bool) HostSc
 		twin.Args, twin.Argv = nil, nil
 		twin.Command = item.text
 		twin.DialectHint = item.dialect
+		twin.FloorRaiseOnly = twin.FloorRaiseOnly || item.floorRaiseOnly
 		reading.Twins = append(reading.Twins, twin)
 		reading.Listed = append(reading.Listed, false)
 	}
@@ -1490,52 +1556,99 @@ func startProcessCommandLine(host string, line *psparse.StringLit) (string, bool
 	return commandLineBody(body), true
 }
 
-// commandLineBody is the script of a -Command body of a child command line:
-// one double-quoted word is read with its quotes taken off
-// (commandLineQuotedWord), any other body as written.
+// commandLineBody is the script of a -Command body of a child command line.
+// A body that starts with a double quote is, as written, a string expression
+// that runs nothing; the child host splits its command line into words with
+// the CommandLineToArgvW rules (commandLineWords) and joins the words after
+// -Command with blanks, so that body is read as the join: -Command "a b" is
+// a b (rel-1-0-10:GAP-1655), and so are -Command "a" "b", "a" ; "b" and
+// "a""b" (a"b), which were read as written (rel-1-0-10:GAP-1660). A body
+// whose first word is not quoted is read as written (rel-1-0-10:GAP-1638),
+// and so is one whose words are all empty.
 func commandLineBody(body string) string {
-	if inner, quoted := commandLineQuotedWord(body); quoted && strings.TrimSpace(inner) != "" {
-		return inner
+	if !strings.HasPrefix(body, `"`) {
+		return body
 	}
-	return body
+	joined := strings.Join(commandLineWords(body), " ")
+	if strings.TrimSpace(joined) == "" {
+		return body
+	}
+	return joined
 }
 
-// commandLineQuotedWord is the word a child process gets for text when text
-// is one double-quoted word of its command line (CommandLineToArgvW): the
-// quotes at both ends are taken off, 2n backslashes before a quote give n,
-// and 2n+1 backslashes before a quote give n and a literal quote. Text with
-// any other quote that is not escaped (two quoted spans, "" inside) is not
-// one word, so it has no such reading.
-func commandLineQuotedWord(text string) (string, bool) {
-	if len(text) < 2 || text[0] != '"' || text[len(text)-1] != '"' {
-		return "", false
-	}
+// commandLineWords splits a Windows command line into the words a child
+// process gets, with the CommandLineToArgvW rules: blanks (space, tab) end a
+// word outside quotes; 2n backslashes before a double quote give n and the
+// quote opens or closes a quoted part, 2n+1 give n and a literal quote;
+// backslashes elsewhere are literal; within quotes a run of three quotes
+// gives one literal quote and leaves the quoted part (so "a""b" is a"b); an
+// open quoted part runs to the end of the line.
+func commandLineWords(text string) []string {
+	var words []string
 	var word strings.Builder
-	backslashes := 0
-	for i := 1; i < len(text); i++ {
-		switch text[i] {
-		case '\\':
-			backslashes++
-			continue
-		case '"':
-			word.WriteString(strings.Repeat(`\`, backslashes/2))
-			if backslashes%2 == 0 {
-				// The closing quote: it must end the text.
-				return word.String(), i == len(text)-1
+	inWord, quotes, backslashes := false, 0, 0
+	for i := 0; i < len(text); {
+		c := text[i]
+		switch {
+		case (c == ' ' || c == '\t') && quotes == 0:
+			if inWord {
+				words = append(words, word.String())
+				word.Reset()
+				inWord = false
 			}
-			word.WriteByte('"')
+			backslashes = 0
+			i++
+		case c == '\\':
+			word.WriteByte(c)
+			backslashes++
+			inWord = true
+			i++
+		case c == '"':
+			inWord = true
+			kept := word.String()
+			kept = kept[:len(kept)-backslashes/2]
+			word.Reset()
+			word.WriteString(kept)
+			if backslashes%2 == 1 {
+				// The last backslash escapes the quote.
+				kept = word.String()
+				word.Reset()
+				word.WriteString(kept[:len(kept)-1])
+				word.WriteByte('"')
+			} else {
+				quotes++
+			}
+			backslashes = 0
+			i++
+			for i < len(text) && text[i] == '"' {
+				if quotes++; quotes == 3 {
+					word.WriteByte('"')
+					quotes = 0
+				}
+				i++
+			}
+			if quotes == 2 {
+				quotes = 0
+			}
 		default:
-			word.WriteString(strings.Repeat(`\`, backslashes))
-			word.WriteByte(text[i])
+			word.WriteByte(c)
+			backslashes = 0
+			inWord = true
+			i++
 		}
-		backslashes = 0
 	}
-	return "", false
+	if inWord {
+		words = append(words, word.String())
+	}
+	return words
 }
 
 type nestedText struct {
 	text    string
 	dialect Dialect
+	// floorRaiseOnly: a blank-decoded -EncodedCommand body
+	// (psparse.NestedScript.BlankDecoded; Input.FloorRaiseOnly).
+	floorRaiseOnly bool
 }
 
 // powerShellNestedTexts is every static script embedded anywhere in a
@@ -1552,7 +1665,12 @@ func powerShellNestedTexts(source string) ([]nestedText, bounded.CapSet) {
 		return nil, caps
 	}
 	script, _ := psparse.Parse(source, psparse.Options{Dialect: psparse.DialectUnknown})
-	if script == nil || len(script.Diagnostics) != 0 {
+	if !raiseReadable(script) {
+		if script != nil && onlyStopParsingDiagnostics(script) {
+			// A --% remainder is the one part psparse leaves unread: the
+			// argv it hands the program is read all the same.
+			return powerShellChildArgvTexts(script, nil, caps)
+		}
 		return nil, psparseBoundCaps(script)
 	}
 	var out []nestedText
@@ -1601,9 +1719,9 @@ func powerShellNestedTexts(source string) ([]nestedText, bounded.CapSet) {
 		if nested.Dialect == "cmd" {
 			dialect = DialectCMD
 		}
-		out = append(out, nestedText{text: strings.TrimSpace(nested.Text), dialect: dialect})
+		out = append(out, nestedText{text: strings.TrimSpace(nested.Text), dialect: dialect, floorRaiseOnly: nested.BlankDecoded})
 	}
-	return out, caps
+	return powerShellChildArgvTexts(script, out, caps)
 }
 
 // powerShellInertCommands are commands that change nothing a later statement
@@ -1644,7 +1762,7 @@ func powerShellStatementTexts(source string) ([]string, bounded.CapSet) {
 		return nil, caps
 	}
 	script, _ := psparse.Parse(source, psparse.Options{Dialect: psparse.DialectUnknown})
-	if script == nil || len(script.Diagnostics) != 0 || len(script.Statements) < 2 {
+	if !raiseReadable(script) || len(script.Statements) < 2 {
 		return nil, psparseBoundCaps(script)
 	}
 	statements := script.Statements

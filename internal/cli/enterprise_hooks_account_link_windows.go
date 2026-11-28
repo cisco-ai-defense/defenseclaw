@@ -14,3 +14,7 @@ func enterpriseHookAccountOwnedDataDirLinkPlatform(home, sid string) bool {
 func enterpriseHookForeignDataDirLinkPlatform(home, sid string) bool {
 	return enterprisehooks.WindowsForeignOwnedDataDirLink(home, sid)
 }
+
+func enterpriseHookPerUserInstallFolderPlatform(home, sid string) bool {
+	return enterprisehooks.WindowsPerUserInstallDataDir(home, sid) != ""
+}

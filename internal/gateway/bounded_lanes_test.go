@@ -91,6 +91,10 @@ type boundedLaneCap struct {
 	// fixed in this tree; "<tier>/judge" is one of the judge row
 	// (TestBoundRuleJudgeStillDecides). The lane's fix deletes the entry.
 	open map[string]string
+	// decisive maps "<tier>/judge" to the reason the 1.0.10 verdict of the
+	// judge row is a decisive block there: the call must block without the
+	// judge (TestBoundRuleJudgeStillDecides), never fall to the floor.
+	decisive map[string]string
 }
 
 // boundedJudgeOpenShape is the shape name of an OPEN entry for the judge row.
@@ -316,10 +320,26 @@ func boundedParse(action string) bounded.Action {
 	return a
 }
 
-// boundedLaneEnv is the POSIX home the shell lanes run in.
+// boundedLaneEnv is the POSIX home the shell lanes run in. It skips on
+// Windows for the callers not yet proven there; a test whose rows hold on a
+// Windows gateway takes boundedLaneEnvAnyOS.
 func boundedLaneEnv(t *testing.T) boundedEnv {
 	t.Helper()
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX home fixture requires an unprivileged Unix user; these rows are not yet proven on a Windows gateway (see boundedLaneEnvAnyOS)")
+	}
+	return boundedLaneEnvAnyOS(t)
+}
+
+// boundedLaneEnvAnyOS is the home of boundedLaneEnv on every host: a temp
+// homes/alice with a project folder and the DefenseClaw state file, HOME and
+// USERPROFILE set to it (the home Git Bash and the gateway read on Windows).
+// The POSIX-form commands of the lanes name it through ~ and relative paths,
+// so the same rows run on a Windows gateway (rel-1-0-10:GAP-1523). Root is
+// skipped on Unix, where it reads every file; os.Geteuid is -1 on Windows.
+func boundedLaneEnvAnyOS(t *testing.T) boundedEnv {
+	t.Helper()
+	if os.Geteuid() == 0 {
 		t.Skip("POSIX home fixture requires an unprivileged Unix user")
 	}
 	homes := filepath.Join(t.TempDir(), "homes")
@@ -700,6 +720,13 @@ func TestBoundRuleJudgeStillDecides(t *testing.T) {
 			action, findings := judge(t, api, env, call)
 			got := boundedParse(action)
 			name := tier.name + "/" + lane.lane
+			if reason := lane.decisive[tier.name+"/"+boundedJudgeOpenShape]; reason != "" {
+				if got != bounded.Block || boundedJudgeCalls(mock) != asked {
+					t.Errorf("%s: %s is %s (judge asked %v), want the decisive 1.0.10 block (%s); findings=%v",
+						name, lane.lane, got, boundedJudgeCalls(mock) != asked, reason, findings)
+				}
+				continue
+			}
 			var violations []string
 			// Where the floor alerts the judge must be asked (this also proves
 			// the stub is wired); where it blocks the call is decisive.

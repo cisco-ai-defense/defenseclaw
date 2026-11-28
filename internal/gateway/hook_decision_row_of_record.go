@@ -18,7 +18,7 @@ import (
 // exported unchanged but not written locally (#1384, bar H1, DESIGN 11).
 // That is a benign allow of a per-user gateway: action and raw action allow,
 // not would-block, not enforced, no panic, no bounded-prefix review, a live
-// call (not a journal recovery, a pending occurrence or a sandbox receipt),
+// call (not a journal recovery, a journaled occurrence or a sandbox receipt),
 // not a sandbox relay, not Cowork, not managed or Secure Client, with a
 // correlation event the local readers pair the rows by, inside an open call
 // write batch. Every other call keeps the connector-hook row of 1.0.9, which
@@ -34,7 +34,14 @@ func (a *APIServer) hookDecisionIsRowOfRecord(
 	if a == nil || a.store == nil || a.logger == nil || panicked || env.Result != "ok" {
 		return false
 	}
-	if req.pendingRecovery || req.pendingOccurrenceID != "" || req.sandboxReceiptAcknowledgment ||
+	// A receipt-capable delivery (the Claude Code native hook's PreToolUse)
+	// gets occurrence IDs on every gateway, but a per-user gateway journals
+	// none of them (journalHookDelivery): nothing recovers such an
+	// occurrence, so it is a live call like any other. Testing the IDs kept
+	// a connector-hook row for every benign Claude Code tool call
+	// (rel-1-0-10:GAP-1172); only a journaled occurrence, which recovery
+	// finds by its row IDs, keeps it.
+	if req.pendingRecovery || req.pendingJournaled || req.sandboxReceiptAcknowledgment ||
 		req.CorrelationUnavailable || strings.TrimSpace(req.SemanticEventID) == "" {
 		return false
 	}

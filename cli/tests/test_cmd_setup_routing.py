@@ -9,11 +9,15 @@ from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
+from defenseclaw.commands import cmd_setup
 from defenseclaw.commands.cmd_setup import setup
 
 from tests.helpers import cleanup_app, make_app_context
 
 pytestmark = pytest.mark.supported_connector_host
+
+# The fixture below patches the host check; the native Windows rows use the real one.
+_REAL_UNSUPPORTED = cmd_setup._routing_unsupported_on_host
 
 
 @pytest.fixture
@@ -165,10 +169,10 @@ def test_routing_on_native_windows_says_unsupported_and_refuses_enable(routing_a
         status = CliRunner().invoke(setup, ["routing", "--status"], obj=app)
         enable = CliRunner().invoke(setup, ["routing", "--enable"], obj=app)
     assert status.exit_code == 0, status.output
-    assert "Semantic routing is not supported on native Windows" in status.output
+    assert "The vllm_sr classifier is not available on native Windows" in status.output
     assert "Enable with" not in status.output
     assert enable.exit_code != 0
-    assert "Semantic routing is not supported on native Windows" in enable.output
+    assert "The vllm_sr classifier is not available on native Windows" in enable.output
     assert saved == []
     assert app.cfg.routing.enabled is False
 
@@ -186,3 +190,38 @@ def test_routing_disable_still_works_on_native_windows(routing_app) -> None:
     assert result.exit_code == 0, result.output
     assert app.cfg.routing.enabled is False
     assert saved == [True]
+
+
+@pytest.mark.parametrize("classifier", ["rules", "systemone"])
+def test_routing_enable_works_on_native_windows_for_an_in_gateway_classifier(routing_app, classifier) -> None:
+    # rel-1-0-10 GAP-1724: only vllm_sr needs the router container; the text
+    # that said routing is for OpenClaw and ZeptoClaw proxy traffic was stale,
+    # and --enable refused every classifier.
+    app, saved = routing_app
+    app.cfg.routing.classifier = classifier
+    app.cfg.routing.models = [_local_model()]
+    with (
+        patch("defenseclaw.commands.cmd_setup._routing_unsupported_on_host", wraps=_REAL_UNSUPPORTED),
+        patch("defenseclaw.commands.cmd_setup._native_windows", return_value=True),
+        patch("defenseclaw.commands.cmd_setup._log_setup_action"),
+    ):
+        result = CliRunner().invoke(setup, ["routing", "--enable"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert "OpenClaw" not in result.output and "ZeptoClaw" not in result.output
+    assert saved == [True]
+    assert app.cfg.routing.enabled is True
+
+
+def test_routing_enable_names_what_native_windows_cannot_run(routing_app) -> None:
+    app, saved = routing_app
+    app.cfg.routing.classifier = "vllm_sr"
+    app.cfg.routing.models = [_local_model()]
+    with (
+        patch("defenseclaw.commands.cmd_setup._routing_unsupported_on_host", wraps=_REAL_UNSUPPORTED),
+        patch("defenseclaw.commands.cmd_setup._native_windows", return_value=True),
+    ):
+        result = CliRunner().invoke(setup, ["routing", "--enable"], obj=app)
+    assert result.exit_code != 0
+    assert "vllm_sr" in result.output and "defenseclaw routing setup --classifier rules" in result.output
+    assert "OpenClaw" not in result.output and "ZeptoClaw" not in result.output
+    assert saved == [] and app.cfg.routing.enabled is False

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -32,7 +33,7 @@ const chartKubeVersion = "1.34.0"
 
 // chartCases are the golden renders: values files under
 // deploy/helm/defenseclaw-substrate/tests/values (empty for the defaults).
-var chartCases = []string{"default", "launcher", "minimal", "full", "expose-lb", "expose-ingress", "bundles", "managed", "actor-secrets", "kube-signin", "ask-keys", "managed-bundles", "person-secrets", "oidc-private", "private-registry", "actor-keys"}
+var chartCases = []string{"default", "launcher", "minimal", "full", "expose-lb", "expose-ingress", "bundles", "managed", "actor-secrets", "kube-signin", "ask-keys", "managed-bundles", "person-secrets", "oidc-private", "private-registry", "actor-keys", "bundles-oci", "bundles-oci-ca", "substrate-sync"}
 
 // helmPinnedVersion is the helm release the goldens are rendered with and
 // that the CI job substrate-chart installs (keep it equal to HELM_VERSION in
@@ -40,31 +41,63 @@ var chartCases = []string{"default", "launcher", "minimal", "full", "expose-lb",
 // different YAML, so a golden compare under them is not a test of the chart.
 const helmPinnedVersion = "v3.17.3"
 
-func helmBinary(t *testing.T) string {
-	t.Helper()
-	required := os.Getenv("DEFENSECLAW_HELM_REQUIRED") != ""
-	h := os.Getenv("DEFENSECLAW_HELM")
+// helmVerdict is what the chart tests do with the helm they found: use it
+// (path), fail the test (fail) or skip it (skip). Exactly one is set.
+type helmVerdict struct{ path, fail, skip string }
+
+// helmRequiredMessage is the sentence every helm failure or skip ends with, so
+// a gate log shows how to make a missing helm fail (GAP-0882: a gate on a box
+// without helm ran the chart tests as skips and looked green).
+const helmRequiredMessage = "the chart tests did NOT run; set DEFENSECLAW_HELM_REQUIRED=1 in every gate run so a missing or unpinned helm fails them instead"
+
+// resolveHelm decides from the environment. required is
+// DEFENSECLAW_HELM_REQUIRED=1 (any other value, "0" included, is not
+// required, as the env-var registry says); explicit is DEFENSECLAW_HELM.
+func resolveHelm(required bool, explicit string, lookPath func(string) (string, error), version func(string) (string, error)) helmVerdict {
+	h := explicit
 	if h == "" {
 		var err error
-		if h, err = exec.LookPath("helm"); err != nil {
+		if h, err = lookPath("helm"); err != nil {
 			// The CI job substrate-chart installs the pinned helm and sets
 			// DEFENSECLAW_HELM_REQUIRED; the general Go shards skip.
 			if required {
-				t.Fatal("helm is not installed; the chart goldens need it here")
+				return helmVerdict{fail: "helm is not installed; the chart goldens need it here"}
 			}
-			t.Skip("helm is not installed (set DEFENSECLAW_HELM)")
+			return helmVerdict{skip: "helm is not installed (set DEFENSECLAW_HELM): " + helmRequiredMessage}
 		}
 	}
 	// The hosted runners ship their own helm, which is not the pinned one:
 	// only the job that installs the pinned release compares the goldens.
-	out, err := exec.Command(h, "version", "--template", "{{.Version}}").Output()
-	if got := strings.TrimSpace(string(out)); err != nil || got != helmPinnedVersion {
+	out, err := version(h)
+	if got := strings.TrimSpace(out); err != nil || got != helmPinnedVersion {
 		if required {
-			t.Fatalf("helm %q is not the pinned %s the goldens are rendered with (%v)", got, helmPinnedVersion, err)
+			return helmVerdict{fail: fmt.Sprintf("helm %q is not the pinned %s the goldens are rendered with (%v)", got, helmPinnedVersion, err)}
 		}
-		t.Skipf("helm %q is not the pinned %s (set DEFENSECLAW_HELM)", got, helmPinnedVersion)
+		return helmVerdict{skip: fmt.Sprintf("helm %q is not the pinned %s (set DEFENSECLAW_HELM): %s", got, helmPinnedVersion, helmRequiredMessage)}
 	}
-	return h
+	return helmVerdict{path: h}
+}
+
+// helmRequiredFromEnv is DEFENSECLAW_HELM_REQUIRED=1.
+func helmRequiredFromEnv() bool { return os.Getenv("DEFENSECLAW_HELM_REQUIRED") == "1" }
+
+func helmBinary(t *testing.T) string {
+	t.Helper()
+	verdict := resolveHelm(helmRequiredFromEnv(), os.Getenv("DEFENSECLAW_HELM"), exec.LookPath,
+		func(h string) (string, error) {
+			out, err := exec.Command(h, "version", "--template", "{{.Version}}").Output()
+			return string(out), err
+		})
+	switch {
+	case verdict.fail != "":
+		t.Fatal(verdict.fail)
+	case verdict.skip != "":
+		// Also on stderr, so a gate that keeps only failures and warnings
+		// still shows that the chart tests were skipped.
+		fmt.Fprintf(os.Stderr, "WARNING: %s: %s\n", t.Name(), verdict.skip)
+		t.Skip(verdict.skip)
+	}
+	return verdict.path
 }
 
 func renderChart(t *testing.T, helm, values string, extra ...string) []byte {
@@ -99,6 +132,7 @@ func TestChartRefusesBadValues(t *testing.T) {
 	helm := helmBinary(t)
 	for name, set := range map[string]string{
 		"hpa below 2":               "gateway.hpa.minReplicas=1",
+		"budget store on cluster":   "config.routing.admin.budget_store.url=x", // the leader counts budgets; a pod store file is lost on restart
 		"short digest":              "image.digest=sha256:abc",
 		"empty relay secret":        "gateway.relaySessionSecret=",   // rendered secretName: "" and a hook Role naming ""
 		"empty llm secret":          "gateway.llmCredentialsSecret=", // rendered secretName: "" on the llm-credentials volume (GAP-0236)
@@ -132,6 +166,17 @@ func TestChartRefusesBadValues(t *testing.T) {
 		"memory home, decimal limit short": memoryHomeExample + ",callout.resources.limits.memory=600M",                         // 572 MiB < 640 MiB
 		"memory home, unreadable limit":    memoryHomeExample + ",leader.resources.limits.memory=lots",
 		"bad namespace label":              "metrics.prometheusRule.enabled=true,metrics.prometheusRule.namespaceLabel=k8s.namespace.name",
+		// substrate-1:GAP-0578 (f): the headroom is never under the chart default
+		// request (controller 128Mi), so a 1Mi request does not make a 520Mi
+		// limit fit a 512Mi tmpfs.
+		"memory home, tiny request": memoryHomeExample + ",controller.resources.requests.memory=1Mi,controller.resources.limits.memory=520Mi",
+		// RV3 P3-5: the self-service namespace is one of its own.
+		"user secrets in kube-system":         "config.substrate.self_service_secrets.namespace=kube-system",
+		"user secrets in default":             "config.substrate.self_service_secrets.namespace=default",
+		"user secrets with the admin secrets": "config.substrate.self_service_secrets.namespace=defenseclaw-actor-secrets",
+		// RV4 F7 (GAP-0782): never an atespace where actors run.
+		"user secrets in a managed atespace":  "managedAtespaces={team-a},config.substrate.self_service_secrets.namespace=team-a",
+		"user secrets in a launcher atespace": "config.substrate.launcher_atespaces.dev={team-b},config.substrate.self_service_secrets.namespace=team-b",
 	} {
 		args := []string{"template", "dc", chartDir, "--kube-version", chartKubeVersion, "--set", set}
 		if err := exec.Command(helm, args...).Run(); err == nil {
@@ -264,6 +309,78 @@ type k8sObject struct {
 	Data       map[string]any `yaml:"data"`
 	RoleRef    map[string]any `yaml:"roleRef"`
 	Subjects   []any          `yaml:"subjects"`
+	Rules      []any          `yaml:"rules"`
+}
+
+// egressReadGrant reports whether a Role or RoleBinding in the Substrate
+// namespace is the chart's one standing grant there (GAP-0505, lead ruling
+// 2026-11-17): get, and nothing else, on the atenet-egress ConfigMap alone,
+// bound to the controller's ServiceAccount alone, so that it sees another
+// callout replace DefenseClaw's. Any other verb, resource, resourceName,
+// rule key or subject is not it.
+func egressReadGrant(o k8sObject) bool {
+	name, _ := o.Metadata["name"].(string)
+	if !strings.HasPrefix(name, "defenseclaw-") || !strings.HasSuffix(name, "-egress-read") {
+		return false
+	}
+	releaseNS := strings.TrimSuffix(strings.TrimPrefix(name, "defenseclaw-"), "-egress-read")
+	if releaseNS == "" {
+		return false
+	}
+	list := func(v any) string { return fmt.Sprint(v) }
+	keys := func(m any) string {
+		mm, _ := m.(map[string]any)
+		ks := make([]string, 0, len(mm))
+		for k := range mm {
+			ks = append(ks, k)
+		}
+		slices.Sort(ks)
+		return strings.Join(ks, ",")
+	}
+	switch o.Kind {
+	case "Role":
+		return len(o.Rules) == 1 && keys(o.Rules[0]) == "apiGroups,resourceNames,resources,verbs" &&
+			list(dig(o.Rules[0], "apiGroups")) == "[]" && list(dig(o.Rules[0], "resources")) == "[configmaps]" &&
+			list(dig(o.Rules[0], "resourceNames")) == "["+EgressConfigMap+"]" && list(dig(o.Rules[0], "verbs")) == "[get]"
+	case "RoleBinding":
+		if o.RoleRef["kind"] != "Role" || o.RoleRef["name"] != name || o.RoleRef["apiGroup"] != "rbac.authorization.k8s.io" {
+			return false
+		}
+		// Exactly the controller's ServiceAccount: no gateway, no other
+		// subject (the gateway reads the controller's result through the
+		// leader).
+		if len(o.Subjects) != 1 {
+			return false
+		}
+		sub := o.Subjects[0]
+		return keys(sub) == "kind,name,namespace" && dig(sub, "kind") == "ServiceAccount" &&
+			dig(sub, "name") == "defenseclaw-controller" && dig(sub, "namespace") == releaseNS
+	}
+	return false
+}
+
+// substrateNamespaceGrantErrors checks the standing (not hook) RBAC of the
+// Substrate namespace (GAP-0080, GAP-0505): exactly one Role and one
+// RoleBinding, and both are the egress read grant. Hook RBAC there is
+// deleted once the hooks succeed (checked apart).
+func substrateNamespaceGrantErrors(objs []k8sObject) []string {
+	var errs []string
+	count := map[string]int{}
+	for _, o := range objs {
+		hook, _ := dig(o.Metadata, "annotations", "helm.sh/hook").(string)
+		if (o.Kind != "Role" && o.Kind != "RoleBinding") || dig(o.Metadata, "namespace") != "ate-system" || hook != "" {
+			continue
+		}
+		count[o.Kind]++
+		if !egressReadGrant(o) {
+			errs = append(errs, fmt.Sprintf("a standing grant in the Substrate namespace: %s %v", o.Kind, o.Metadata["name"]))
+		}
+	}
+	if count["Role"] != 1 || count["RoleBinding"] != 1 {
+		errs = append(errs, fmt.Sprintf("the Substrate namespace needs exactly one Role and one RoleBinding, the controller's get of the "+
+			"atenet-egress ConfigMap (GAP-0505): %d Role, %d RoleBinding", count["Role"], count["RoleBinding"]))
+	}
+	return errs
 }
 
 // authDelegatorGrant reports whether a cluster-scoped RBAC object is the
@@ -504,10 +621,17 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	}
 	// F4 follow-up: the relay session key is created by its own hook (never
 	// rendered), with its own ServiceAccount that may read only that
-	// Secret, and the gateway mounts it.
+	// Secret and (B3.5) the relay CA Secret the same step creates, and the
+	// gateway mounts both, the relay CA as optional (a gateway upgraded
+	// before setup ran again starts without it).
 	if !strings.Contains(string(out), "- relay-session\n") || !strings.Contains(string(out), "serviceAccountName: defenseclaw-relay-key") ||
-		!strings.Contains(string(out), "resourceNames: [\"defenseclaw-relay-session\"]") {
+		!strings.Contains(string(out), "resourceNames: [\"defenseclaw-relay-session\", \"defenseclaw-relay-ca\"]") {
 		t.Errorf("%s: no relay-session hook with its own ServiceAccount", name)
+	}
+	if !strings.Contains(string(out), "mountPath: /var/run/secrets/defenseclaw-relay-ca") ||
+		!strings.Contains(string(out), "secretName: defenseclaw-relay-ca\n    optional: true") &&
+			!strings.Contains(string(out), "secretName: defenseclaw-relay-ca\n          optional: true") {
+		t.Errorf("%s: the gateway does not mount the relay CA Secret, or not as optional", name)
 	}
 	if c, ok := byName["Deployment/defenseclaw-callout"]; ok {
 		raw, _ := yaml.Marshal(c.Spec)
@@ -579,14 +703,14 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	// resources after an uninstall), and each Job's plan parses as the plan
 	// the step reads.
 	var plans []string
+	for _, e := range substrateNamespaceGrantErrors(objs) {
+		t.Errorf("%s: %s", name, e)
+	}
 	for _, o := range objs {
 		hook, _ := dig(o.Metadata, "annotations", "helm.sh/hook").(string)
 		del, _ := dig(o.Metadata, "annotations", "helm.sh/hook-delete-policy").(string)
 		if hook != "" && o.Kind != "Job" && ((o.Kind != "Role" && o.Kind != "RoleBinding" && o.Kind != "ServiceAccount") || !strings.Contains(del, "hook-succeeded")) {
 			t.Errorf("%s: hook resource %s %v outlives the release", name, o.Kind, o.Metadata["name"])
-		}
-		if (o.Kind == "Role" || o.Kind == "RoleBinding") && dig(o.Metadata, "namespace") == "ate-system" && hook == "" {
-			t.Errorf("%s: a standing grant in the Substrate namespace: %s %v", name, o.Kind, o.Metadata["name"])
 		}
 		if o.Kind != "Job" {
 			continue
@@ -639,5 +763,102 @@ func TestGAP0584PolicyAlertsReadEverySeriesUnlessScoped(t *testing.T) {
 		"--set", "metrics.prometheusRule.namespaceLabel=k8s_namespace_name"))
 	if !strings.Contains(scoped, `defenseclaw_substrate_policy_conflicts_total{k8s_namespace_name="defenseclaw-system"}[10m]`) {
 		t.Error("namespaceLabel set: the rules do not select the release's namespace")
+	}
+}
+
+// substrate-1:GAP-0578 (f): validate.yaml floors each pod's process headroom
+// at its chart default requests.memory, copied there by hand; a default that
+// changes without its floor must fail here.
+func TestChartMemoryHomeFloorsAreTheDefaultRequests(t *testing.T) {
+	tmpl, err := os.ReadFile(filepath.Join(chartDir, "templates", "validate.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`\$floors := dict "gateway" (\d+) "leader" (\d+) "controller" (\d+) "callout" (\d+)`).FindStringSubmatch(string(tmpl))
+	if m == nil {
+		t.Fatal("validate.yaml has no $floors dict for gateway, leader, controller and callout")
+	}
+	raw, err := os.ReadFile(filepath.Join(chartDir, "values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var values map[string]any
+	if err := yaml.Unmarshal(raw, &values); err != nil {
+		t.Fatal(err)
+	}
+	for i, pod := range []string{"gateway", "leader", "controller", "callout"} {
+		request, _ := dig(values, pod, "resources", "requests", "memory").(string)
+		mib, ok := strings.CutSuffix(request, "Mi")
+		if !ok {
+			t.Fatalf("%s.resources.requests.memory %q is not in Mi; teach this test the unit", pod, request)
+		}
+		if mib != m[i+1] {
+			t.Errorf("validate.yaml floors %s at %s MiB, but its default request is %s", pod, m[i+1], request)
+		}
+	}
+}
+
+// GAP-0609, GAP-0610: setup.LeftoverHookJobs is the one list of the chart's
+// hook Jobs other than pre-delete. The rendered hook Jobs (launcher renders
+// bootstrap too) and the uninstall Role's resourceNames must be exactly that
+// list, so a new or renamed hook Job cannot drift out of the uninstall.
+func TestChartUninstallRoleDeletesLeftoverHookJobs(t *testing.T) {
+	helm := helmBinary(t)
+	want := strings.Join(LeftoverHookJobs, ", ")
+	jobs := map[string]bool{}
+	for _, values := range []string{"default", "launcher"} {
+		out := string(renderChart(t, helm, values))
+		var role string
+		for _, doc := range strings.Split(out, "\n---") {
+			name := ""
+			if i := strings.Index(doc, "\nmetadata:\n  name: "); i >= 0 {
+				name = strings.TrimSpace(strings.SplitN(doc[i+len("\nmetadata:\n  name: "):], "\n", 2)[0])
+			}
+			switch {
+			// "\nkind: Role\n" at column 0: the RoleBinding's roleRef has
+			// an indented "kind: Role" and the same name.
+			case strings.Contains(doc, "\nkind: Role\n") && name == "defenseclaw-hooks-uninstall":
+				role = doc
+			case strings.Contains(doc, "\nkind: Job\n") && strings.Contains(doc, "helm.sh/hook: ") && name != "defenseclaw-pre-delete":
+				jobs[name] = true
+			}
+		}
+		if role == "" {
+			t.Fatalf("%s: no Role defenseclaw-hooks-uninstall", values)
+		}
+		rule := "- apiGroups: [batch]\n  resources: [jobs]\n  resourceNames: [" + want + "]\n  verbs: [delete]"
+		if !strings.Contains(role, rule) {
+			t.Errorf("%s: the uninstall Role's Job rule is not %q (setup.LeftoverHookJobs):\n%s", values, rule, role)
+		}
+		if strings.Contains(role, "defenseclaw-pre-delete") {
+			t.Errorf("%s: the uninstall Role must not delete its own Job:\n%s", values, role)
+		}
+	}
+	var got []string
+	for n := range jobs {
+		got = append(got, n)
+	}
+	slices.Sort(got)
+	listed := append([]string{}, LeftoverHookJobs...)
+	slices.Sort(listed)
+	if strings.Join(got, ",") != strings.Join(listed, ",") {
+		t.Errorf("the chart's hook Jobs %v are not setup.LeftoverHookJobs %v", got, listed)
+	}
+}
+
+// TestChartDefaultPricingMatchesBundle: the chart's files/default-pricing.json
+// is the reviewed table of bundles/pricing, byte for byte, so the chart never
+// seeds a price the bundle does not hold.
+func TestChartDefaultPricingMatchesBundle(t *testing.T) {
+	want, err := os.ReadFile(filepath.Join("..", "..", "..", "bundles", "pricing", "default-pricing.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(chartDir, "files", "default-pricing.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("deploy/helm/defenseclaw-substrate/files/default-pricing.json differs from bundles/pricing/default-pricing.json: copy it again")
 	}
 }

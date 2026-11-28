@@ -80,8 +80,8 @@ Flags:
   --session-issuer URL            iss of the session tokens the keys verify (default https://<substrate.services.admin>
                                   of --config, the issuer the gateway signs with)
   --session-audience AUD          aud of the session tokens (default: the one the gateway signs)
-  --verify-url URL                ask the gateway to check each session token, instead of --session-key
-                                  An image that starts the relay needs --session-key or --verify-url.
+  --verify-url URL                gateway URL the relay checks each session token with (default
+                                  the relay verify endpoint of <gateway-url>; --session-key keys are checked first)
 ` + templateCommonFlags + `
 Exit code: 0 built, 1 blocked, 2 usage error.`
 

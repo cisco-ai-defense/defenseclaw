@@ -108,7 +108,8 @@ Leader failover moves the lease and reattaches the volume (about 30 seconds). St
 | Failure | Behaviour |
 |---|---|
 | One gateway replica down | Nothing visible |
-| Leader down | Stateless checks continue; stateful steps follow the fail mode until the new leader is up; egress that can carry data out (a body, or any method but GET and HEAD) is refused in every mode while the chain can't be checked, and for 15 s after a new leader answers its first check (GAP-0601) |
+| Leader down | Stateless checks continue; stateful steps follow the fail mode until the new leader is up; egress that can carry data out (a body, or any method but GET and HEAD) is refused in every mode while the chain can't be checked, and for 15 s after a new leader answers its first check, at most 30 s after it became the leader (GAP-0601) |
+| Leader down, any per-actor call (`defenseclaw substrate list`, `status`, approvals, asks, recover, secrets, delete) | The call reads the registration through the leader. It retries for about 8 s, which covers a planned handover; an unplanned leader loss takes about 30 s to fail over (above), so the call answers "try again in a minute" after 8 s instead of waiting for the CLI's 30 s timeout. The same call works again when the new leader answers |
 | All replicas down | Hooks follow D8; model calls fail with a clear message; policies stay |
 | Controller down | Existing actors keep their policy; new actors have no network; idle suspend pauses |
 | Callout down | Closed in managed mode, configurable in open source; `doctor` red |
@@ -158,7 +159,7 @@ A signed gateway image and signed per-connector kit images, digest-pinned, from 
 network policies, the OpenFGA bootstrap Job, hooks for upgrade, rollback and delete, an optional PrometheusRule and a local
 observability stack. `defenseclaw substrate setup` writes the Substrate install overlay and refuses when another callout is registered.
 Upgrades roll under the PDB with the config and store migrated first; a rollback across a store schema change is refused and names the
-backup. Uninstall removes DefenseClaw's egress policies first, so nothing is left open.
+backup and how to clear the pending-rollback revision helm keeps for it. Uninstall removes DefenseClaw's egress policies first, so nothing is left open.
 
 ## Tests
 

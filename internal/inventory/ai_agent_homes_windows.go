@@ -13,19 +13,26 @@ package inventory
 import "golang.org/x/sys/windows/registry"
 
 // platformSavedVariable reads the user's persistent environment
-// (HKU\<sid>\Environment), loaded while the user is signed in.
-func platformSavedVariable(_, sid, name string) string {
+// (HKU\<sid>\Environment), loaded while the user is signed in. It reports
+// false while the user's hive is not loaded (signed out): the value is then
+// not known, which is not the same as not set.
+func platformSavedVariable(_, sid, name string) (string, bool) {
 	if sid == "" {
-		return ""
+		return "", true
 	}
+	hive, err := registry.OpenKey(registry.USERS, sid, registry.QUERY_VALUE)
+	if err != nil {
+		return "", false
+	}
+	_ = hive.Close()
 	key, err := registry.OpenKey(registry.USERS, sid+`\Environment`, registry.QUERY_VALUE)
 	if err != nil {
-		return ""
+		return "", true
 	}
 	defer key.Close()
 	value, _, err := key.GetStringValue(name)
 	if err != nil {
-		return ""
+		return "", true
 	}
-	return value
+	return value, true
 }

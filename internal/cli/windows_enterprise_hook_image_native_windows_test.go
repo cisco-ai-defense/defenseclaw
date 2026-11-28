@@ -195,9 +195,9 @@ func TestWindowsHookImageNativeRenameRefusedWhileAnImageRuns(t *testing.T) {
 
 // MkdirProtected gives bin\hooks and each launch folder bin's protection.
 func TestWindowsHookImageNativeFolderDACL(t *testing.T) {
-	if !windowsEnterpriseIsElevated() {
-		t.Skip("needs an elevated administrator (Windows Native CI runs elevated)")
-	}
+	// The seam windowsEnterpriseIsElevated is pinned for the package, so the
+	// token itself is checked (GAP-2172).
+	requireAdministratorTestToken(t, "protecting the launch folder sets an Administrators-owned DACL")
 	restoreOwner, err := adoptWindowsAdministratorsDefaultOwner()
 	if err != nil {
 		t.Fatal(err)
@@ -361,6 +361,7 @@ func TestWindowsHookImageNativeSelfTestRunsTheBuiltHook(t *testing.T) {
 // never open a folder as a file (review 2 P1-A): no entry of the scan is a
 // folder, and a folder handed to the reader is refused as unsafe, never read.
 func TestWindowsHookImageNativeScanWithAClaudeTarget(t *testing.T) {
+	requireAdministratorTestToken(t, "the fixture creates a folder under Program Files")
 	state := t.TempDir()
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
@@ -642,6 +643,7 @@ func windowsHookImageNativeSetOwner(t *testing.T, path string, owner *windows.SI
 // folder is never followed: an account's is an account entry (skipped), an
 // administrator-owned one is link_at_machine_folder.
 func TestWindowsHookImageNativeVendorFolders(t *testing.T) {
+	requireAdministratorTestToken(t, "the fixture sets an Administrators owner on its folders")
 	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	if err != nil {
 		t.Fatal(err)

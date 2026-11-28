@@ -97,7 +97,7 @@ func TestCloseActorEndsItsAsks(t *testing.T) {
 	a1, _ := s.OpenAsk(ctx, Ask{Atespace: "eng-web", Actor: "a1", UID: "u1", OwnerID: "o", Host: "x.example.org"})
 	_, _ = s.OpenAsk(ctx, Ask{Atespace: "eng-web", Actor: "a1", UID: "u1", OwnerID: "o", Tool: "mcp__t__x"})
 	other, _ := s.OpenAsk(ctx, Ask{Atespace: "eng-web", Actor: "a2", UID: "u2", OwnerID: "o", Host: "y.example.org"})
-	if n := s.CloseActor("u1", "the actor crashed"); n != 2 {
+	if n := len(s.CloseActor("u1", "actor_crashed", "the actor crashed")); n != 2 {
 		t.Fatalf("closed %d, want 2", n)
 	}
 	if p := s.Pending(); len(p) != 1 || p[0] != "u2" {
@@ -110,7 +110,7 @@ func TestCloseActorEndsItsAsks(t *testing.T) {
 		t.Fatalf("list %d", len(got))
 	}
 	ds, _ := s.Decisions(ctx, ListRequest{OwnerID: "o"})
-	if len(ds) != 2 || ds[0].Verdict != StateExpired || ds[0].Reason != "the actor crashed" {
+	if len(ds) != 2 || ds[0].Verdict != StateExpired || ds[0].Reason != "the actor crashed" || ds[0].Event != "actor_crashed" {
 		t.Fatalf("decisions %+v", ds)
 	}
 	_ = other

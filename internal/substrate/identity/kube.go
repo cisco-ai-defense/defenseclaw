@@ -24,8 +24,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -69,8 +71,10 @@ type KubeTokenVerifier struct {
 }
 
 type kubeReview struct {
-	p  Person
-	at time.Time
+	p Person
+	// until is when the answer stops serving: the review time plus
+	// kubeReviewTTL, or the token's exp when that comes first (GAP-0569).
+	until time.Time
 }
 
 func (k *KubeTokenVerifier) now() time.Time {
@@ -89,8 +93,19 @@ func (k *KubeTokenVerifier) Verify(ctx context.Context, token string) (Person, e
 	sum := sha256.Sum256([]byte(token))
 	key := hex.EncodeToString(sum[:])
 	now := k.now()
+	// A JWT (a ServiceAccount token, or an OIDC token in a kubeconfig) is
+	// refused from the second it expires, without a review: the API server
+	// allows its own leeway past exp (GAP-0569). A JWT whose exp cannot be
+	// read is refused too, so no exp form skips the check (GAP-0587).
+	exp, isJWT, hasExp := kubeTokenExpiry(token)
+	if isJWT && !hasExp {
+		return Person{}, reasonf(ReasonClaims, "the Kubernetes token has no readable exp")
+	}
+	if hasExp && !now.Before(exp) {
+		return Person{}, reasonf(ReasonExpired, "the Kubernetes token expired")
+	}
 	k.mu.Lock()
-	if c, ok := k.cache[key]; ok && now.Sub(c.at) < kubeReviewTTL {
+	if c, ok := k.cache[key]; ok && now.Before(c.until) {
 		k.mu.Unlock()
 		return c.p, nil
 	}
@@ -121,8 +136,20 @@ func (k *KubeTokenVerifier) Verify(ctx context.Context, token string) (Person, e
 	if strings.HasPrefix(u.Username, "system:node:") {
 		return Person{}, reasonf(ReasonSubject, "a node token is not a person")
 	}
+	until := now.Add(kubeReviewTTL)
+	if hasExp && exp.Before(until) {
+		until = exp
+	}
+	// The token key and issue time let logout, logout --all and admin
+	// revoke end a Kubernetes sign-in like an OIDC one (RV1-01). A JWT is
+	// keyed by its jti, else by its claims, never by its text: the API
+	// server accepts other encodings of the same token (RV2-01).
+	iat, jti := kubeClaims(token, now)
 	p := Person{Kind: PersonKube, Issuer: KubeIssuer, Subject: u.Username, Principal: u.Username,
-		Expires: now.Add(kubeReviewTTL)}
+		Expires: until, IssuedAt: iat, TokenID: jti, TokenKey: TokenKey(KubeIssuer, jti, token)}
+	if hasExp {
+		p.TokenExpires = exp
+	}
 	for _, g := range u.Groups {
 		if g = strings.TrimSpace(g); g != "" && len(p.Groups) < 512 {
 			p.Groups = append(p.Groups, g)
@@ -132,9 +159,77 @@ func (k *KubeTokenVerifier) Verify(ctx context.Context, token string) (Person, e
 	if k.cache == nil || len(k.cache) >= kubeReviewMaxKeys {
 		k.cache = map[string]kubeReview{}
 	}
-	k.cache[key] = kubeReview{p: p, at: now}
+	k.cache[key] = kubeReview{p: p, until: until}
 	k.mu.Unlock()
 	return p, nil
+}
+
+// kubeTokenExpiry reads the exp claim of a bearer token that is a JWT,
+// without verifying it: the TokenReview authenticates the token, and exp
+// only shortens how long the answer is used, never lengthens it
+// (GAP-0569). The claims are decoded with jwtClaims, the decoder of the
+// token key and issue time, which reads every encoding the API server's
+// go-jose accepts ('=' padding, spare bits, Unicode white space, the
+// standard alphabet), so a re-encoded copy of a JWT is never taken for an
+// opaque token that skips the exp rule (GAP-1032). isJWT is false for a
+// token whose middle part is not a base64 JSON object (a static or
+// provider token): it has no exp to read. For a JWT, ok is false when exp
+// is missing, is not a finite JSON number (RFC 7519 NumericDate: an
+// integer or a decimal such as 1799999990.0 or 1.79999999e9), or the
+// claims repeat a member; the caller refuses it (GAP-0587).
+func kubeTokenExpiry(token string) (exp time.Time, isJWT, ok bool) {
+	cb, isJWT := jwtClaims(token)
+	if !isJWT {
+		return time.Time{}, false, false
+	}
+	var c map[string]json.RawMessage
+	if err := json.Unmarshal(cb, &c); err != nil || c == nil || checkDuplicateKeys(cb) != nil {
+		return time.Time{}, true, false
+	}
+	raw := bytes.TrimSpace(c["exp"])
+	if len(raw) == 0 || (raw[0] != '-' && (raw[0] < '0' || raw[0] > '9')) {
+		return time.Time{}, true, false // missing, null, a string, an object
+	}
+	f, err := strconv.ParseFloat(string(raw), 64)
+	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+		return time.Time{}, true, false
+	}
+	// Beyond 1e15 s (about 30 million years) either way only the side of
+	// now matters; the bound keeps the int64 conversion defined.
+	const far = 1e15
+	f = max(min(f, far), -far)
+	sec := math.Floor(f)
+	return time.Unix(int64(sec), int64((f-sec)*1e9)), true, true
+}
+
+// kubeClaims reads the iat and jti of a Kubernetes token that is a JWT (a
+// bound ServiceAccount token, or an OIDC token the API server accepts). It
+// is called only after the TokenReview authenticated the whole token, so
+// the claims are the issuer's. iat is zero when the token is opaque (a
+// static token), has no iat (a legacy Secret-based ServiceAccount token),
+// or names a time more than DefaultSkew ahead: such a sign-in can be ended
+// one token at a time, not by time. jti is "" when the token has none.
+func kubeClaims(token string, now time.Time) (time.Time, string) {
+	raw, ok := jwtClaims(token)
+	if !ok {
+		return time.Time{}, ""
+	}
+	var c struct {
+		IssuedAt *int64 `json:"iat"`
+		TokenID  any    `json:"jti"`
+	}
+	if json.Unmarshal(raw, &c) != nil {
+		return time.Time{}, ""
+	}
+	jti, _ := c.TokenID.(string)
+	if c.IssuedAt == nil || *c.IssuedAt <= 0 {
+		return time.Time{}, jti
+	}
+	iat := time.Unix(*c.IssuedAt, 0)
+	if iat.After(now.Add(DefaultSkew)) {
+		return time.Time{}, jti
+	}
+	return iat, jti
 }
 
 // kubeUser is the user of an authenticated TokenReview.
@@ -205,6 +300,8 @@ func (k *KubeTokenVerifier) review(ctx context.Context, token string, audiences 
 type PersonVerifiers struct {
 	OIDC interface {
 		Verify(ctx context.Context, token string) (Person, error)
+		// Trusts reports a configured OIDC issuer.
+		Trusts(issuer string) bool
 	}
 	Kube *KubeTokenVerifier
 }
@@ -218,6 +315,14 @@ func (v PersonVerifiers) Verify(ctx context.Context, token string) (Person, erro
 		}
 		var ie *Error
 		if !errors.As(err, &ie) || (ie.Reason != ReasonIssuer && ie.Reason != ReasonMalformed) {
+			return p, err
+		}
+		// A token whose claims name a configured issuer is that issuer's,
+		// however it is written. The strict parse refuses a copy with '='
+		// padding, spare bits, line breaks or spaces; the API server
+		// decodes leniently and could take the same copy as another person,
+		// with another token key and under no end (RV3-01, GAP-0787).
+		if iss := tokenIssuer(token); iss != "" && v.OIDC.Trusts(iss) {
 			return p, err
 		}
 	}

@@ -76,19 +76,19 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 	if generation == nil {
 		return findings
 	}
-	hard := request.StrictPolicy || request.ManagedInstall
+	hard := request.tierEnforces(tierGateManaged)
 	out := append([]RuleFinding(nil), findings...)
 	// add adds a rule's finding once. An uncertain finding (the call's own
 	// account or API host is unknown) alerts in every tier and never blocks.
 	add := func(ruleID, note string, uncertain bool) {
-		if slices.ContainsFunc(out, func(f RuleFinding) bool { return f.RuleID == ruleID }) {
+		if _, held := readingRuleSlot(out, ruleID); held {
 			return
 		}
 		_, rule, ok := trustedActionCatalogRule(generation, ruleID)
 		if !ok {
 			return
 		}
-		out = append(out, nonShellFinding(rule, note, mapping.Name, hard && !uncertain))
+		out = withReadingFinding(out, nonShellFinding(rule, note, mapping.Name, hard && !uncertain))
 	}
 	// The hosts the call itself names for its own parties: its primary
 	// recipients and request URLs, and its own account when it says which.
@@ -108,7 +108,7 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 	// before the bound is judged as always.
 	var trunc bounded.Truncated
 	trunc.Merge(mapping.Truncated)
-	twins := 0
+	twins, wholeTwins := 0, 0
 	seenPath := map[string]bool{}
 	for _, e := range mapping.Effects {
 		switch e.Kind {
@@ -138,11 +138,18 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 				}
 				add(id, "path in MCP tool arguments", false)
 			}
-			if twins >= maxNonShellPathTwins {
+			// The value of a path list read whole is another reading of
+			// its parts, counted on its own (rel-1-0-10:GAP-0646): a list
+			// of 64 paths no longer loses the twin of the whole value.
+			counted := &twins
+			if e.Whole {
+				counted = &wholeTwins
+			}
+			if *counted >= maxNonShellPathTwins {
 				trunc.Hit(bounded.Paths)
 				continue
 			}
-			twins++
+			*counted++
 			// The native twin reads a relative path against the session's
 			// directory, as the path rules above do (rel-1-0-10:GAP-1071).
 			twinEffect := e
@@ -156,8 +163,8 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 				// guessed role the finding is an alert at most outside the
 				// strict tier; a finding the native tool leaves detection-only
 				// stays so.
-				if !hard && !mapping.RoleKnown && f.enforcement != findingEnforcementDetectionOnly {
-					f.enforcement, f.proof = findingEnforcementAlertOnly, findingProof{}
+				if !hard && !mapping.RoleKnown && !f.Proof.Recorded() {
+					f.Proof, f.proof = f.Proof.Advise(), findingProof{}
 				}
 				f.Title += " (path in MCP tool arguments)"
 				out = append(out, f)
@@ -295,10 +302,10 @@ func nonShellFinding(rule *PatternRule, note, tool string, hard bool) RuleFindin
 		Evidence: tool, Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
 	}
 	if hard {
-		f.enforcement = findingEnforcementAllowed
+		f.Proof = f.Proof.Enforce()
 		f.proof = newExactFallbackFindingProof(rule.ID, true, true, true, true)
 	} else {
-		f.enforcement = findingEnforcementAlertOnly
+		f.Proof = f.Proof.Advise()
 	}
 	return f
 }
@@ -327,10 +334,10 @@ func nonShellNamesOtherAccountCredential(facts actionfacts.Facts) bool {
 // its rule than existing: it may enforce where existing only alerts, or it
 // carries a higher severity.
 func nonShellFindingStronger(candidate, existing RuleFinding) bool {
-	if candidate.enforcement == findingEnforcementAllowed && existing.enforcement != findingEnforcementAllowed {
+	if candidate.contributesToEnforcement() && !existing.contributesToEnforcement() {
 		return true
 	}
-	if existing.enforcement == findingEnforcementAllowed && candidate.enforcement != findingEnforcementAllowed {
+	if existing.contributesToEnforcement() && !candidate.contributesToEnforcement() {
 		return false
 	}
 	return guardrailSeverityRank(candidate.Severity) > guardrailSeverityRank(existing.Severity)
@@ -445,7 +452,7 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	}
 	request.Input.CWD = managedClientCWD(ctx, request.Input.CWD, request.ResolvedWriteTargets)
 	facts := actionfacts.Analyze(request.Input)
-	hard := request.StrictPolicy || request.ManagedInstall
+	hard := request.tierEnforces(tierGateManaged)
 	otherAccount := nonShellNamesOtherAccountCredential(facts)
 	out := append([]RuleFinding(nil), findings...)
 	// A finding of the lane is merged as the dispatch merges the finding of a
@@ -513,6 +520,14 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 			for _, c := range facts.Commands {
 				for _, id := range toolshape.CommandRules(c.Program, c.Argv) {
 					add(input, facts, id, "")
+				}
+				// The program a chain of static prefix wrappers runs with its
+				// argv unchanged is judged by its own words too
+				// (taskset 1 sudo chmod u+s F is chmod u+s F; GAP-1461).
+				if program, argv, ok := actionfacts.ExactWrapperChild(c); ok {
+					for _, id := range toolshape.CommandRules(program, argv) {
+						add(input, facts, id, "")
+					}
 				}
 			}
 		}
@@ -587,7 +602,7 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	// .config/systemd/user/x.service` from /sandbox gets the laptop's verdict
 	// (rel-1-0-10:GAP-1002). It runs for the native file tools too.
 	if guest, ok := sandboxGuestPlacedInput(request, facts); ok {
-		guestFacts := actionfacts.Analyze(guest)
+		guestFacts := request.guestMemo.analyze(guest)
 		for _, p := range guestFacts.Paths {
 			for _, id := range homePathRuleIDs(guestFacts, p, text) {
 				if id == "CMD-PERSIST-SYSTEM-SCHEDULE" && linksToDevNull(guestFacts, p.CommandID) {

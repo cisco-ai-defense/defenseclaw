@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // moveOntoLinkParityRow is one shell call of a per-user action-mode
@@ -58,9 +59,7 @@ func judgeMoveOntoLinkParityRows(t *testing.T, rows []moveOntoLinkParityRow) {
 	}
 	for link, target := range map[string]string{"slink": keys, "tlink": filepath.Join(project, "ordinary", "f.txt"),
 		"sdlink": state, "dssh": filepath.Dir(keys)} {
-		if err := os.Symlink(target, filepath.Join(project, link)); err != nil {
-			t.Fatal(err)
-		}
+		testenv.Symlink(t, target, filepath.Join(project, link))
 	}
 	if runtime.GOOS == "windows" {
 		if out, err := exec.Command("cmd", "/c", "mklink", "/J", filepath.Join(project, "jssh"), filepath.Dir(keys)).CombinedOutput(); err != nil {
@@ -77,20 +76,23 @@ func judgeMoveOntoLinkParityRows(t *testing.T, rows []moveOntoLinkParityRow) {
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, header := range []bool{true, false} {
 			for _, row := range rows {
+				// A row that does not apply to this connector on this OS
+				// is not run: a Windows spelling off Windows, a PowerShell
+				// row for any shell but the PowerShell Codex runs on
+				// Windows, a GNU mv option there. No subtest is made for
+				// it, so a native run never reads a by-design skip of it as
+				// lost coverage (rel-1-0-10:GAP-1621).
+				switch {
+				case row.windowsOnly && runtime.GOOS != "windows",
+					row.codexOnly && (connector != "codex" || !codexShellRunsPowerShell),
+					row.noPowerShell && connector == "codex" && codexShellRunsPowerShell:
+					continue
+				}
 				name := connector + "/" + row.name
 				if !header {
 					name += "/no-header"
 				}
 				t.Run(name, func(t *testing.T) {
-					if row.windowsOnly && runtime.GOOS != "windows" {
-						t.Skip("a Windows spelling")
-					}
-					if row.codexOnly && (connector != "codex" || !codexShellRunsPowerShell) {
-						t.Skip("PowerShell, which Codex runs on Windows")
-					}
-					if row.noPowerShell && connector == "codex" && codexShellRunsPowerShell {
-						t.Skip("a GNU mv option PowerShell refuses")
-					}
 					command := strings.NewReplacer("{P}", slashProject, "{M}", msysProject).Replace(row.command)
 					payload := mustJSON(t, map[string]any{"session_id": "mv-link-parity", "hook_event_name": "PreToolUse",
 						"cwd": project, "permission_mode": "default", "tool_name": "Bash", "tool_use_id": "toolu_mv",

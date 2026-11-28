@@ -26,6 +26,7 @@ import (
 // call such a hook absent: it says absent only when the files were read and
 // name no DefenseClaw hook at all.
 func TestMachinePolicyAbsentIsNotTheNegationOfPresent(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	timeoutField := regexp.MustCompile(`timeout = (\d+)`)
 	for _, tc := range []struct {
 		connector string
@@ -108,6 +109,7 @@ func TestMachinePolicyAbsentIsNotTheNegationOfPresent(t *testing.T) {
 // the DefenseClaw drop-in alone, says false. Absence is proven only when every
 // effective drop-in was read and parsed and none names DefenseClaw.
 func TestMachinePolicyAbsentReadsEveryEffectiveCopilotDropIn(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := publishTestOptions(t)
 	if _, err := Publish(opts, []string{"copilot"}); err != nil {
 		t.Fatal(err)

@@ -12,6 +12,7 @@ package inventory
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -124,7 +125,7 @@ func TestDetectPluginSkillsFromTheAgentsRegistries(t *testing.T) {
 		}
 	}
 	if upgradedKeys["claudecode/review#evidence"] == keys["claudecode/review#evidence"] {
-		t.Fatal("plugin content change did not update the evidence hash")
+		t.Error("plugin content change did not update the evidence hash")
 	}
 	writeSkillFiles(t, home, map[string]string{".claude/settings.json": `{"enabledPlugins":{"pr-review@official":true}}`})
 	metadataChanged, metadataKeys := pluginSkillFacts(t, home)
@@ -166,5 +167,49 @@ func TestDetectCursorPluginSkillsAndManifestFolders(t *testing.T) {
 		if _, ok := facts[key]; ok {
 			t.Errorf("%s must not be reported", key)
 		}
+	}
+}
+
+// A managed scan reads every account's home, so it refuses a plugin folder
+// reached through a link above the plugin; a per-user scan follows it.
+func TestManagedScanRefusesALinkAbovePluginFolders(t *testing.T) {
+	home := t.TempDir()
+	writeSkillFiles(t, home, map[string]string{
+		"other/cache/official/tool/1.0/skills/linked/SKILL.md": "---\nname: linked\n---\n",
+		".claude/settings.json":                                "{}",
+	})
+	if err := os.MkdirAll(filepath.Join(home, ".claude", "plugins"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "other", "cache"), filepath.Join(home, ".claude", "plugins", "cache")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	writeClaudeRegistry(t, home, map[string]string{
+		"tool@official": filepath.Join(home, ".claude", "plugins", "cache", "official", "tool", "1.0"),
+	})
+	catalog := []AISignature{{ID: "claudecode", Vendor: "Anthropic", Category: SignalSupportedConnector, SupportedConnector: "claudecode"}}
+	for _, test := range []struct {
+		name    string
+		managed bool
+		want    int
+	}{{name: "per-user", want: 1}, {name: "secure client", managed: true}} {
+		t.Run(test.name, func(t *testing.T) {
+			svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+				Enabled: true, Mode: "enhanced", DataDir: filepath.Join(home, "data-"+test.name), HomeDir: home,
+				ManagedEnterprise: test.managed, SecureClient: test.managed,
+			}, catalog)
+			cleanupPreparedDiscoveryService(t, svc)
+			got := 0
+			for _, signal := range svc.detectPluginSkills() {
+				for _, ev := range signal.Evidence {
+					if ev.Skill != nil && ev.Basename == "linked" {
+						got++
+					}
+				}
+			}
+			if got != test.want {
+				t.Fatalf("skills read through the link = %d, want %d", got, test.want)
+			}
+		})
 	}
 }

@@ -27,7 +27,7 @@ func TestReportedCwdWithAParentStepAfterALinkIsPlacedAsTextWhereTheSystemDoes(t 
 	if os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged POSIX gateway walk")
 	}
-	defer hookpaths.SetParentStepIsText(true)()
+	defer setParentStepIsTextIdle(t, true)()
 	root := t.TempDir()
 	home := filepath.Join(root, "home", "eng1")
 	project := filepath.Join(home, "proj")

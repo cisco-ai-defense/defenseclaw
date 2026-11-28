@@ -64,6 +64,7 @@ What makes this work:
 | ID | Pattern | Catches |
 | --- | --- | --- |
 | `SEC-AWS-KEY` | `\b(?:AKIA\|ASIA)[0-9A-Z]{16}\b` | AWS access key IDs, except the AWS documentation example `AKIAIOSFODNN7EXAMPLE` |
+| `SEC-AWS-SECRET` | `(?i:(?:aws[ _-]?)?secret[ _-]?access[ _-]?key\|aws[ _-]?secret[ _-]?key)\\?["']?\s*[=:]\s*\\?["']?[A-Za-z0-9/+=]{30,}\|\b(?:AKIA\|ASIA)[0-9A-Z]{16}\b[^\n]{0,100}?[^A-Za-z0-9/+=\n][A-Za-z0-9/+]{40}(?:[^A-Za-z0-9/+=]\|$)` | AWS secret access keys: a value assigned to a secret-access-key name (`aws_secret_access_key`, `SecretAccessKey`, `AWS Secret Access Key`, quoted or not), or 40 key characters after an `AKIA` or `ASIA` key id on the same line, as a prompt or a credentials CSV has them. The AWS documentation example secret is not a finding |
 | `SEC-GITHUB-TOKEN` | `(?:ghp_\|gho_\|ghu_\|ghs_\|ghr_)[a-zA-Z0-9]{36,}` | GitHub personal, OAuth, user, server and refresh tokens |
 | `SEC-PRIVKEY` | `-----BEGIN (?:RSA \|EC \|OPENSSH \|PGP \|DSA )?PRIVATE KEY-----` | Complete PEM and OpenSSH private keys: the header, a key body that parses and the footer. A header line alone, public keys and certificates don't match |
 | `SEC-OPENAI` | `sk-proj-[a-zA-Z0-9]{20,}` | OpenAI project keys |

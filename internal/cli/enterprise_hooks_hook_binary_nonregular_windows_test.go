@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"golang.org/x/sys/windows"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func windowsNonRegularHookFixture(t *testing.T) (target, copyPath, want string) {
@@ -61,23 +61,13 @@ func windowsLstatWithFileID(t *testing.T, path string) os.FileInfo {
 	return info
 }
 
-func windowsSymlinkOrSkipPrivilege(t *testing.T, oldTarget, link string) {
-	t.Helper()
-	if err := os.Symlink(oldTarget, link); err != nil {
-		if errors.Is(err, windows.ERROR_PRIVILEGE_NOT_HELD) {
-			t.Skipf("symlink creation needs a privilege: %v", err)
-		}
-		t.Fatal(err)
-	}
-}
-
 func TestKeepWindowsManagedFileCopyRestoresFileSymlink(t *testing.T) {
 	target, copyPath, want := windowsNonRegularHookFixture(t)
 	pointed := target + ".other"
 	if err := os.WriteFile(pointed, []byte("other bytes"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	windowsSymlinkOrSkipPrivilege(t, pointed, target)
+	testenv.Symlink(t, pointed, target)
 	damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false)
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +92,7 @@ func TestCopyWindowsManagedFileReplacesFileSymlinkEntry(t *testing.T) {
 	if err := os.WriteFile(pointed, []byte("other bytes"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	windowsSymlinkOrSkipPrivilege(t, pointed, target)
+	testenv.Symlink(t, pointed, target)
 	if err := copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, true, true); err != nil {
 		t.Fatalf("MoveFileEx could not replace the file symlink entry: %v", err)
 	}
@@ -115,7 +105,7 @@ func TestCopyWindowsManagedFileReplacesFileSymlinkEntry(t *testing.T) {
 func TestKeepWindowsManagedFileCopyRestoresDanglingSymlink(t *testing.T) {
 	target, copyPath, want := windowsNonRegularHookFixture(t)
 	missing := target + ".missing"
-	windowsSymlinkOrSkipPrivilege(t, missing, target)
+	testenv.Symlink(t, missing, target)
 	damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false)
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +129,7 @@ func TestKeepWindowsManagedFileCopyRestoresDirectoryLinks(t *testing.T) {
 				t.Fatal(err)
 			}
 			if kind == "directory symlink" {
-				windowsSymlinkOrSkipPrivilege(t, pointed, target)
+				testenv.Symlink(t, pointed, target)
 			} else if output, err := exec.Command("cmd", "/c", "mklink", "/J", target, pointed).CombinedOutput(); err != nil {
 				t.Fatalf("create junction: %v: %s", err, output)
 			}
@@ -268,7 +258,7 @@ func TestKeepWindowsManagedFileCopyLeavesSymlinkWithoutGoodCopy(t *testing.T) {
 	if err := os.WriteFile(pointed, []byte("other bytes"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	windowsSymlinkOrSkipPrivilege(t, pointed, target)
+	testenv.Symlink(t, pointed, target)
 	damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false)
 	if err == nil || damage != "" {
 		t.Fatalf("missing protected copy: damage %q, error %v", damage, err)

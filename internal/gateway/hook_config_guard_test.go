@@ -807,9 +807,6 @@ func TestHookConfigGuard_IgnoresUnrelatedEdits(t *testing.T) {
 // gateway restarted. The file watcher must now restore the Setup render. An
 // operator-removed connector is still not re-added.
 func TestHookConfigGuard_RepairsOneEditedEntry(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows registers the native hook launcher, not a hook script")
-	}
 	root := testenv.PrivateTempDir(t)
 	cfgPath := filepath.Join(root, "copilot", "hooks", "defenseclaw.json")
 	prev := connector.CopilotHooksPathOverride
@@ -838,7 +835,17 @@ func TestHookConfigGuard_RepairsOneEditedEntry(t *testing.T) {
 	defer guard.Stop()
 	requireOwnedHooks(t, conn, opts)
 
-	edited := strings.Replace(string(pristine), "copilot-hook.sh' --event 'agentStop'", "copilot-hookX.sh' --event 'agentStop'", 1)
+	from, to := "copilot-hook.sh' --event 'agentStop'", "copilot-hookX.sh' --event 'agentStop'"
+	if runtime.GOOS == "windows" {
+		// Windows registers the PowerShell adapter, & '<data>\hooks\copilot-hook.ps1'
+		// -Event '<event>', in the powershell field (JSON doubles each
+		// backslash). An adapter command naming an adapter that is not there
+		// is an earlier DefenseClaw registration whose data directory went
+		// (copilotBoundEventOwnsCommand), so the edit moves the adapter's
+		// folder: a renamed adapter is an independent command Setup refuses.
+		from, to = `\\hooks\\copilot-hook.ps1' -Event 'agentStop'`, `\\xhooks\\copilot-hook.ps1' -Event 'agentStop'`
+	}
+	edited := strings.Replace(string(pristine), from, to, 1)
 	if edited == string(pristine) {
 		t.Fatalf("fixture has no agentStop entry:\n%s", pristine)
 	}

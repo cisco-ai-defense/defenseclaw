@@ -19,6 +19,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"path"
@@ -241,6 +242,9 @@ func launcherSandboxPreRun(cmd *cobra.Command, args []string) error {
 	// wrapper commands answer for the organization-run service (GAP-0292,
 	// GAP-0362).
 	cfg = managedSandboxCommandConfig()
+	// Its sandbox commands start the account's sandbox service, which the
+	// "does not answer" fix then says (rel-1-0-10:GAP-1937).
+	sandboxcli.LauncherStartsService = true
 	client, err := launcherManagedClient(runtime.GOOS)
 	if err != nil {
 		return cliusage.WithExitCode(err, 3)
@@ -321,6 +325,15 @@ func launcherManagedConfig(base *config.Config, status *sandboxapi.Status) *conf
 	}
 	if status.Profile != "" {
 		out.OpenShell.Profile = status.Profile
+	}
+	// The image inputs the daemon's own builds use (a run's): `sandbox
+	// image build` built on the launcher's default base and kept the old
+	// tag (rel-1-0-10:GAP-2064).
+	if status.ImageBase != "" {
+		out.OpenShell.Image.Base = status.ImageBase
+	}
+	if len(status.HarnessVersions) > 0 {
+		out.OpenShell.Image.HarnessVersions = maps.Clone(status.HarnessVersions)
 	}
 	out.OpenShell.Enabled = status.Enabled
 	return &out

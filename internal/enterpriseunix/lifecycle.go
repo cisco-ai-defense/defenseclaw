@@ -791,6 +791,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		// missing hook binary refused it with payload_invalid (GAP-1217).
 		l.restoreTamperedHookBinary(ctx, record)
 		code := l.settleInputChanges(ctx, l.apply(ctx, record))
+		l.requireRepairedMachinePolicy()
 		l.summarizeRepair()
 		return l.requireProtectedTargets(code)
 	case ActionEnsure:
@@ -1743,7 +1744,7 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 	}
 
-	if err := l.planOpenShell(p); err != nil {
+	if err := l.planOpenShell(ctx, p); err != nil {
 		return nil, &codedError{code: codeOpenShell, err: err}
 	}
 	if err := l.planCoworkVM(p, record); err != nil {
@@ -4720,7 +4721,7 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 			l.ownInstallRestored = map[string]bool{}
 		}
 		l.ownInstallRestored[user] = true
-		r.Changes = append(r.Changes, fmt.Sprintf("put back the own per-user DefenseClaw files of user %s that the enrollment had changed (hook scripts and hook settings in ~/.defenseclaw/hooks, connector backups, hook contract lock, and the agent configs those backups name), byte for byte as they were before the managed deployment", user))
+		r.Changes = append(r.Changes, fmt.Sprintf("put back the own DefenseClaw setup of user %s as it was before the managed deployment: its hook scripts and hook settings (~/.defenseclaw/hooks), its connector backups and hook contract lock, and the agent settings those backups name (the hooks the agents ran before enrollment)", user))
 	}
 	for _, entry := range report.OwnInstallKeptChanged {
 		user, path, _ := strings.Cut(entry, ": ")

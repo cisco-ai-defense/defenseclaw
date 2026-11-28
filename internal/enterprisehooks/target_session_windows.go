@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -150,6 +151,14 @@ func requireWindowsEnterpriseDeferredTargetPendingPlatform(target ManifestTarget
 		return err
 	}
 	if err := windowsDeferredTargetDataDirExactCheck(dataDir, targetSID); err != nil {
+		// A per-user install folder carries the owner and LocalSystem only,
+		// which also reads as a folder the account created itself, and its
+		// DACL is not the managed one: the repair below re-stamped it and the
+		// account was admitted as pending, so enrollment took the install
+		// over (GAP-1733). It is refused before any of that, never repaired.
+		if err := refuseWindowsDeferredTargetPerUserInstall(home, dataDir, targetSID); err != nil {
+			return err
+		}
 		if !windowsEnterpriseStandaloneDeferredDataDirAbsent(err) &&
 			!windowsEnterpriseStandaloneDeferredDataDirAccountCreated(dataDir, targetSID) &&
 			!windowsEnterpriseStandaloneDeferredDataDirAccountLink(home, dataDir, targetSID) {
@@ -189,6 +198,107 @@ func requireWindowsEnterpriseDeferredTargetPendingPlatform(target ManifestTarget
 			DataDir:        dataDir,
 			HookExecutable: hookExecutable,
 		},
+	)
+}
+
+// WindowsPerUserInstallDataDir names what makes home's
+// %USERPROFILE%\.defenseclaw the folder of a per-user DefenseClaw install:
+// the first per-user install entry it holds (windowsPerUserInstallLeftovers),
+// or why the folder could not be checked. It is "" when the profile or the
+// folder is absent or the folder holds no such entry. The folder is read the
+// way the managed runtime plan reads it, through no-follow handles with
+// backup intent, so the per-user DACL (owner and LocalSystem only) cannot
+// hide an entry from an elevated Administrator, and a failure is reported,
+// never read as absent (GAP-1733). Such a folder is never re-stamped,
+// adopted or enrolled: the guardian fails only that account's rows, by name,
+// and status and verify report the account as not protected.
+func WindowsPerUserInstallDataDir(home, sid string) string {
+	target, err := resolveWindowsManagedRuntimeTarget(home, sid, "")
+	if err != nil {
+		return ""
+	}
+	return windowsPerUserInstallDataDirFinding(target)
+}
+
+// windowsPerUserInstallDataDirFinding is WindowsPerUserInstallDataDir for a
+// resolved target. Only a plain folder is read: a link or junction at the
+// folder, or a file there, holds no per-user install of its own, and the
+// link and type checks refuse it without following or repairing it. A
+// token that is neither an elevated Administrator nor LocalSystem cannot
+// take the plan's backup-intent handles; it reads the entries by path
+// instead and names only an entry it can see. Another account's folder is
+// denied to it, and what it cannot read is unknown, not a per-user install
+// (GAP-1733 review: a non-elevated status named every other account).
+func windowsPerUserInstallDataDirFinding(target windowsManagedRuntimeTarget) string {
+	if requireWindowsEnterpriseAdministrator() != nil {
+		info, err := os.Lstat(target.data)
+		if err != nil || !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			return ""
+		}
+		for _, name := range windowsPerUserInstallLeftovers {
+			if _, err := os.Lstat(filepath.Join(target.data, name)); err == nil {
+				return name
+			}
+		}
+		return ""
+	}
+	var finding string
+	err := windowsManagedRuntimeSetupPrivilege(func() error {
+		parent, err := openWindowsManagedRuntimeProfile(target, windowsManagedRuntimeProfileRead)
+		if windowsManagedRuntimeRootMissing(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		defer windows.CloseHandle(parent)
+		final, err := openWindowsManagedRuntimeChild(parent, ".defenseclaw", windowsManagedRuntimeFinalReadAccess(), false)
+		if windowsManagedRuntimeRootMissing(err) || errors.Is(err, windows.STATUS_NOT_A_DIRECTORY) || errors.Is(err, windows.ERROR_DIRECTORY) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		defer windows.CloseHandle(final)
+		var info windows.ByHandleFileInformation
+		if err := windows.GetFileInformationByHandle(final, &info); err != nil {
+			return err
+		}
+		if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+			return nil
+		}
+		refusal := refuseWindowsPerUserInstallFolder(final, target)
+		var perUser *windowsPerUserInstallFolderError
+		if errors.As(refusal, &perUser) {
+			finding = perUser.leftover
+			if perUser.err != nil {
+				finding += " (it could not be checked: " + perUser.err.Error() + ")"
+			}
+			return nil
+		}
+		return refusal
+	})
+	if err != nil && finding == "" {
+		return "an entry that could not be checked (" + err.Error() + ")"
+	}
+	return finding
+}
+
+// refuseWindowsDeferredTargetPerUserInstall refuses a deferred target whose
+// data directory is the canonical folder and holds a per-user DefenseClaw
+// install (WindowsPerUserInstallDataDir). The folder is left as found.
+func refuseWindowsDeferredTargetPerUserInstall(home, dataDir string, target *windows.SID) error {
+	canonical := filepath.Join(home, ".defenseclaw")
+	if !sameWindowsEnterprisePath(dataDir, canonical) {
+		return nil
+	}
+	finding := windowsPerUserInstallDataDirFinding(windowsManagedRuntimeTarget{home: home, data: canonical, sid: target})
+	if finding == "" {
+		return nil
+	}
+	return fmt.Errorf(
+		"enterprise hooks: deferred target data directory %s holds %s, which a per-user DefenseClaw install leaves; it was left untouched and the account is not enrolled",
+		dataDir, finding,
 	)
 }
 

@@ -812,6 +812,13 @@ var safeEnumValues = map[string]struct{}{
 //   - "SEC-AWS-KEY"          — uppercase + separator        → ACCEPTED
 //   - "PII-SSN-US"           — uppercase + separator        → ACCEPTED
 //   - "CODEGUARD-0-XSS"      — uppercase digits + separator → ACCEPTED
+//
+// A value that holds an AWS key id is refused (GAP-1082), also when
+// trailing separators hide it: "AKIA<16>." is a key id at the end of a
+// sentence and "AKIA<16>_" one before an underscore, and "AKIA<16>-" or
+// "AKIA<16>:x" are upper case with a separator too (see containsAWSKeyID).
+// A rule id at the end of a sentence ("rule=CMD-EVAL.", "CODEGUARD-0-XSS.")
+// still passes: only a hidden key id is refused, not the separator.
 func isCanonicalID(s string) bool {
 	if len(s) == 0 || len(s) > 64 {
 		return false
@@ -830,7 +837,60 @@ func isCanonicalID(s string) bool {
 			return false
 		}
 	}
-	return hasUpper && hasSeparator
+	return hasUpper && hasSeparator && !containsAWSKeyID(s) && !containsAWSKeyID(strings.TrimRight(s, "-_./:"))
+}
+
+// awsKeyIDPrefixes are the four-letter prefixes of an AWS key id, the same
+// set as the credentials.api_token recognizer in internal/observability/redaction.
+var awsKeyIDPrefixes = [...]string{"AKIA", "ASIA", "AROA", "AGPA", "AIDA", "AIPA", "ANPA", "ANVA"}
+
+// containsAWSKeyID reports whether s holds an AWS key id the way the
+// credentials.api_token recognizer reads one: a prefix and 16 to 32 upper
+// case letters or digits, not joined to a longer token on either side (a
+// letter, digit or '_' joins). A 20-character key id needs no digit; a
+// longer near-key needs one, so an upper-case word that only starts like a
+// key id is not taken for one. internal/observability/redaction imports this
+// package, so the check is repeated here rather than shared.
+func containsAWSKeyID(s string) bool {
+	for i := 0; i+4+16 <= len(s); i++ {
+		if i > 0 && isAWSKeyJoinByte(s[i-1]) {
+			continue
+		}
+		prefix := false
+		for _, p := range awsKeyIDPrefixes {
+			if s[i:i+4] == p {
+				prefix = true
+				break
+			}
+		}
+		if !prefix {
+			continue
+		}
+		run, digit := 0, false
+		for j := i + 4; j < len(s) && run < 32; j++ {
+			c := s[j]
+			if c >= '0' && c <= '9' {
+				digit = true
+			} else if c < 'A' || c > 'Z' {
+				break
+			}
+			run++
+		}
+		if run < 16 {
+			continue
+		}
+		if end := i + 4 + run; end < len(s) && isAWSKeyJoinByte(s[end]) {
+			continue
+		}
+		if run == 16 || digit {
+			return true
+		}
+	}
+	return false
+}
+
+func isAWSKeyJoinByte(c byte) bool {
+	return c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
 }
 
 // engineRuleIDPrefixes is the bounded catalog of dotted lowercase

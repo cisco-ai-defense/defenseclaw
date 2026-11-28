@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"net/url"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 )
 
 const (
@@ -171,7 +173,7 @@ func successfulProviderAuditStatus(value any, evidence string) bool {
 
 func exactAzureRoleAssignmentIdentity(resource string) (string, string, bool) {
 	const marker = "/providers/microsoft.authorization/roleassignments/"
-	lower := strings.ToLower(resource)
+	lower := asciifold.Lower(resource)
 	index := strings.Index(lower, marker)
 	if index <= 0 || !strings.HasPrefix(lower, "/subscriptions/") {
 		return "", "", false

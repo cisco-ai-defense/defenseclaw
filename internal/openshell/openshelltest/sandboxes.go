@@ -19,8 +19,8 @@ package openshelltest
 import (
 	"context"
 
-	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
-	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
+	v1 "github.com/ai-openshell/sdk-go/openshell/v1"
+	"github.com/ai-openshell/sdk-go/openshell/v1/types"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
@@ -34,14 +34,14 @@ type sandboxClient struct {
 
 var _ v1.SandboxInterface = (*sandboxClient)(nil)
 
-func (s *sandboxClient) Create(ctx context.Context, workspace, name string, spec *types.SandboxSpec, labels map[string]string, opts ...types.CreateOptions) (*types.Sandbox, error) {
+func (s *sandboxClient) Create(ctx context.Context, workspace, name string, spec *types.SandboxSpec, opts ...types.CreateOption) (*types.Sandbox, error) {
 	if err := s.f.enter(MethodCreateSandbox); err != nil {
 		return nil, err
 	}
 	if err := s.f.checkDriverConfig(spec); err != nil {
 		return nil, err
 	}
-	sb, err := s.inner.Create(ctx, workspace, name, spec, labels, opts...)
+	sb, err := s.inner.Create(ctx, workspace, name, spec, opts...)
 	if err != nil {
 		return nil, err
 	}

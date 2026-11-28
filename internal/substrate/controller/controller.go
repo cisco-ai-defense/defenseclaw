@@ -29,6 +29,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -108,6 +109,10 @@ type Options struct {
 	// secrets (see SettingsFromConfig and SecretsFromConfig).
 	Settings render.Settings
 	Secrets  []render.Secret
+	// Bindings returns one person's self-service bindings (see
+	// BindingsFrom); nil when self-service secrets are off. It is part of
+	// the first Live, so bindings render before any config change.
+	Bindings func(person string) []render.Secret
 	// LauncherAtespaces are the atespaces DefenseClaw owns.
 	LauncherAtespaces map[string]bool
 	// RequireAttestation gives no policy to an unattested template.
@@ -125,6 +130,10 @@ type Options struct {
 	// KitVersion is this release's kit version (N); N and N-1 are
 	// accepted. Empty or unparseable accepts every kit.
 	KitVersion string
+	// CalloutMode is what another callout in Substrate's egress callout
+	// slot does to actor policies (Live.CalloutMode; GAP-0505). The slot
+	// is read only with SetCallout.
+	CalloutMode string
 	// IdleSuspendAfter 0 turns idle suspend off.
 	IdleSuspendAfter time.Duration
 	// IdleSuspendWithoutCPU (substrate.idle_suspend_without_cpu): without
@@ -205,6 +214,8 @@ type Controller struct {
 	// workersWarned says the listing failed once (GAP-0449).
 	draining      ateapi.Draining
 	workersWarned bool
+	// callout is the egress callout slot as last read (GAP-0505).
+	callout calloutWatch
 }
 
 // runningReportInterval is how often the controller tells the leader which
@@ -399,9 +410,9 @@ func New(o Options) (*Controller, error) {
 	c := &Controller{o: o, actors: map[string]*actorState{}, templates: map[string]cachedTemplate{},
 		unlisted: map[string]bool{}, warnedList: map[string]bool{}, uidByKey: map[string]string{}, retired: map[string]bool{},
 		startedAt: o.Now(), allowlisted: map[string]string{}, unseparated: map[string]bool{}}
-	lv := &Live{Settings: o.Settings, Secrets: o.Secrets, LauncherAtespaces: o.LauncherAtespaces, RequireAttestation: o.RequireAttestation,
+	lv := &Live{Settings: o.Settings, Secrets: o.Secrets, Bindings: o.Bindings, LauncherAtespaces: o.LauncherAtespaces, RequireAttestation: o.RequireAttestation,
 		Templates: o.Templates, Attestor: o.Attestor, Resolver: o.Resolver, IdleSuspendAfter: o.IdleSuspendAfter,
-		IdleSuspendWithoutCPU: o.IdleSuspendWithoutCPU, LoadedAt: o.Now()}
+		IdleSuspendWithoutCPU: o.IdleSuspendWithoutCPU, LoadedAt: o.Now(), CalloutMode: o.CalloutMode}
 	if o.Config != nil {
 		_, lv.Digest = o.Config.Current()
 	}
@@ -412,6 +423,11 @@ func New(o Options) (*Controller, error) {
 // Run polls until ctx ends: every IdleInterval, or every FastInterval for
 // FastWindow after new or resuming actors were seen (batch starts).
 func (c *Controller) Run(ctx context.Context) error {
+	if c.calloutPublishes() {
+		// The gateway reads the egress callout slot from these reports
+		// (GAP-0505): they keep coming while a pass runs long.
+		go c.watchCallout(ctx)
+	}
 	for {
 		if err := c.Reconcile(ctx); err != nil && ctx.Err() == nil {
 			c.emit(Event{Type: EventWarning, Severity: SeverityWarn, Message: "reconcile pass failed: " + err.Error()})
@@ -434,6 +450,7 @@ func (c *Controller) Run(ctx context.Context) error {
 // so their policy lands before they reach the network.
 func (c *Controller) Reconcile(ctx context.Context) error {
 	c.reloadConfig(ctx)
+	c.checkCallout(ctx)
 	c.applyResets(ctx)
 	c.retryLifecycle(ctx)
 	// The list shows each actor's state as of listedAt or later.
@@ -705,6 +722,7 @@ func createdAt(md *ateapi.ResourceMetadata, st *actorState) time.Time {
 // registration the leader does not show yet is waited for briefly.
 func (c *Controller) EnsurePolicy(ctx context.Context, ref *ateapi.ObjectRef) error {
 	c.reloadConfig(ctx)
+	c.checkCallout(ctx)
 	for try := 1; ; try++ {
 		readAt := c.o.Now()
 		a, err := c.o.Client.GetActor(ctx, ref)
@@ -850,6 +868,19 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor, seenAt
 	st.resumed = false
 	if !first {
 		evs := []string{lifecycleOf(prev, state)}
+		if prev == state && rid.lastGen > st.rid.lastGen {
+			// A suspend ran since the last pass (it assigned a generation)
+			// and the actor is back in the state it was: a suspend and a
+			// resume inside one poll (a checkpoint, kubectl ate suspend then
+			// a connect) still leave their records and the resume re-check
+			// (GAP-0486).
+			switch state {
+			case ateapi.ActorStateRunning:
+				evs = []string{chainstate.LifecycleSuspended, chainstate.LifecycleResumed}
+			case ateapi.ActorStateSuspended:
+				evs = []string{chainstate.LifecycleResumed, chainstate.LifecycleSuspended}
+			}
+		}
 		if revertSeen(prev, state, st.rid, rid) {
 			// Told from the snapshot identity, so a revert whose REVERTING
 			// fell between two passes, a revert of a SUSPENDED actor and a
@@ -863,6 +894,16 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor, seenAt
 			}
 			st.pendingLife = append(st.pendingLife, chainstate.LifecycleEvent{Actor: self, Event: life, AtUnixNano: now.UnixNano()})
 			st.resumed = st.resumed || life == chainstate.LifecycleResumed
+			if life == chainstate.LifecycleCrashed {
+				// The crash is a record of its own (GAP-0526): the leader
+				// closes the actor's open asks with reason actor_crashed
+				// when it gets the lifecycle event, and the audit trail
+				// says why the actor and its asks stopped.
+				ce := base
+				ce.Type, ce.Severity, ce.Message = EventCrashed, SeverityWarn, "actor crashed: its open asks are closed (actor_crashed)"
+				ce.Detail = map[string]any{"lifecycle": chainstate.LifecycleCrashed, "reason": "actor_crashed"}
+				c.emit(ce)
+			}
 			if !st.inventoried {
 				continue // the first record of an actor is "actor seen"
 			}
@@ -950,6 +991,12 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor, seenAt
 			}
 			if !booted {
 				return c.removePolicy(ctx, a, st, base)
+			}
+			if res.DenyOnly == "" {
+				// Another callout holds Substrate's egress slot: what only
+				// the DefenseClaw callout enforced follows the fail mode
+				// (GAP-0505).
+				res.DenyOnly = c.calloutDenyOnly(lv, reg)
 			}
 			if res.DenyOnly != st.forcedDeny {
 				st.forcedDeny = res.DenyOnly
@@ -1159,7 +1206,7 @@ func (c *Controller) attributeKit(ctx context.Context, a *ateapi.Actor, reg *Reg
 		return nil
 	}
 	reg.Connector, reg.AgentVersion, reg.HookContract = att.Connector, att.AgentVersion, att.HookContract
-	reg.KitVersion, reg.TemplateDigest = att.KitVersion, att.Digest
+	reg.KitVersion, reg.TemplateDigest, reg.RelayStreams = att.KitVersion, att.Digest, att.RelayStreams
 	return tmpl
 }
 
@@ -1630,7 +1677,11 @@ func (c *Controller) applyOnce(ctx context.Context, a *ateapi.Actor, st *actorSt
 	st.refused, st.refusedMsg = "", ""
 	ref := ateapi.RefOf(a.GetMetadata())
 	lv := c.live()
-	res, err := render.EgressPolicy(render.Input{Settings: lv.Settings, Profile: profile, Person: reg.Person, Approved: reg.Approved, Secrets: lv.Secrets})
+	secrets := lv.Secrets
+	if lv.Bindings != nil && reg.Person != "" {
+		secrets = append(slices.Clip(secrets), lv.Bindings(reg.Person)...)
+	}
+	res, err := render.EgressPolicy(render.Input{Settings: lv.Settings, Profile: profile, Person: reg.Person, Approved: reg.Approved, Secrets: secrets})
 	if err != nil {
 		c.fail(base, "render: "+err.Error())
 		return fmt.Errorf("%s: render: %w", st.key, err)

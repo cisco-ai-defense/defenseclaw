@@ -16,7 +16,21 @@ Some agents read a machine-wide policy file that standard users cannot change. F
 Only agents you select in the config are protected; see [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect). DefenseClaw's entries are derived from the config (`guardrail.connectors` and `enterprise.machine_policy`) and never read back as policy. The next `ensure`, `repair` or `reconcile` rewrites a changed entry, and `verify` reports the drift until then. Change the config, not the vendor file.
 
 You may maintain your own settings in vendor policy files. After an administrator
-or MDM changes one, run `reconcile` or `ensure` as root. While a managed hook's
+or MDM changes one, run `reconcile` as root so DefenseClaw keeps the change. On Linux and macOS,
+Codex `/etc/codex/requirements.toml` is shared with DefenseClaw, and these
+put back the file DefenseClaw last published: `ensure`, `repair`, an upgrade, the
+config-apply job that the guardian starts when it finds a changed file, and
+the config-apply job that applies a config change. Only `reconcile` accepts
+your edit of the file. Keep your own lines after DefenseClaw's settings block
+and before its hooks block. The guardian puts back a line added outside them,
+any change inside DefenseClaw's blocks, a file that no longer parses as a
+whole, and a symbolic link put in place of the file. DefenseClaw replaces such
+a link and never writes to the file it points at. When DefenseClaw puts back
+the file over an edit, it first saves the edited file in
+`/etc/codex/defenseclaw-replaced/`, a folder only root can read. The change
+line names the saved file. DefenseClaw keeps the last 10 saved files and
+leaves them in place when it is removed. To keep an edit, copy your lines back
+and run `reconcile`. While a managed hook's
 current vendor policy differs from the digest in the trusted runtime descriptor,
 the hook keeps sending every call to the gateway, which inspects it under the
 managed policy, and raises a `HIGH` runtime alert
@@ -128,7 +142,7 @@ For OpenCode, DefenseClaw uses an existing `opencode.jsonc` instead of `opencode
 | Linux and macOS | The lifecycle (`ensure`, install, upgrade, repair) | The lifecycle | The lifecycle |
 | Windows | The lifecycle at install, upgrade and repair; the guardian repairs it | The guardian, with Windows-specific code | The guardian, with the machine-policy engine that Linux and macOS use |
 
-On every OS the guardian keeps each enrolled user's DefenseClaw runtime in step with the policy, and `verify` reports any drift. On Linux and macOS the guardian never writes machine policy itself: when DefenseClaw's Claude Code drop-in is edited or deleted it logs a tamper and starts the lifecycle's config-apply job, whose `ensure` puts the drop-in back within seconds.
+On every OS the guardian keeps each enrolled user's DefenseClaw runtime in step with the policy, and `verify` reports any drift. On Linux and macOS the guardian never writes machine policy itself: when DefenseClaw's Claude Code drop-in, or DefenseClaw's part of Codex `requirements.toml`, is edited or deleted it logs a tamper and starts the lifecycle's config-apply job, whose `ensure` puts the file back within seconds.
 
 On Windows, Codex's `requirements.toml` stays installed for every enabled Codex deployment, including one with zero enrolled users. The lifecycle writes it at install, upgrade or repair, and the guardian repairs it. If `%ProgramData%\OpenAI\Codex`, or the `OpenAI` folder above it, is deleted, the standalone guardian recreates it on its next pass with the protection Setup gives it, and logs that it did. A link on that path is not followed or changed: the guardian names the link once, with the `cmd /c rmdir` command that removes it, and keeps refusing until it is gone. `status` reports a Codex install it could not enroll and names missing policy; treat that warning as a protection failure and stop Codex use until repair succeeds.
 
@@ -162,7 +176,7 @@ If a Codex `requirements.toml` defines `features` or `hooks` as dotted keys or i
 On Windows, Codex, Claude Code and Cursor policy is written with Windows-specific code. The machine-policy engine used on Linux and macOS writes only the Copilot drop-in, OpenCode's managed config and plugin, and the foreign-hook guard summary.
 
 - **Claude Code.** The drop-in `C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json` carries DefenseClaw's hooks and, with the default `managed_hooks_only: enforce`, sets `allowManagedHooksOnly: true`, so user and project Claude Code hooks do not run. `preserve` leaves the lock out and turns the foreign-hook guard on for Claude Code. A `managed-settings.d` file that sorts after `90-defenseclaw.json` and sets `allowManagedHooksOnly` to `false` turns the lock off; `enterprise policy verify` and `enterprise windows verify` report that file.
-- **Claude Code registry policy.** While `HKLM\SOFTWARE\Policies\ClaudeCode\Settings` holds a non-empty value, DefenseClaw does not publish its Claude Code drop-in and reports an error for each Claude Code target. DefenseClaw does not merge with that value. Keep it empty on hosts where DefenseClaw manages Claude Code. Setup install, ensure, upgrade and repair check this before they change anything: with the value set and Claude Code enabled in the config they stop at once with `claude_registry_policy`, name the value and change nothing. Delete the value and run Setup again, or set `guardrail.connectors.claudecode.enabled: false` if the registry policy must stay.
+- **Claude Code registry policy.** Claude Code applies `HKLM\SOFTWARE\Policies\ClaudeCode\Settings` instead of the managed settings files, unless the value sets `"managedSourcesBehavior": "merge"` (Claude Code 2.1.242 and later then apply both, and union their hooks) or holds only `managedSourcesBehavior` and `wslInheritsWindowsSettings` (Claude Code then skips it). DefenseClaw publishes its drop-in under such a value, and under one that carries DefenseClaw's whole hook matrix itself (`policy export --connector claudecode --format claude-hklm-json`). Any other value hides the drop-in: DefenseClaw does not publish it and reports an error for each Claude Code target, and an enrolled Claude Code older than 2.1.242 under `merge` is refused the same way. `enterprise hooks status --json` reports `claude_policy_shadowed_by_hklm` (with `claude_policy_hklm_detail` naming the fix) and `claude_policy_hklm_managed_sources_merge`. Under `merge` it also warns with `claude_policy_hklm_merge_caveat` when the value sets `allowManagedHooksOnly: false` (under merge that can turn off the drop-in's lock) or does not set `"requiredMinimumVersion"` to `2.1.242` or later (Claude Code 2.1.154 to 2.1.241 that a user runs reads only the registry value and runs no DefenseClaw hooks). Setup also stops when the value carries a hooks table that names no DefenseClaw hook and does not merge. Setup install, ensure, upgrade and repair check this before they change anything: with a hiding value and Claude Code enabled in the config they stop at once with `claude_registry_policy`, name the value and change nothing. Add `"managedSourcesBehavior": "merge"` to the value, or delete it, and run Setup again, or set `guardrail.connectors.claudecode.enabled: false` if the registry policy must stay as it is.
 - **Codex.** DefenseClaw parses `requirements.toml` and writes it back whole, so comments and key order are not kept. It always sets `allow_managed_hooks_only = true` and `[features] hooks = true`; if your file sets either to `false`, the transaction fails.
 - **Settings.** `ownership` and `higher_precedence_sources` do not change how Codex, Claude Code or Cursor policy is written. `enterprise policy verify` checks their configured machine hooks even with `ownership: "off"` and zero enrolled users. `managed_hooks_only` changes only the Claude Code lock, and decides whether the foreign-hook guard covers Codex and Claude Code. `ownership` applies to Copilot and OpenCode, and `connectors.claudecode.ownership` also applies to the [version floor](#claude-code-version-floor) drop-in, but not to `90-defenseclaw.json`.
 - **Vendor folders under `%ProgramData%`.** Standard users may create folders there. A vendor folder a standard user created first gets DefenseClaw's owner and protected DACL.
@@ -351,7 +365,7 @@ Some policy sources outrank the files DefenseClaw writes.
 | Codex | `com.openai.codex` managed preferences (`requirements_toml_base64`) in `/Library/Managed Preferences` | macOS | It contains DefenseClaw's managed hooks. Export them with `--format plist`. |
 | Codex | Cloud-managed requirements | All | Not visible on the machine; prove the result with `--live` |
 
-`higher_precedence_sources` decides what happens when a visible source does not include DefenseClaw's hooks. Visible sources exist on macOS and on Windows (the Claude Code HKLM `Settings` value). On Windows the setting changes only what `policy show` and `verify` report: the lifecycle never publishes the Claude Code drop-in while that value is set.
+`higher_precedence_sources` decides what happens when a visible source does not include DefenseClaw's hooks. Visible sources exist on macOS and on Windows (the Claude Code HKLM `Settings` value). On Windows the setting changes only what `policy show` and `verify` report: the lifecycle never publishes the Claude Code drop-in while that value hides it (see [Windows differences](#windows-differences)).
 
 - **`fail` (default).** The source is recorded as a conflict and the connector counts as not covered. `ensure` and `status` report the warning `machine_policy_incomplete`, which names the source, with `security_complete: false`. `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos verify` exits 1. Enrollment continues.
 - **`warn`.** The source is reported as a note, and the connector can still count as covered.

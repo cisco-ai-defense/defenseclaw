@@ -107,13 +107,35 @@ func TestStartRefusesAProjectOverTheLimit(t *testing.T) {
 	if !errors.As(err, &large) || !errors.Is(err, osw.ErrTooLarge) {
 		t.Fatalf("err = %v", err)
 	}
-	for _, want := range []string{"This folder is ", " MB, over the 1 MB limit.", "--clone REPO_URL"} {
+	for _, want := range []string{"This folder is ", " MiB, over the 1 MiB upload limit.", "--clone REPO_URL"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("%q lacks %q", err, want)
 		}
 	}
 	if _, err := osw.LoadCopy(o.data, "big"); err == nil {
 		t.Fatal("a refused copy left a record")
+	}
+}
+
+func TestPreflightPrintsBiggestDirs(t *testing.T) {
+	o := newOperator(t)
+	o.initRepo()
+	write(t, o.project, "data/train.bin", strings.Repeat("x", 4096), 0o644)
+	write(t, o.project, "assets/icon.bin", strings.Repeat("x", 2048), 0o644)
+	write(t, o.project, "scratch/local.bin", strings.Repeat("x", 8192), 0o644)
+	write(t, o.project, "secrets/.env", "API_KEY=secret", 0o600)
+	prepared, err := Preflight(t.Context(), StartOptions{
+		Project: o.project, DataDir: o.data, Home: o.home, MaxBytes: 1 << 20, Masks: []string{"scratch/**"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Close()
+	var preview strings.Builder
+	prepared.Preview(&preview)
+	if s := preview.String(); !strings.Contains(s, "Biggest: data/ 4096 bytes, assets/ 2048 bytes") ||
+		strings.Contains(s, "scratch/") || strings.Contains(s, "secrets/") {
+		t.Fatalf("preview %q", s)
 	}
 }
 

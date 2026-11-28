@@ -708,7 +708,7 @@ func write089Store(t *testing.T, dbPath string) {
 		"runtime assets: add durable connector session provenance state" {
 		t.Fatal("migration 29 is no longer the last 0.8.9 migration")
 	}
-	legacy, err := NewStore(dbPath)
+	legacy, err := NewStore(realMigrationPath(dbPath))
 	if err != nil {
 		t.Fatal(err)
 	}

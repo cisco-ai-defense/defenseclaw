@@ -180,6 +180,22 @@ func loadRouteBackupWith(read RouteOnlyFileReader, dataDir, connector string) (r
 	return b, nil
 }
 
+// RollbackTargetRestoresRouteOnly reports whether the install a rollback
+// returns to (its data in <dataDir>/previous/data) holds a route-only record
+// of its own for connector: it then restores, or renders again, the route-only
+// settings itself. Without one, only this install's record knows the values a
+// render replaced (rel-1-0-10 GAP-2021).
+func RollbackTargetRestoresRouteOnly(dataDir, connector string) bool {
+	return RouteOnlyRecordApplied(rollbackPartnerDataDir(dataDir), connector)
+}
+
+// RouteOnlyRecordApplied reports whether dataDir holds a route-only record of
+// connector with a render in place.
+func RouteOnlyRecordApplied(dataDir, connector string) bool {
+	b, err := loadRouteBackup(dataDir, connector)
+	return err == nil && len(b.Applied) > 0
+}
+
 // saveRouteBackup writes (or, with nothing applied, removes) the route record
 // in the data dir. A managed Windows data dir keeps the DACL the service
 // converged (the user edits files, SYSTEM alone changes the DACL), so the

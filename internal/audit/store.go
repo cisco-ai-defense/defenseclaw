@@ -30,6 +30,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -256,6 +257,9 @@ type Store struct {
 	// secureClientSchema keeps the tables, columns and indexes main creates
 	// (WithSecureClientSchema).
 	secureClientSchema bool
+	// migrationTimeout, when over 0, bounds each schema migration (tests);
+	// see startMigration for the default.
+	migrationTimeout time.Duration
 	// pageCacheKiB, when over 0, replaces the 20 MB page cache of every
 	// connection, and noReadPool keeps the reads on the writer
 	// (WithSmallFootprint).
@@ -782,6 +786,7 @@ func retryBusyObserved(
 }
 
 func (s *Store) execDB(ctx context.Context, op string, query string, args ...any) (sql.Result, error) {
+	s.followWriteLockHold()
 	var res sql.Result
 	err := retryBusyObserved(ctx, op, s.sqliteBusyObservabilityV8(), func() error {
 		var execErr error
@@ -2707,24 +2712,144 @@ func (s *Store) proveDurableWrite(ctx context.Context) error {
 type storeMigrationTx struct {
 	*sql.Tx
 	secureClient bool
+	// ctx bounds every statement of the migration. The statements run in
+	// SQLite C code that database/sql cannot stop, so a cancelled ctx is the
+	// only way to turn a stalled ALTER or schema re-parse into an error
+	// (GAP-0664). A zero value means no bound.
+	ctx context.Context
+	// run, when set, counts the statements that finished, for the
+	// migration's watchdog (GAP-0945).
+	run *migrationRun
+}
+
+func (tx storeMigrationTx) finished() {
+	if tx.run != nil {
+		tx.run.statements.Add(1)
+	}
 }
 
 func (tx storeMigrationTx) secureClientMigration() bool { return tx.secureClient }
+
+func (tx storeMigrationTx) context() context.Context {
+	if tx.ctx == nil {
+		return context.Background()
+	}
+	return tx.ctx
+}
+
+func (tx storeMigrationTx) Exec(query string, args ...any) (sql.Result, error) {
+	defer tx.finished()
+	return tx.ExecContext(tx.context(), query, args...)
+}
+
+func (tx storeMigrationTx) Query(query string, args ...any) (*sql.Rows, error) {
+	defer tx.finished()
+	return tx.QueryContext(tx.context(), query, args...)
+}
+
+func (tx storeMigrationTx) QueryRow(query string, args ...any) *sql.Row {
+	defer tx.finished()
+	return tx.QueryRowContext(tx.context(), query, args...)
+}
+
+const (
+	// migrationTestTimeout bounds one schema migration of a store a test
+	// binary opens: well under go test's 10 minute default, so a stall
+	// fails that test, naming the migration, instead of the package
+	// timing out (GAP-0945).
+	migrationTestTimeout = 3 * time.Minute
+	// migrationProgressInterval is how often the watchdog of a running
+	// migration reports.
+	migrationProgressInterval = 5 * time.Minute
+)
+
+// migrationRun is one schema migration's context and watchdog.
+//
+// A migration has no time limit in the gateway (GAP-0945). A one-time
+// migration of a large audit database (the history purge, an index on
+// every retention table) can take many minutes on a slow disk; a limit
+// would roll it back, fail Init, and redo the same work on every restart,
+// so the gateway would never start. Instead the watchdog says on stderr,
+// every migrationProgressInterval, that the migration still runs and how
+// many of its statements finished, and names a check in which none did.
+type migrationRun struct {
+	ctx        context.Context
+	cancel     context.CancelFunc
+	done       chan struct{}
+	statements atomic.Int64
+}
+
+// startMigration starts migration ver of component ("audit",
+// "judge_body"). limit over 0 bounds it (tests); otherwise a store a test
+// binary opens gets migrationTestTimeout and the gateway no bound.
+func startMigration(component string, ver int, description string, limit time.Duration) *migrationRun {
+	limit = migrationLimit(limit, testing.Testing())
+	r := &migrationRun{done: make(chan struct{})}
+	if limit > 0 {
+		r.ctx, r.cancel = context.WithTimeout(context.Background(), limit)
+	} else {
+		r.ctx, r.cancel = context.WithCancel(context.Background())
+	}
+	go r.watch(os.Stderr, component, ver, description, time.Now(), migrationProgressInterval)
+	return r
+}
+
+// migrationLimit is a migration's time limit, 0 for none: limit when over
+// 0, else migrationTestTimeout in a test binary and none in the gateway.
+func migrationLimit(limit time.Duration, underTest bool) time.Duration {
+	switch {
+	case limit > 0:
+		return limit
+	case underTest:
+		return migrationTestTimeout
+	}
+	return 0
+}
+
+func (r *migrationRun) watch(w io.Writer, component string, ver int, description string, start time.Time, every time.Duration) {
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	last := int64(-1)
+	for {
+		select {
+		case <-r.done:
+			return
+		case <-tick.C:
+			n := r.statements.Load()
+			state := "running"
+			if n == last {
+				state = "no statement finished since the last report (one long statement, or a stall)"
+			}
+			last = n
+			fmt.Fprintf(w, "[%s] migration %d (%s) still running after %s, %d statements done: %s. "+
+				"Do not stop the gateway: a stopped migration rolls back and starts over.\n",
+				component, ver, description, time.Since(start).Round(time.Second), n, state)
+		}
+	}
+}
+
+func (r *migrationRun) finish() {
+	close(r.done)
+	r.cancel()
+}
 
 // applyMigration runs a single migration inside a transaction so that both the
 // DDL and the schema_version bump are atomic. On failure the transaction is
 // rolled back and the version remains unchanged, making retries safe.
 func (s *Store) applyMigration(ver int, m migration) error {
-	tx, err := s.db.Begin()
+	run := startMigration("audit", ver, m.description, s.migrationTimeout)
+	defer run.finish()
+	ctx := run.ctx
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("audit: begin migration %d: %w", ver, err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	if err := m.apply(storeMigrationTx{Tx: tx, secureClient: s.secureClientSchema}); err != nil {
+	if err := m.apply(storeMigrationTx{Tx: tx, secureClient: s.secureClientSchema, ctx: ctx, run: run}); err != nil {
 		return fmt.Errorf("audit: migration %d (%s): %w", ver, m.description, err)
 	}
-	if _, err := txExecContextObserved(context.Background(), tx, "migration_version_insert", s.sqliteBusyObservabilityV8(), `INSERT INTO schema_version (version, applied_at) VALUES (?, ?)`,
+	if _, err := txExecContextObserved(ctx, tx, "migration_version_insert", s.sqliteBusyObservabilityV8(), `INSERT INTO schema_version (version, applied_at) VALUES (?, ?)`,
 		ver, time.Now().UTC()); err != nil {
 		return fmt.Errorf("audit: record migration %d: %w", ver, err)
 	}

@@ -138,6 +138,8 @@ What the Substrate keys do:
 - **`unattended_asks`** is what happens when an unattended run (`run --task`, `--batch`) hits an ask: `deny` (the default) refuses it at once; `queue` holds it, notifies your webhooks, and lets the owner answer with `defenseclaw substrate approvals` and `approve <id>`. If nobody answers within `ask_timeout`, the ask is denied.
 - **`actor_secrets`** names values a program inside the agent may read, such as a read-only package token. They are short-lived, marked as exposed, and DefenseClaw refuses any model call or outbound request that carries one. Everything else stays outside the agent (see [Secrets](/docs/substrate/secrets)).
 - **`ask_hosts`** and **`url_rules`** make the egress callout ask a person, or refuse, for requests to hosts the allow list already opens. An `ask_hosts` approval covers the host. A `url_rules` approval covers the rule and method it was asked for: the ask shows `METHOD host /prefix*`. Every matching `url_rules` rule counts, whatever its order or whether `substrate.admin` or a profile wrote it, and the strictest wins: deny, then ask. An approval never lifts a deny. A rule with `action: allow` is refused when the configuration loads.
+- **`git_push`** (Preview) decides whether `pull --push-branch` pushes an agent's work to the repository it cloned: `allow`, `ask` or `deny`. The cluster's `substrate.git.push_branch: deny` turns off the `pull --push-branch` command for everyone, whatever a profile says. It does not stop an agent's own `git push`: the egress rules (`url_rules`, `ask_hosts`) and asks govern that. A push goes out with the credential bound to the git host, and a person's "always" answer covers that person, profile and host only.
+- **Git servers** (Preview). Agents reach git over https only. `substrate.git.https_rewrite` turns the ssh addresses of your own servers into https, `substrate.git.submodules` and `substrate.git.lfs` turn off submodules and LFS for `run --clone`. See [Secrets](/docs/substrate/secrets) for examples.
 
 Two rules keep the scopes apart: `openshell.admin` on a laptop refuses the Substrate keys, and `substrate.admin` refuses the laptop-only keys (`allow_mount`, `allow_host_ports`, `process_tree`, `driver_fallback`, `require_copy_for` and locked `workdir.*`). A profile shared by laptops and the cluster may carry both; each side reads only its own.
 
@@ -164,7 +166,7 @@ defenseclaw substrate template publish REGISTRY/actors/claudecode@sha256:... TAR
   --template eng-payments/claude --class microvm
 ```
 
-`relay-session.pub` is the public half of the gateway's relay session key (Secret `defenseclaw-relay-session`, which the chart creates; [the open-source setup](/docs/substrate/open-source) shows how to read it). Without it nobody could attach to the agents, so the build stops with an error. Each build is scanned and attested, and the controller admits only an image whose attestation verifies against the anchors. A finding at HIGH or above stops the build; a known false positive can be accepted with `--accept-finding RULE-ID --reason "..."`, and both are recorded in the attestation. A template made any other way, for example with plain `kubectl ate create actor-template`, still starts, but its agents get no network. The admin sees why in `doctor --cluster` and in the fleet view.
+`relay-session.pub` is the public half of the gateway's relay session key (Secret `defenseclaw-relay-session`, which the chart creates; [the open-source setup](/docs/substrate/open-source) shows how to read it). The relay checks each session token with that key, then asks the gateway (`--verify-url`, by default the actor listener's `/api/v1/substrate/relay/verify`), which refuses a token that doesn't name the agent's own person, or whose sign-in was ended (`logout`, `admin revoke`; Preview). Every image asks the gateway; a kit with session keys and no `verify_url` is refused at build and the relay won't start with one. Each build is scanned and attested, and the controller admits only an image whose attestation verifies against the anchors. A finding at HIGH or above stops the build; a known false positive can be accepted with `--accept-finding RULE-ID --reason "..."`, and both are recorded in the attestation. A template made any other way, for example with plain `kubectl ate create actor-template`, still starts, but its agents get no network. The admin sees why in `doctor --cluster` and in the fleet view.
 
 </Step>
 
@@ -217,6 +219,12 @@ The TUI, with its policy panel, is an administrator tool; a standard user does n
 
 </Steps>
 
+### Agent activity and notifications (Preview)
+
+`substrate list` and `substrate status` show what each agent is doing, from times the gateway records. `substrate watch` prints a line when an agent raises an ask or finishes a `--task` run. A developer can also have it show a desktop notification, once per ask, by turning on `notifications.enabled` and `notifications.substrate` on the laptop. The notification names the kind and the host or tool, never the arguments.
+
+To keep notifications off for everyone, set `substrate.activity.notifications: off` in the gateway config. `substrate watch` then prints lines only, whatever a developer's own settings say. `substrate.activity.status_window: 0s` also turns off the `thinking` state.
+
 ## The developer
 
 <Steps>
@@ -236,7 +244,7 @@ Signed in as alice@example.test on default.
 Next: start a coding agent in a project folder with: defenseclaw substrate run claude
 ```
 
-![PowerShell on a Windows laptop: defenseclaw substrate login prints the sign-in page and device code ABCD-EFGH and ends with Signed in as alice on default, then defenseclaw substrate whoami and doctor show the group engineering and the sign-in kept in Windows DPAPI for the current user, ok for every check, skip for attach and ready for agents](/images/substrate/enterprise/windows-laptop-login.png)
+![PowerShell on a Windows laptop: defenseclaw substrate login prints the sign-in page and device code ABCD-EFGH and ends with Signed in as alice on default, then defenseclaw substrate whoami and doctor show the group engineering and the sign-in kept in Windows DPAPI for the current user, ok for every check, skip for attach, and the last line saying the checks on this computer pass and the cluster components were not checked](/images/substrate/enterprise/windows-laptop-login.png)
 
 </Step>
 
@@ -293,9 +301,10 @@ Nothing you change on your laptop loosens this, because the policy lives in the 
 ## The security team
 
 - **Every agent, by person.** Each event names the agent, the person who started it, their profile and team, the model and the route, and the cluster. It carries Substrate's own actor UID (`ate.actor.uid`). A suspended agent that resumes on another machine stays the same agent.
-- **The fleet view.** Agents by team, checks and blocks, asks and refusals, templates that failed attestation, actors DefenseClaw didn't create, and policy drift and conflicts. It comes from the Grafana [Substrate agents board](/docs/observability/grafana-dashboards). `defenseclaw substrate status --cluster --install-file install.yaml --json` is the cluster's health (gateway, leader, controller and callout replicas) and the setup checks, read with `kubectl`; it does not list agents. Spend per person is not part of it yet; see [Feature coverage](/docs/substrate/features#routing-budgets-and-cost).
+- **The fleet view.** Agents by team, checks and blocks, asks and refusals, templates that failed attestation, actors DefenseClaw didn't create, and policy drift and conflicts. It comes from the Grafana [Substrate agents board](/docs/observability/grafana-dashboards). `defenseclaw substrate status --cluster --install-file install.yaml --json` is the cluster's health (gateway, leader, controller and callout replicas) and the setup checks, read with `kubectl`; it does not list agents. Spend per person is in `defenseclaw substrate usage --all --by person` (Preview); see [Feature coverage](/docs/substrate/features#routing-budgets-and-cost).
 - **Export.** The same OpenTelemetry events as on laptops, with the `substrate` rows described in [Sandbox telemetry](/docs/observability/sandbox-telemetry), so the existing Splunk or Grafana setup works unchanged.
 - **What changes when you tighten a profile.** The controller rewrites the allow list of every affected agent within about 5 seconds, without a restart. New connections follow the new rule, and a suspended agent gets it before it resumes. See [When a config change takes effect](/docs/substrate/reference#when-a-config-change-takes-effect).
+- **TLS to the agent (Preview).** Templates built with DefenseClaw 1.0.11 or later serve the terminal and file traffic over TLS between the cluster router and the agent, with a certificate the gateway signs for that agent only. Set `substrate.relay_tls: required` to refuse attaching to agents on older templates; until then each such attach writes an audit row and `doctor` warns. A managed install refuses a second certificate for an agent asked for without proof of the relay's key (`substrate.relay_cert_reissue: auto`, which is `refuse` here); if an agent's relay restarted and attach fails with `reissue_refused`, see Troubleshooting.
 
 ## How this differs from managed laptops
 

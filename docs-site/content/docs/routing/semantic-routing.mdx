@@ -42,7 +42,7 @@ If the classifier is down, times out or names a model that is not configured, ro
 
 - Model backends in `routing.models`. `base_url` is the origin, for example `https://api.openai.com`, without `/v1/chat/completions`.
 - Provider keys are in the environment or `~/.defenseclaw/.env`, never in `config.yaml`.
-- Only for `vllm_sr`: Docker running Linux containers (macOS or Linux), or a remote router. On native Windows `defenseclaw setup routing` says so and refuses `--enable`; `--disable` still turns off a routing block copied from another machine.
+- Only for `vllm_sr`: Docker running Linux containers (macOS or Linux), or a remote router. On native Windows `defenseclaw setup routing --enable` says so and refuses while the classifier is `vllm_sr`, pointing to `defenseclaw routing setup --classifier rules`; `--disable` still turns off a routing block copied from another machine.
 
 ## Built-in rules classifier (1.0.10)
 
@@ -190,9 +190,11 @@ The routing explain command shows why one call went where it went: the model the
 ![The routing explain output for a sensitive prompt: requested model us.openai.gpt-5.6-luna, outcome applied to the local alias, category sensitive, source rules, reasons filtered_by:sensitive and sensitive:signal:positive](/images/routing/cli-routing-explain.png)
 {/* tv-demo:end shots */}
 
-## Going back to a release before 1.0.10
+## Going back to an earlier release
 
 A release before 1.0.10 has no route-only listener, so the Claude Code and Codex model settings route-only changed go back first. `defenseclaw rollback` (and `defenseclaw upgrade --version` on Windows) does it in the installer, after its prompt, with the gateway stopped. On Linux and macOS, `defenseclaw upgrade --version 1.0.9` asks first (or takes `--yes`), stops the gateway and puts them back; if they cannot be put back, or the older installer fails, the gateway of this release starts again and writes them again. Restart the agent afterwards. When you run an older release's installer yourself (`install.sh --version 1.0.9`), run `defenseclaw routing disable --connector <name>` for each route-only connector first.
+
+`defenseclaw rollback` to 1.0.10 or later puts back the model settings of every connector that release does not route itself, such as one you enabled route-only for after the upgrade: Codex gets its own `model_provider` back and Claude Code its own base URL. A connector the earlier release routed stays routed, and its gateway takes the route over when it starts.
 
 ### Ask the decision model too
 

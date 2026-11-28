@@ -66,6 +66,7 @@ func suspendRig(t *testing.T) (*rig, *suspendable, Options) {
 // and it says so), and is back on the agent when the actor resumes.
 func TestSuspendDropReconnects(t *testing.T) {
 	r, s, o := suspendRig(t)
+	o.KeyReplay = KeyReplayOff // the count-only mode (B3.1 replay is in replay_test.go)
 	run := r.start(o)
 	waitFor(t, "screen 1", func() bool { return strings.Contains(r.out.String(), "screen:1") })
 	s.down.Store(true)
@@ -147,6 +148,7 @@ func TestReconnectGivesUpAfterABoundedWait(t *testing.T) {
 // connection takes keys only after the relay greets it.
 func TestKeysTypedDuringASlowReconnectAreNotSent(t *testing.T) {
 	r, s, o := suspendRig(t)
+	o.KeyReplay = KeyReplayOff // the count-only mode (B3.1 replay is in replay_test.go)
 	run := r.start(o)
 	waitFor(t, "screen 1", func() bool { return strings.Contains(r.out.String(), "screen:1") })
 	hold := make(chan struct{})

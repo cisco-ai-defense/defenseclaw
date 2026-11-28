@@ -6,7 +6,9 @@
 package gateway
 
 import (
+	"encoding/json"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/skilldigest"
@@ -18,19 +20,37 @@ import (
 // of being skipped without a receipt or a refusal.
 func TestGAP0039FoldersPastThePostScanCapAreNotSkipped(t *testing.T) {
 	var files, skills []map[string]any
+	var within []string
 	for i := 0; i <= substrateSkillFoldersMax; i++ {
 		dir := fmt.Sprintf("/home/agent/.claude/skills/s%02d", i)
 		body := []byte(fmt.Sprintf("---\nname: s%02d\n---\nok", i))
 		files = append(files, map[string]any{"role": "skill_file", "path": dir + "/SKILL.md", "size": len(body), "sha256": "x", "content": body})
 		skills = append(skills, map[string]any{"path": dir, "fp": skilldigest.Digest(map[string][]byte{"SKILL.md": body}), "attached": true})
+		if i < substrateSkillFoldersMax {
+			within = append(within, dir)
+		}
 	}
-	outs, alerts := gap0039Do(t, true, gap0039Post{files: files, skills: skills})
+	// The cap keeps the first folders in path order; the folders within it
+	// are scanned in parallel (GAP-0980/0982), so every check below is on a
+	// set, never on the scan order (GAP-1058).
+	scan := &fakeSkillScanner{}
+	outs, alerts := gap0039DoWith(t, scan, true, gap0039Post{files: files, skills: skills})
 	last := fmt.Sprintf("/home/agent/.claude/skills/s%02d", substrateSkillFoldersMax)
-	if !gap0039Quarantined(outs[0], last) || len(alerts) == 0 {
-		t.Fatalf("folder past the cap: %s %v", outs[0][substrateQuarantineField], alerts)
+	var q []SubstrateQuarantine
+	_ = json.Unmarshal(outs[0][substrateQuarantineField], &q)
+	if len(q) != 1 || q[0].Path != last || len(alerts) == 0 {
+		t.Fatalf("want only the folder past the cap refused, with an alert: %+v %v", q, alerts)
 	}
-	if gap0039Quarantined(outs[0], "/home/agent/.claude/skills/s00") {
-		t.Fatal("a folder within the cap was refused")
+	if got := scan.dirs(); !slices.Equal(got, within) {
+		t.Fatalf("scanned %v, want the %d folders within the cap", got, substrateSkillFoldersMax)
+	}
+	for _, dir := range within {
+		if !receipted(outs[0], dir) {
+			t.Fatalf("no receipt for %s within the cap: %s", dir, outs[0][substrateScannedField])
+		}
+	}
+	if receipted(outs[0], last) {
+		t.Fatal("a receipt for the folder past the cap")
 	}
 }
 

@@ -80,7 +80,7 @@ func TestToolChainPendingMigrationIsAppendOnlyContentFreeAndReady(t *testing.T) 
 }
 
 func TestToolChainPendingTableIsMandatoryForStoreReadiness(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "missing-pending.db"))
+	store, err := NewStore(realMigrationPath(filepath.Join(t.TempDir(), "missing-pending.db")))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -94,8 +94,16 @@ var containIDMap = func(id int) []syscall.SysProcIDMap {
 }
 
 func init() {
-	if len(os.Args) < 5 || os.Args[0] != containSupervisorArg0 || os.Args[3] != "--" ||
-		os.Getenv(containSupervisorEnv) != "1" {
+	if len(os.Args) < 5 || os.Args[0] != containSupervisorArg0 || os.Getenv(containSupervisorEnv) != "1" {
+		return
+	}
+	if os.Args[1] == containPodMode {
+		if len(os.Args) < 6 || os.Args[4] != "--" {
+			os.Exit(containExitNotContained)
+		}
+		os.Exit(execPodScanner(os.Args[5:], os.Args[2], os.Args[3]))
+	}
+	if os.Args[3] != "--" {
 		return
 	}
 	switch os.Args[1] {

@@ -265,7 +265,7 @@ func TestUnpinnedSetupCannotUseMatchingDeploymentRecord(t *testing.T) {
 			requireOK(t, h.ensure(pinned))
 			beforePrerequisites := h.read(h.env.prerequisitesPath())
 			beforeApplied := h.env.loadOpenShellState().Applied
-			if beforeApplied == nil || beforeApplied.Version != "0.1.6" || beforeApplied.RaisedFrom != "0.1.5" {
+			if beforeApplied == nil || beforeApplied.Version != openshell.InstallerVersion || beforeApplied.RaisedFrom != "0.1.5" {
 				t.Fatalf("initial setup state = %+v", beforeApplied)
 			}
 

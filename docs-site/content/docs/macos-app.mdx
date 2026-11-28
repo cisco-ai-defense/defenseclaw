@@ -20,6 +20,17 @@ DefenseClaw for macOS is a menu-bar app for Apple-silicon Macs running macOS 14 
 
 A release is notarized only when its Apple signing secrets were set at release time. Otherwise the app is ad-hoc signed, and macOS asks you to confirm the first launch. **Update** in the app installs the latest release and keeps your configuration, tokens and audit database. Running `install.sh` again also updates the app (see [Upgrade](/docs/get-started/upgrade)).
 
+## Repair after an older app started the gateway as root
+
+App versions up to 1.0.8 could start your gateway as an administrator. If that happened on your Mac, files in `~/.defenseclaw` and some agent config files in your home are still owned by root. When the app sees them, it asks for administrator approval once and hands them back to your account. It never starts a gateway as root any more.
+
+To hand a file back, the repair first moves it into a folder only root can open, `/private/var/db/com.cisco.defenseclaw.macos.GatewayAdmin`, changes its owner there, and moves it back under its own name. This is what you may see afterward:
+
+- **A file that could not go back.** It stays in the holding folder with a note of where it came from, and the repair summary names the folder and the file. The next repair of the same folder returns it.
+- **A name that is already taken.** If something else already uses the file's name, the file goes back beside it with `.defenseclaw-kept` added to its name, for example `config.yaml.defenseclaw-kept`.
+- **A home on another volume.** The holding folder is on the startup disk, and a file cannot be moved from another volume into it. The repair does not hand that file over and lists it as refused. Change its owner yourself with `sudo chown`, or move the home to the startup disk.
+- **The holding folder itself.** A repair that ends with nothing held removes the folder. Run the repair once more before you remove DefenseClaw for Mac: it returns every held file or lists the ones it could not. If the folder is still there afterward, move each file named in the summary back by hand as root, then remove the folder with `sudo rmdir`.
+
 ## Panels
 
 | Group | Panels |
@@ -81,6 +92,7 @@ Open **Sandboxes** in the sidebar (Govern) or press `⌘⇧B`. The sidebar item 
 | Sandboxes | Name, Phase, Harness, Pack/Profile, Mode, Up, Sites (contacted and blocked), Alerts. |
 | Selected sandbox | Harness, project, skip-permissions mode, tool calls, hook events, last tool block, undo, run image, alerts. |
 | Asks | Each waiting ask with **Approve**, **Always…** (asks first) and **Reject**. |
+| Vault (Preview) | Your [vault](/docs/sandboxes/vault) secrets: name, host, status, source, last use and uses, never a value. **Confirm…** (for a secret captured from a sandbox, still **unconfirmed**), **Add…**, **Replace value…**, **Set host…**, **Rename…** and **Remove…** run `defenseclaw sandbox vault ...`; a value is typed hidden and sent on standard input. |
 | Activity | The 60 newest feed events. A blocked destination you can lift has an **Unblock** menu: **Only in** the sandbox, or **In every sandbox (always)…**, which asks first and adds the host to `openshell.egress.unblocked`. Private networks stay closed. |
 
 Actions for the selected sandbox:
@@ -106,7 +118,7 @@ The app never installs OpenShell. When OpenShell or e2fsprogs is missing, run th
 defenseclaw sandbox setup --install-openshell
 ```
 
-On OpenShell 0.1.1 to 0.1.5, which run no new sandbox, the same command upgrades OpenShell to 0.1.6 in place, which restarts the gateway. Setup keeps the release you have while a MicroVM sandbox runs, so save or sync each guest’s work first, then stop it with `defenseclaw sandbox stop NAME`; a failed disk sync can lose later changes.
+On OpenShell 0.1.1 to 0.1.5, which run no new sandbox, the same command upgrades OpenShell to 0.1.9 in place, which restarts the gateway. Setup keeps the release you have while a MicroVM sandbox runs, so save or sync each guest’s work first, then stop it with `defenseclaw sandbox stop NAME`; a failed disk sync can lose later changes.
 
 ### Config editor
 

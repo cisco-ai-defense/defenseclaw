@@ -20,11 +20,13 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	privatekeyfixture "github.com/defenseclaw/defenseclaw/internal/secretshape/testfixture"
 )
 
@@ -253,6 +255,33 @@ var gap0429OpenAIChat = streamTailFormat{
 	terminal: "data: [DONE]\n\n", delta: retestOAIFrame,
 }
 
+// gap0429Stores is the one audit store and logger of each test that serves
+// stream rows (gap0429Proxy), keyed by its *testing.T.
+var gap0429Stores sync.Map
+
+type gap0429Store struct {
+	store  *audit.Store
+	logger *audit.Logger
+}
+
+// gap0429Proxy is a new action-mode test proxy for one stream row, on the
+// audit store of t made once for all its rows: a fresh store per row was
+// 73% of the time of the /llm table (a copy of the migrated template, its
+// Init and its read pool), and the stream paths only write audit rows, they
+// never read them. Every row still gets a proxy of its own.
+func gap0429Proxy(t *testing.T, prov LLMProvider, insp ContentInspector) *GuardrailProxy {
+	t.Helper()
+	v, ok := gap0429Stores.Load(t)
+	if !ok {
+		store, logger := testStoreAndLogger(t)
+		v = gap0429Store{store: store, logger: logger}
+		gap0429Stores.Store(t, v)
+		t.Cleanup(func() { gap0429Stores.Delete(t) })
+	}
+	s := v.(gap0429Store)
+	return newTestProxyOnStore(t, prov, insp, "action", s.store, s.logger)
+}
+
 func gap0429LLMRun(t *testing.T, rec *httptest.ResponseRecorder, insp ContentInspector, pack string, pieces []string) {
 	t.Helper()
 	gap0429LLMProvider(t, rec, &mockProvider{streamChunks: gap0429Chunks(pieces)}, insp, pack)
@@ -261,8 +290,15 @@ func gap0429LLMRun(t *testing.T, rec *httptest.ResponseRecorder, insp ContentIns
 func gap0429Chunks(pieces []string) []StreamChunk {
 	var chunks []StreamChunk
 	for _, p := range pieces {
+		if p == gap1265Finish0 {
+			stop := "stop"
+			chunks = append(chunks, StreamChunk{ID: "c", Object: "chat.completion.chunk", Model: "gpt-4",
+				Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{}, FinishReason: &stop}}})
+			continue
+		}
+		choice, text := gap1265Piece(p)
 		chunks = append(chunks, StreamChunk{ID: "c", Object: "chat.completion.chunk", Model: "gpt-4",
-			Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{Content: p}}}})
+			Choices: []ChatChoice{{Index: choice, Delta: &ChatMessage{Content: text}}}})
 	}
 	fin := "stop"
 	return append(chunks, StreamChunk{ID: "c", Object: "chat.completion.chunk", Model: "gpt-4",
@@ -271,7 +307,7 @@ func gap0429Chunks(pieces []string) []StreamChunk {
 
 func gap0429LLMProvider(t *testing.T, rec *httptest.ResponseRecorder, prov LLMProvider, insp ContentInspector, pack string) {
 	t.Helper()
-	gap0429LLMProxy(t, rec, newTestProxy(t, prov, insp, "action"), pack)
+	gap0429LLMProxy(t, rec, gap0429Proxy(t, prov, insp), pack)
 }
 
 // gap0429LLMProxy is gap0429LLMProvider through proxy.
@@ -318,12 +354,12 @@ func gap0429Passthrough(t *testing.T, f streamTailFormat, rec *httptest.Response
 	orig := providerDomains
 	providerDomains = append([]providerDomainEntry{{domain: "127.0.0.1", name: f.provider}}, orig...)
 	defer func() { providerDomains = orig }()
-	newTestProxy(t, &mockProvider{}, insp, "action").handlePassthrough(rec, req)
+	gap0429Proxy(t, &mockProvider{}, insp).handlePassthrough(rec, req)
 }
 
 func gap0429RawForwardRun(t *testing.T, rec *httptest.ResponseRecorder, insp ContentInspector, pack string, pieces []string) {
 	t.Helper()
-	gap0429RawForward(t, rec, newTestProxy(t, &mockProvider{}, insp, "action"), pack, pieces)
+	gap0429RawForward(t, rec, gap0429Proxy(t, &mockProvider{}, insp), pack, pieces)
 }
 
 // gap0429RawForward is gap0429RawForwardRun through proxy.
@@ -398,8 +434,8 @@ type gap0429Result struct {
 	text          string // reply text the client got
 }
 
-func gap0429Serve(t *testing.T, row gap0429Row) gap0429Result {
-	t.Helper()
+// gap0429Text is the reply text of row and the extra cut offsets of its shape.
+func gap0429Text(row gap0429Row) (string, []int) {
 	filler := retestFiller(row.filler)[:row.filler]
 	pre := row.shape.pre(filler)
 	text := pre + row.secret.text + row.trailer
@@ -407,6 +443,26 @@ func gap0429Serve(t *testing.T, row gap0429Row) gap0429Result {
 	if row.shape.cut != nil {
 		cut = row.shape.cut(filler)
 	}
+	return text, cut
+}
+
+// gap0429IsWholeAgain reports a row of 4096-byte pieces whose whole reply
+// text is no longer than 4096 bytes: gap0429Pieces cuts at 4096, 8192, ...
+// only below len(text), so such a row serves exactly the pieces (one piece
+// plus the shape's own cuts) of the whole (size 0) row of the same
+// secret, shape, filler and pack. It is a duplicate of that row, so the
+// tables skip it and say how many they skipped.
+func gap0429IsWholeAgain(row gap0429Row) bool {
+	if row.size != 4096 {
+		return false
+	}
+	text, _ := gap0429Text(row)
+	return len(text) <= 4096
+}
+
+func gap0429Serve(t *testing.T, row gap0429Row) gap0429Result {
+	t.Helper()
+	text, cut := gap0429Text(row)
 	rec := httptest.NewRecorder()
 	w := &gap0429Watch{GuardrailInspector: retestInspector(), secret: row.secret.text, rec: rec}
 	row.path.run(t, rec, w, row.pack, gap0429Pieces(text, row.size, cut))
@@ -431,6 +487,7 @@ func gap0429Run(t *testing.T, paths []gap0429Path) {
 	keys, tokens := gap0429Keys(t), gap0429Tokens(t)
 	tallies := map[string]*gap0429Tally{}
 	sizes := gap0429Sizes()
+	dropped := 0
 	for _, path := range paths {
 		for _, pack := range gap0429Packs() {
 			var rows []gap0429Row
@@ -459,6 +516,10 @@ func gap0429Run(t *testing.T, paths []gap0429Path) {
 				}
 			}
 			for _, row := range rows {
+				if gap0429IsWholeAgain(row) {
+					dropped++
+					continue
+				}
 				name := fmt.Sprintf("%s/%s/%s/%s/size=%d", path.name, pack, row.secret.name, row.shape.name, row.size)
 				res := gap0429Serve(t, row)
 				body := row.secret.end - row.secret.body
@@ -488,6 +549,7 @@ func gap0429Run(t *testing.T, paths []gap0429Path) {
 			}
 		}
 	}
+	t.Logf("GAP0429-TALLY skipped %d rows of 4096-byte pieces whose reply text is at most 4096 bytes (the same pieces as their whole rows)", dropped)
 	keysOut := make([]string, 0, len(tallies))
 	for k := range tallies {
 		keysOut = append(keysOut, k)

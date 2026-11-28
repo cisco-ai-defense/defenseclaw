@@ -172,6 +172,13 @@ type DoctorReport struct {
 	// Managed is set on a managed computer (Doctor.Managed), where the
 	// organization installs OpenShell: nothing is offered to install.
 	Managed bool `json:"managed,omitempty"`
+	// ManagedOffReason is why sandboxes are off for the account on a managed
+	// computer, in the words sandbox run refuses with (sandboxapi.Status.OffMessage
+	// for every sandboxapi.Status.ManagedOff kind but none); empty while they
+	// are on, and for an account that is not managed. The doctor's verdict,
+	// exit status and ready flag read it (GAP-2036). It is not part of the JSON
+	// report.
+	ManagedOffReason string `json:"-"`
 }
 
 // OK reports whether no check failed.
@@ -446,6 +453,12 @@ type Doctor struct {
 	// processes and give fixes this account must not apply (GAP-0173,
 	// GAP-0174, GAP-0215).
 	Managed bool
+	// MachineDriver, when set, is the compute driver a Mac's machine checks
+	// are made for in place of the gateway's (macChecks): setup checks what
+	// the docker driver needs (Docker Desktop's Landlock, host networking
+	// and file sharing) before it moves a gateway off the vm driver, whose
+	// view skips them (GAP-1704). The other checks stay the gateway's.
+	MachineDriver ComputeDriver
 	// AdminE2fsprogsDir is the managed gateway's e2fsprogs_dir. Known is
 	// false when its settings call did not answer; an empty known value
 	// means only the account build is used, never a Homebrew keg (GAP-0004).

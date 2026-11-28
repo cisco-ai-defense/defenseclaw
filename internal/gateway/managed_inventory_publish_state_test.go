@@ -30,10 +30,19 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func managedPublishTestState(t *testing.T) *managedInventoryPublishState {
 	t.Helper()
+	// The publish gate reads the per-connector MCP files of the account home.
+	// HOME alone does not move os.UserHomeDir on Windows (USERPROFILE does), so
+	// the tests read the real profile of whoever ran them (rel-1-0-10:GAP-1691).
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	if got, err := os.UserHomeDir(); err != nil || got != home {
+		t.Fatalf("test home not isolated: os.UserHomeDir() = %q, %v; want %q", got, err, home)
+	}
 	state := newManagedInventoryPublishState(&config.Config{
 		DeploymentMode: managed.DeploymentModeManagedEnterprise,
 		DataDir:        t.TempDir(),
@@ -561,6 +570,31 @@ func TestManagedInventoryPublishStateDegradedCycleDoesNotConsumeBundle(t *testin
 	}
 }
 
+// Outside Secure Client the daily bundle is a refresh of the operator's own
+// destinations: a forced scan cycle stamps it even when a collection was
+// partial, so a collection that stays partial does not make every scan send
+// every collection again.
+func TestOperatorInventoryDailyRefreshIsStampedByADegradedScan(t *testing.T) {
+	state := newManagedInventoryPublishState(&config.Config{DataDir: t.TempDir()})
+	now := time.Now().UTC()
+	cycle := state.beginCycle("scan-1", now, false)
+	if !cycle.forcedBundle() {
+		t.Fatal("fresh state was not forced")
+	}
+	cycle.recordPublished("collection", "digest-a", 1)
+	cycle.markDegraded()
+	cycle.commit()
+	if next := state.beginCycle("scan-2", now.Add(30*time.Minute), true); next.forcedBundle() {
+		t.Fatal("every scan after a degraded one is forced")
+	}
+	// A cycle with no scan (startup, reload) does not stamp it.
+	fresh := newManagedInventoryPublishState(&config.Config{DataDir: t.TempDir()})
+	fresh.beginCycle("", now, true).commit()
+	if !fresh.beginCycle("scan-1", now.Add(time.Minute), true).forcedBundle() {
+		t.Fatal("a cycle without a scan stamped the daily refresh")
+	}
+}
+
 // TestManagedInventoryPublishStateFutureStampIsDue: a clock that jumped forward
 // and was then corrected must not wedge the daily bundle until the skew elapses.
 func TestManagedInventoryPublishStateFutureStampIsDue(t *testing.T) {
@@ -672,14 +706,17 @@ func TestManagedInventoryPublishStateSurvivesRestart(t *testing.T) {
 // TestManagedInventoryPublishStateNilOutsideManagedEnterprise is the OSS pin:
 // no gate object, therefore no digest work and no state file, in every other
 // deployment mode.
-func TestManagedInventoryPublishStateNilOutsideManagedEnterprise(t *testing.T) {
+// Outside managed_enterprise the gate keeps only the skill inventory state,
+// in its own file, and creating it writes nothing.
+func TestManagedInventoryPublishStateOutsideManagedEnterpriseIsTheSkillState(t *testing.T) {
 	for _, mode := range []string{"", "standalone", "oss", "managed", "enterprise", "MANAGED-ENTERPRISE"} {
 		t.Run("mode="+mode, func(t *testing.T) {
 			dataDir := t.TempDir()
-			if state := newManagedInventoryPublishState(&config.Config{
+			state := newManagedInventoryPublishState(&config.Config{
 				DeploymentMode: mode, DataDir: dataDir,
-			}); state != nil {
-				t.Fatalf("mode %q produced a publish gate", mode)
+			})
+			if state == nil || state.path != filepath.Join(dataDir, endpointInventoryPublishStateFile) {
+				t.Fatalf("mode %q: publish gate %+v, want the skill inventory state", mode, state)
 			}
 			entries, err := os.ReadDir(dataDir)
 			if err != nil {

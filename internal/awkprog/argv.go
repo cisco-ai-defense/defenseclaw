@@ -4,6 +4,7 @@
 package awkprog
 
 import (
+	"path"
 	"slices"
 	"strings"
 
@@ -132,6 +133,10 @@ type Reading struct {
 	// Files counts the program files the call names (-f, --file, -E, --exec,
 	// -W exec), whether or not the caller could read them.
 	Files int
+	// NetworkSink reports a literal gawk /inet[46] TCP/UDP print redirect.
+	// NetworkRecordFlow additionally proves that a sole unguarded record
+	// action sends static input file records to that sink.
+	NetworkSink, NetworkRecordFlow bool
 }
 
 func (c Call) dynamic(i int) bool { return i < len(c.Dynamic) && c.Dynamic[i] }
@@ -192,6 +197,10 @@ const Hole = "__dchole__"
 
 type callPrograms struct {
 	texts []string
+	// inputs are literal file operands after the program, not awk variable
+	// assignments or stdin. Only a simple record action can prove their bytes
+	// reach a print redirect.
+	inputs []string
 	// holed are the indexes of the texts that hold a Hole: a program with a
 	// computed part.
 	holed []int
@@ -340,6 +349,10 @@ func (c Call) programs() callPrograms {
 			}
 			continue
 		}
+		if supplied && !dynamic && text != "-" && !strings.HasPrefix(text, "-") &&
+			!strings.ContainsAny(text, "=*?[]") {
+			out.inputs = append(out.inputs, text)
+		}
 		if !supplied {
 			if dynamic {
 				// A program with a computed part: read the text around the
@@ -391,8 +404,9 @@ func (c Call) Read() Reading {
 
 // commands are the literal commands the programs of the call run and the
 // redirects of their print statements, started marking each that is a
-// command the program starts (not a redirect), with the Reading flags but no
-// Body.
+// command the program starts (not a redirect). A gawk /inet redirect reads
+// as a network sink; an ordinary redirect remains a file. Read assembles
+// the returned command texts into Body.
 func (c Call) commands() (commands []string, started []bool, reading Reading) {
 	programs := c.programs()
 	reading = Reading{Dynamic: programs.unknown, Unread: programs.unread, Files: programs.files}
@@ -410,7 +424,24 @@ func (c Call) commands() (commands []string, started []bool, reading Reading) {
 		}
 		for _, output := range program.Outputs {
 			if !slices.Contains(programs.holed, index) || !strings.Contains(output.Target, Hole) {
-				more = append(more, output.Redirect())
+				// GNU awk opens /inet pseudo-files as sockets. A sink alone
+				// stays a sink fact. Only one unguarded record action with a
+				// bounded static file list proves file-to-network flow.
+				if target, ok := gawkInetRedirect(c.Words, output.Target); ok {
+					reading.NetworkSink = true
+					output.Target = target
+					if len(programs.texts) == 1 && programs.files == 0 && !programs.unknown && !program.Malformed &&
+						!program.Truncated && !program.Directive && len(program.Outputs) == 1 &&
+						len(program.Channels) == 0 && output.RecordInput &&
+						len(programs.inputs) > 0 && len(programs.inputs) <= 4 {
+						more = append(more, output.RedirectInput(programs.inputs))
+						reading.NetworkRecordFlow = true
+					} else {
+						more = append(more, output.Redirect())
+					}
+				} else {
+					more = append(more, output.Redirect())
+				}
 				started = append(started, false)
 			}
 		}
@@ -419,6 +450,38 @@ func (c Call) commands() (commands []string, started []bool, reading Reading) {
 		reading.Truncated = reading.Truncated || program.Truncated
 	}
 	return commands, started, reading
+}
+
+// gawkInetRedirect maps a literal GNU awk /inet[46]/PROTO/LPORT/HOST/RPORT
+// output to the Bash network redirect with the same remote endpoint. The
+// caller quotes it with Output.Redirect, so endpoint text remains data. A
+// plain awk is GNU awk on RHEL, Fedora and Amazon Linux, so it gets the gawk
+// reading on every host, the stronger of the two (rel-1-0-10:GAP-2205);
+// mawk and nawk keep the file reading.
+func gawkInetRedirect(words []string, target string) (string, bool) {
+	if len(words) == 0 {
+		return "", false
+	}
+	if program := path.Base(words[0]); program != "gawk" && program != "awk" {
+		return "", false
+	}
+	for _, word := range words[1:] {
+		// Sandbox refuses output redirection; POSIX and compatibility modes
+		// disable gawk's special /inet files. In either case there is no
+		// proved network connection.
+		switch word {
+		case "-S", "--sandbox", "-P", "--posix", "-c", "--compat", "--traditional":
+			return "", false
+		}
+	}
+	parts := strings.Split(target, "/")
+	if len(parts) != 6 || parts[0] != "" ||
+		(parts[1] != "inet" && parts[1] != "inet4" && parts[1] != "inet6") ||
+		(parts[2] != "tcp" && parts[2] != "udp") ||
+		parts[3] == "" || parts[4] == "" || parts[5] == "" {
+		return "", false
+	}
+	return "/dev/" + parts[2] + "/" + parts[4] + "/" + parts[5], true
 }
 
 // ShellBody is the shell script that runs the commands of an awk program as

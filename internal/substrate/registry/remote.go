@@ -18,6 +18,8 @@ package registry
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -75,6 +77,9 @@ func Serve(srv *leader.Server, s Store) {
 	srv.HandleRead(leader.MethodRegistrationLookup, leader.Typed(func(ctx context.Context, in lookupIn) (Lookup, error) {
 		return LookupName(ctx, s, in.Atespace, in.Name)
 	}))
+	if rc, ok := s.(RelayCerts); ok {
+		serveRelayCerts(srv, rc)
+	}
 }
 
 // remoteTTL is how long a follower reuses a registration it read. A
@@ -158,12 +163,29 @@ func (s *Remote) GetLatest(ctx context.Context, atespace, uid string) (Registrat
 	return s.Get(ctx, atespace, uid)
 }
 
+// Invalidate forgets the cached registration atespace/uid, so the next Get
+// reads the leader: a revoked approval stops at once on this replica
+// (GAP-0492).
+func (s *Remote) Invalidate(atespace, uid string) {
+	s.mu.Lock()
+	delete(s.cache, atespace+"/"+uid)
+	s.mu.Unlock()
+}
+
 // Put implements Store.
 func (s *Remote) Put(ctx context.Context, r Registration) error {
 	if err := r.Validate(); err != nil {
 		return err
 	}
-	if err := s.Client.Call(ctx, leader.MethodRegistrationWrite, leader.NewRequestID(), r, nil); err != nil {
+	err := s.Client.Call(ctx, leader.MethodRegistrationWrite, leader.NewRequestID(), r, nil)
+	if old, ok := r.olderLeaderForm(); ok && leader.IsUndecodable(err) {
+		// GAP-0943: a leader older than this follower (a rolling upgrade)
+		// refuses a field it does not know. Write the record in the form it
+		// knows, under a new request ID (the refused call changed nothing).
+		fmt.Fprintf(os.Stderr, "[substrate] the leader predates the sign-in assurance mark; %s/%s is registered without it\n", r.Atespace, r.Name)
+		err = s.Client.Call(ctx, leader.MethodRegistrationWrite, leader.NewRequestID(), old, nil)
+	}
+	if err != nil {
 		return err
 	}
 	s.mu.Lock()

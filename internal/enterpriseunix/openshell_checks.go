@@ -122,6 +122,10 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 		r.AddWarning(codeOpenShellPinRaised, fmt.Sprintf("enterprise.openshell.version pins %s below the OpenShell %s floor; the effective requirement is %s. Set the pin to %s; an account with a running sandbox keeps its current runtime until that sandbox stops",
 			settings.RaisedFrom, openshell.SupportedMin, settings.Version, settings.Version))
 	}
+	if settings.AllowDowngrade && settings.Install != config.EnterpriseOpenShellInstallSetup {
+		r.AddWarning(codeOpenShellDowngrade, fmt.Sprintf("enterprise.openshell.allow_downgrade applies to install: setup only and is ignored with install: %s, "+
+			"where the administrator's own OpenShell install sets the release; remove the key", settings.Install))
+	}
 	primary, fallback := env.checkOpenShellDrivers(ctx, settings)
 	l.noteOpenShellCapability(ctx, settings, true, primary, fallback)
 	fallbackReady := fallback != nil && rowsReady(fallback)
@@ -176,6 +180,16 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	if settings.Install == config.EnterpriseOpenShellInstallSetup {
 		for _, line := range env.userInstalls(ctx) {
 			row("user-installed", line+" (user-installed, unmanaged)")
+		}
+		// Only enterprise.openshell.allow_downgrade lets ensure apply such
+		// a pin (planOpenShell).
+		if l.osPlan != nil {
+			for _, a := range l.osPlan.downgraded {
+				r.AddWarning(codeOpenShellDowngrade, setupPinDowngradeWarning(settings.Version, a))
+			}
+			for _, a := range l.osPlan.recordOnly {
+				r.AddWarning(codeOpenShellDowngrade, setupPinRecordOnlyWarning(settings.Version, a))
+			}
 		}
 	}
 	for _, entry := range state.sortedPending() {
@@ -322,12 +336,26 @@ func (l *lifecycle) describePending(ctx context.Context, entry pending) {
 	case entry.Sandboxes == 0:
 		waiting = "waiting to be tried again"
 	}
+	// Held without a running sandbox: what holds it is one OpenShell does not
+	// report stopped. "1 sandbox runs" read wrong next to the user's Running
+	// 0 of 1 (GAP-2058). Live also counts a sandbox that is starting or
+	// stopping, so the cause list keeps those and the delete step is only for
+	// one that stays listed.
+	stoppedHold := entry.Sandboxes > 0 && entry.Running != nil && *entry.Running == 0
+	if stoppedHold {
+		waiting = fmt.Sprintf("no sandbox runs, but %s that OpenShell does not report stopped (starting, stopping, in its error state, or left by the earlier sandbox setup) %s it; "+
+			"`defenseclaw sandbox list` names it. If it stays listed and is not starting or stopping, the user's `defenseclaw sandbox delete NAME` releases it after saving its work",
+			plural(entry.Sandboxes, "1 sandbox", fmt.Sprintf("%d sandboxes", entry.Sandboxes)), plural(entry.Sandboxes, "holds", "hold"))
+	}
 	if l.opts.Action == ActionStatus || l.opts.Action == ActionVerify {
 		// status and verify read the record the last ensure kept: the
 		// account's own sandbox command may have applied the change since
 		// (it restarts an idle daemon), so the count is that run's, not
 		// now's (GAP-0679).
 		switch {
+		case stoppedHold:
+			waiting = fmt.Sprintf("no sandbox ran when it was last tried, but %s that OpenShell did not report stopped (starting, stopping, in its error state, or left by the earlier sandbox setup) held it",
+				plural(entry.Sandboxes, "1 sandbox", fmt.Sprintf("%d sandboxes", entry.Sandboxes)))
 		case entry.Sandboxes == 1:
 			waiting = "1 sandbox ran when it was last tried"
 		case entry.Sandboxes > 1:

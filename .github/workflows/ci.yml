@@ -254,6 +254,10 @@ jobs:
           echo "${HELM_SHA256}  $dir/helm.tar.gz" | sha256sum -c -
           tar -xzf "$dir/helm.tar.gz" -C "$dir" --strip-components=1 linux-amd64/helm
           echo "$dir" >> "$GITHUB_PATH"
+      # The Kind E2E scripts run only in substrate-kind-e2e.yml, so a mistake in
+      # them would otherwise show up there first (GAP-1133).
+      - name: Lint the Kind E2E scripts
+        run: shellcheck -S warning test/substrate-e2e/*.sh
       - name: Lint and render the chart
         env:
           DEFENSECLAW_HELM_REQUIRED: "1"
@@ -342,7 +346,18 @@ jobs:
         # and TestGAP1320MaskedReleaseSendsNoRawRunStart (36 s) on top of a full plan and hit its 702 s -timeout
         # twice (c5da0ae1d4, a8837eabba). Their -race times (dc-int-gates, 120-shard run at c5da0ae1d4) add 1,952 s;
         # 120 shards then plan over 440 s and 124 plan at most about 430 s (705 s).
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123]
+        # 2026-11-22 (rel/1.0.11, rel-1-0-10:GAP-1874): on #1493 (6482f711e8, ca00c26689) shards 96, 77 and 27 hit the
+        # 690 s -timeout; the gateway race time is 15.7 hours (internal/gateway 56,657 s, refreshed from both runs).
+        # TestFindRegexGlobAndLinkFollowKeepTheHookFileFiveTiers weighed 456 s, more than a shard holds, so it runs
+        # as one test per connector; 129 shards plan 439 s, 1 s under the 440 s budget, and 132 plan at most 432 s:
+        # the largest single test (TestGAP0805LauncherSpellingsManagedStrict), the floor.
+        # 2026-11-25 (rel/1.0.11 push 44, rel-1-0-10:GAP-2202): on #1493 (712c31be08) shards 58, 66, 80 and 121 hit the
+        # 711 s -timeout. The substrate-1 tests of FOLD-2 were recorded at 50-125 s and took up to 517 s on the hosted
+        # race runners (TestGAP0377SandboxGuestPlacementKeepsS7CandidateMatrix), and the GAP-0009 hook-audit tests had no
+        # figure. Each GAP-0377 row set now runs as one test per pack (142-191 s) and go-linux.json records the 712c
+        # times of 61 tests that ran over 1.5x their figure (internal/gateway 59,831 s): 132 shards plan 453 s, 137
+        # plan 436.8 s, 3 s under the 440 s budget, and 140 plan at most 432.5 s, the floor.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -358,7 +373,7 @@ jobs:
       - name: Run gateway race/coverage shard
         env:
           GO_TEST_SHARD: ${{ matrix.shard }}
-          GO_TEST_SHARDS: 124
+          GO_TEST_SHARDS: 140
         run: |
           set -euo pipefail
           plan=(python3 scripts/go_test_shards.py
@@ -781,7 +796,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -801,6 +816,23 @@ jobs:
           trap 'rm -rf "$ramdir"' EXIT
           test "$(stat -f -c %T "$ramdir")" = tmpfs
           TMPDIR="$ramdir" go test -p 1 -count=1 -timeout 4m -v -run '^TestGAP0490OpenLoop(SandboxStream|TwoSandboxes|FourSandboxes|Cadence[A-Za-z]+|Judgement[A-Za-z]+|Queueing[A-Za-z]+)$' ./internal/gateway
+      - name: Run the real full-filesystem audit tests (sudo tmpfs)
+        # substrate-1:GAP-0578 (b): the only tests that fill a real volume
+        # (GAP-0554: one ALERT line, hooks fail closed with the named reason)
+        # skip unless DEFENSECLAW_REAL_FS_TESTS=1 and sudo -n mount work, as
+        # on a hosted runner. A skip fails this step: each test must run and
+        # pass (internal/testenv TestEveryRealFilesystemTestRunsInCI lists
+        # them).
+        env:
+          DEFENSECLAW_REAL_FS_TESTS: "1"
+        run: |
+          set -euo pipefail
+          sudo -n true
+          go test -count=1 -timeout 5m -v -run '^TestRealFullStoreLogsOneAlertForEveryWritePath$' ./internal/audit | tee realfs-audit.log
+          go test -count=1 -timeout 5m -v -run '^TestSandboxHookOnARealFullAuditStoreFailsClosedWithOneAlert$' ./internal/gateway | tee realfs-gateway.log
+          for name in TestRealFullStoreLogsOneAlertForEveryWritePath TestSandboxHookOnARealFullAuditStoreFailsClosedWithOneAlert; do
+            grep -q -- "--- PASS: $name " realfs-audit.log realfs-gateway.log || { echo "::error::$name did not run and pass"; exit 1; }
+          done
 
   go-test:
     # Preserve the existing required-check name while combining the complete
@@ -854,9 +886,9 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
           )
-          # 124 gateway + 5 audit + 32 remaining-package shards, plus the
+          # 140 gateway + 5 audit + 32 remaining-package shards, plus the
           # frozen-gateway job.
-          test "${#coverage_parts[@]}" -eq 162
+          test "${#coverage_parts[@]}" -eq 178
           python3 scripts/merge_go_coverage.py \
             --output coverage.out \
             "${coverage_parts[@]}"
@@ -994,6 +1026,11 @@ jobs:
           save-cache: ${{ github.ref == 'refs/heads/main' }}
       - run: uv sync
       - run: make py-lint
+      # The S7 benchmark scorer and its tools (benchmarks/s7) had tests that no CI job ran, so the scorer the
+      # bench gate uses drifted from them (rel-1-0-10 GAP-1578, GAP-1581). Stdlib only, about 25 s.
+      - name: S7 benchmark tooling tests
+        # Explicit files (the CI-strategy guard wants named test files on every pytest line); add new benchmarks/s7 test files here.
+        run: uv run --frozen python -m pytest -q -p no:cacheprovider benchmarks/s7/gate/test_addr_consistency.py benchmarks/s7/gate/test_labelfold_inputs.py benchmarks/s7/gate/test_s7gate_checks.py benchmarks/s7/gate/test_s7gate_failclosed.py benchmarks/s7/gate/test_s7gate_fixtureroot.py benchmarks/s7/gate/test_s7gate_labels.py benchmarks/s7/gate/test_s7gate_one_scorer.py benchmarks/s7/gate/test_s7gate_rework.py benchmarks/s7/det111/test_det111_noloss.py benchmarks/s7/wincorpus/test_wincorpus.py
 
   python-lint-test:
     # Preserve the existing required-check name while making it the single

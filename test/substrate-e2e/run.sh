@@ -41,16 +41,25 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 : "${E2E_KIND_CLUSTER:=kind}"
 : "${E2E_REGISTRY:=localhost:5001}"
 : "${E2E_POOL_REPLICAS:=2}"
+# Workers of the launcher atespace pool (lp). The launcher step creates one actor, so one worker; each worker asks
+# 250m CPU, and the CI kind node (4 CPU) has no room for a worker the step never uses (GAP-1103).
+: "${E2E_LAUNCH_POOL_REPLICAS:=1}"
 : "${E2E_PROXY_PORT:=18080}"
 : "${E2E_EGRESS_PROBE_URL:=https://example.com/}"
 : "${E2E_EGRESS_PROBE_HOST:=example.com}"
 # 1 makes a missing chart a failure (CI); 0 skips the DefenseClaw phase with a notice.
 : "${E2E_REQUIRE_DEFENSECLAW:=0}"
-# Where the chart installs, and the gateway image it runs. E2E_GATEWAY_IMAGE=repo:tag@sha256:... uses an image
-# that is already in a registry the cluster reads; empty builds one from this checkout.
+# Where the chart installs, and the gateway and skill scanner sidecar images it runs. E2E_GATEWAY_IMAGE and
+# E2E_SCANNER_IMAGE=repo:tag@sha256:... use an image that is already in a registry the cluster reads; empty builds one
+# from this checkout (the scanner image also needs uv and npm).
 : "${E2E_DC_NAMESPACE:=defenseclaw-system}"
 : "${E2E_DC_LAUNCH_ATESPACE:=dc-e2e-launch}"
 : "${E2E_GATEWAY_IMAGE:=}"
+: "${E2E_SCANNER_IMAGE:=}"
+# on (default): the chart runs the skill scanner sidecar, built from this checkout. off: the chart as shipped, with the
+# sidecar off (its default), so the run proves a default install comes up with the images the release publishes and
+# runs no scanner container (GAP-1133).
+: "${E2E_SKILL_SCANNER:=on}"
 # Kubernetes context kubectl and kubectl-ate use. In create mode it is kind-<cluster>.
 : "${E2E_CONTEXT:=}"
 

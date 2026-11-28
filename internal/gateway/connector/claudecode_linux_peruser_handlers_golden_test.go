@@ -23,7 +23,8 @@ import (
 // (rel-1-0-6 GAP-0569).
 func TestClaudeCodeLinuxPerUserHandlersMatchTheSharedGolden(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Unix registration")
+		claudeCodeWindowsPerUserHandlersGolden(t)
+		return
 	}
 	data, err := os.ReadFile(filepath.Join("testdata", "claudecode_linux_peruser_handlers.json"))
 	if err != nil {

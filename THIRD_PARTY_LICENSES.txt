@@ -9,11 +9,18 @@ API definitions vendored for the Linux sensor helper:
   - github.com/google/cel-go v0.30.0
   - github.com/antlr4-go/antlr/v4 v4.13.1
   - golang.org/x/exp v0.0.0-20250305212735-054e65f0b394
-  - github.com/NVIDIA/OpenShell/sdk/go v0.0.0-20260926030648-4ce767fc0cad
-    (the OpenShell v0.1.1 release commit)
+  - github.com/ai-openshell/sdk-go v0.1.9
+    (the OpenShell Go SDK, versioned with OpenShell releases)
   - github.com/cilium/tetragon/api v1.7.1 (the .proto files under
     third_party/tetragon, vendored unmodified, and the Go stubs generated
     from them; not a go.mod dependency)
+  - github.com/denoland/clawpatrol at commit 0e6674c (MIT): the Kubernetes
+    API path and HTTP verb decomposition adapted in
+    internal/actionfacts/kube_request.go, and the design reference (read
+    only) for the bounded SQL scanner in internal/actionfacts/sql_ast.go; no
+    code is imported or vendored
+  - github.com/PowerShell/PowerShell (the PowerShell parser, ported to Go in
+    internal/pwshparse; not a go.mod dependency)
 
 It is a scoped attribution artifact for those dependency additions, not an
 exhaustive inventory of every dependency in every DefenseClaw artifact.
@@ -60,13 +67,18 @@ License-text provenance:
   Upstream PATENTS SHA-256:
     96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc
 
-  Module: github.com/NVIDIA/OpenShell/sdk/go
-  Version: v0.0.0-20260926030648-4ce767fc0cad
-  Upstream file: https://github.com/NVIDIA/OpenShell/blob/v0.1.1/LICENSE
-    (the module directory carries no LICENSE of its own; the repository
-    root LICENSE governs it)
+  Module: github.com/ai-openshell/sdk-go
+  Version: v0.1.9
+  Upstream file: https://github.com/ai-openshell/sdk-go/blob/v0.1.9/LICENSE
   Upstream LICENSE SHA-256:
-    c4be3acebe12527d7de689933d98329b4065f8c50cd929d0365584eafe6c20dd
+    d07c0367e2861e7fe70fa1b679f879f4fa2f9138ade4457d44ecf8b2e135bb45
+
+  Module: github.com/PowerShell/PowerShell
+  Version: v7.6.6 (tag v7.6.6, commit f260eb9c31ec72c5282f98e5ea24d9be4f8d7536), the parser
+    sources (src/System.Management.Automation/engine/parser)
+  Upstream file: https://github.com/PowerShell/PowerShell/blob/v7.6.6/LICENSE.txt
+  Upstream LICENSE SHA-256:
+    7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744
 
   Module: github.com/cilium/tetragon/api
   Version: v1.7.1 (tag api/v1.7.1, commit 99ca93d98710b98a42551bf3c12613e32888885d)
@@ -76,7 +88,7 @@ License-text provenance:
   Upstream LICENSE SHA-256:
     f096c31ac0fb2e66df5b7ec20049741ae15accd50c8cd4d100b4db6c9353f6aa
 
-cel.dev/expr v0.25.2 is Apache-2.0-only and has no upstream NOTICE. The
+cel.dev/expr v0.25.3 is Apache-2.0-only and has no upstream NOTICE. The
 DefenseClaw root LICENSE already reproduces its exact license text, so it is
 not duplicated below.
 
@@ -445,7 +457,7 @@ rights granted to you under this License for this implementation of Go
 shall terminate as of the date such litigation is filed.
 
 ==============================================================================
-github.com/NVIDIA/OpenShell/sdk/go v0.0.0-20260926030648-4ce767fc0cad (LICENSE)
+github.com/ai-openshell/sdk-go v0.1.9 (LICENSE)
 ==============================================================================
 
 Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
@@ -500,7 +512,7 @@ Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
       "Contribution" shall mean any work of authorship, including
       the original version of the Work and any modifications or additions
       to that Work or Derivative Works thereof, that is intentionally
-      submitted to the Licensor for inclusion in the Work by the copyright owner
+      submitted to Licensor for inclusion in the Work by the copyright owner
       or by an individual or Legal Entity authorized to submit on behalf of
       the copyright owner. For the purposes of this definition, "submitted"
       means any form of electronic, verbal, or written communication sent
@@ -512,7 +524,7 @@ Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
       designated in writing by the copyright owner as "Not a Contribution."
 
       "Contributor" shall mean Licensor and any individual or Legal Entity
-      on behalf of whom a Contribution has been received by the Licensor and
+      on behalf of whom a Contribution has been received by Licensor and
       subsequently incorporated within the Work.
 
    2. Grant of Copyright License. Subject to the terms and conditions of
@@ -558,7 +570,7 @@ Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
       (d) If the Work includes a "NOTICE" text file as part of its
           distribution, then any Derivative Works that You distribute must
           include a readable copy of the attribution notices contained
-          within such NOTICE file, excluding any notices that do not
+          within such NOTICE file, excluding those notices that do not
           pertain to any part of the Derivative Works, in at least one
           of the following places: within a NOTICE text file distributed
           as part of the Derivative Works; within the Source form or
@@ -858,3 +870,63 @@ github.com/cilium/tetragon/api v1.7.1 (LICENSE)
    See the License for the specific language governing permissions and
    limitations under the License.
 
+
+==============================================================================
+github.com/denoland/clawpatrol 0e6674c (MIT)
+==============================================================================
+
+Adapted (not imported) in internal/actionfacts/kube_request.go from
+internal/config/plugins/facets/k8s/k8s.go (parsePath, verbFromMethod).
+Reviewed only, as the SQL parser design reference for
+internal/actionfacts/sql_ast.go (no source code copied or imported).
+Upstream file: https://github.com/denoland/clawpatrol/blob/0e6674c/LICENSE.md
+Upstream LICENSE.md SHA-256:
+  3dd2616f96c71e3b5aafecbce0b3210e37327079a32a3a62f63f7b4a36433d8d
+
+MIT License
+
+Copyright 2026 Deno Land Inc
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+==============================================================================
+github.com/PowerShell/PowerShell (MIT, parser port in internal/pwshparse)
+==============================================================================
+
+Copyright (c) Microsoft Corporation.
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED *AS IS*, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

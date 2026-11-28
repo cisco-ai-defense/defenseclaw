@@ -54,7 +54,7 @@ func main() {
 	flag.Var(keys, "session-key", "launcher session-token public key, kid=PEM file (repeatable)")
 	audience := flag.String("session-audience", "dcrelay", "session token audience")
 	issuer := flag.String("session-issuer", "", "session token issuer (required with --session-key)")
-	verifyURL := flag.String("verify-url", "", "gateway session-token check URL (instead of keys)")
+	verifyURL := flag.String("verify-url", "", "gateway session-token check URL (default <gateway-url>"+kit.RelayVerifyPath+"; checked after any keys)")
 	interactive := flag.String("interactive", "", "relay interactive argv, space-separated (test variants; default: the connector)")
 	managedFlag := flag.Bool("managed", false, "managed_enterprise image: the relay refuses an agent that signs in to a vendor account (E9)")
 	flag.Parse()
@@ -100,7 +100,12 @@ func run(name, out string, uid, gid int, gateway, failMode, provider, model, ver
 	cfg := kit.DefaultConfig()
 	cfg.GatewayURL, cfg.FailMode, cfg.KitVersion = gateway, failMode, version
 	cfg.Managed = managedImage
-	cfg.Relay.Listen, cfg.Relay.SessionAudience, cfg.Relay.VerifyURL = listen, audience, verifyURL
+	cfg.Relay.Listen, cfg.Relay.SessionAudience, cfg.Relay.VerifyURL = listen, audience, strings.TrimSpace(verifyURL)
+	if cfg.Relay.VerifyURL == "" {
+		// Every relay asks the gateway, which alone checks that a token's
+		// person owns the agent (GAP-0435).
+		cfg.Relay.VerifyURL = kit.RelayVerifyURL(gateway)
+	}
 	cfg.Relay.Interactive = interactiveArgv
 	cfg.Relay.SessionIssuer = sessionIssuer
 	// The relay runs as root and starts the agent as uid:gid (GAP-0116).

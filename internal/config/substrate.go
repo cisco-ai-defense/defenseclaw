@@ -19,6 +19,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"path"
@@ -29,6 +30,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
+	"gopkg.in/yaml.v3"
 )
 
 // SubstrateConfig is substrate: (PLAN §7.1), DefenseClaw on Agent Substrate.
@@ -69,15 +71,46 @@ type SubstrateConfig struct {
 	// check with it; the gateway and the leader read it from the same
 	// config (GAP-0250).
 	ChainEgressAction string `mapstructure:"chain_egress_action" yaml:"chain_egress_action,omitempty"`
+	// RelayTLS is how the gateway reaches an actor's relay (B3.5): auto
+	// (default) uses TLS when the template's signed kit serves it and plain
+	// HTTP with an audit row and a doctor warning for older templates;
+	// required refuses those; off drops the row and the warning. A kit that
+	// serves TLS is dialed with TLS in every mode.
+	RelayTLS string `mapstructure:"relay_tls" yaml:"relay_tls,omitempty"`
+	// RelayCertReissue is what the gateway does with a second relay
+	// serving certificate for an actor asked for without proof of the live
+	// key (GAP-0861): refuse answers 403 until an owner or administrator
+	// runs recover; flag issues it with a HIGH audit row; auto (default)
+	// is refuse in a managed enterprise install and flag in OSS.
+	RelayCertReissue string `mapstructure:"relay_cert_reissue" yaml:"relay_cert_reissue,omitempty"`
 	// WorkspaceMaxBytes caps a workspace upload through the admin
 	// listener's attach route (E23; 0 = DefaultSubstrateWorkspaceMaxBytes).
-	WorkspaceMaxBytes int64                     `mapstructure:"workspace_max_bytes" yaml:"workspace_max_bytes,omitempty"`
-	Unattended        SubstrateUnattendedConfig `mapstructure:"unattended"         yaml:"unattended,omitempty"`
-	RateLimits        SubstrateRateLimitsConfig `mapstructure:"rate_limits"        yaml:"rate_limits,omitempty"`
-	Extproc           SubstrateExtprocConfig    `mapstructure:"extproc"            yaml:"extproc,omitempty"`
-	LLM               SubstrateLLMConfig        `mapstructure:"llm"                yaml:"llm,omitempty"`
-	Egress            SubstrateEgressConfig     `mapstructure:"egress"             yaml:"egress,omitempty"`
-	Secrets           []SubstrateSecret         `mapstructure:"secrets"            yaml:"secrets,omitempty"`
+	WorkspaceMaxBytes int64 `mapstructure:"workspace_max_bytes" yaml:"workspace_max_bytes,omitempty"`
+	// Launcher holds what the gateway tells launchers (GET
+	// /api/v1/substrate/launcher), read live.
+	Launcher SubstrateLauncherConfig `mapstructure:"launcher" yaml:"launcher,omitempty"`
+	// Files holds the admin switches of sending more files into a running
+	// actor (push, sync); both on when unset.
+	Files SubstrateFilesConfig `mapstructure:"files" yaml:"files,omitempty"`
+	// Git is how agents reach private repositories (B2 2.5): the https
+	// rewrite map, submodules and LFS in run --clone.
+	Git        SubstrateGitConfig        `mapstructure:"git" yaml:"git,omitempty"`
+	Unattended SubstrateUnattendedConfig `mapstructure:"unattended"         yaml:"unattended,omitempty"`
+	// Interactive is the port forward and MCP bridge switches (B3).
+	Interactive SubstrateInteractiveConfig `mapstructure:"interactive" yaml:"interactive,omitempty"`
+	RateLimits  SubstrateRateLimitsConfig  `mapstructure:"rate_limits"        yaml:"rate_limits,omitempty"`
+	// Usage is per-person and per-actor model spend through the leader
+	// (substrate_usage.go).
+	Usage   SubstrateUsageConfig   `mapstructure:"usage" yaml:"usage,omitempty"`
+	Extproc SubstrateExtprocConfig `mapstructure:"extproc"            yaml:"extproc,omitempty"`
+	LLM     SubstrateLLMConfig     `mapstructure:"llm"                yaml:"llm,omitempty"`
+	Egress  SubstrateEgressConfig  `mapstructure:"egress"             yaml:"egress,omitempty"`
+	Secrets []SubstrateSecret      `mapstructure:"secrets"            yaml:"secrets,omitempty"`
+	// SelfServiceSecrets is how people bind their own secrets (B1 2.5).
+	SelfServiceSecrets SubstrateSelfServiceSecretsConfig `mapstructure:"self_service_secrets" yaml:"self_service_secrets,omitempty"`
+	// SecretTemplates is the admin catalog of templates people bind their
+	// own secrets with; none = the built-in seven (secretbind.Builtin).
+	SecretTemplates []SubstrateSecretTemplate `mapstructure:"secret_templates" yaml:"secret_templates,omitempty"`
 	// AllowPassthroughFor lists hosts forwarded without inspection
 	// (certificate pinning). A secret is never bound to one.
 	AllowPassthroughFor []string `mapstructure:"allow_passthrough_for" yaml:"allow_passthrough_for,omitempty"`
@@ -86,7 +119,141 @@ type SubstrateConfig struct {
 	Admin OpenShellAdminConfig `mapstructure:"admin" yaml:"admin,omitempty"`
 	// Bundles is signed policy bundles (substrate_bundles.go).
 	Bundles SubstrateBundlesConfig `mapstructure:"bundles" yaml:"bundles,omitempty"`
+	// Activity is the agent state in list and status and the notification
+	// switch (substrate_activity.go).
+	Activity SubstrateActivityConfig `mapstructure:"activity" yaml:"activity,omitempty"`
+	// Skills is the gateway's scan of skill folders an agent adds while it
+	// runs (B5.4, GAP-0477).
+	Skills SubstrateSkillsConfig `mapstructure:"skills" yaml:"skills,omitempty"`
 }
+
+// Self-service secret modes (substrate.self_service_secrets.mode).
+const (
+	SelfServiceBindings   = "bindings"
+	SelfServiceValuesOnly = "values_only"
+	SelfServiceOff        = "off"
+)
+
+// SubstrateSelfServiceSecretsConfig is substrate.self_service_secrets.
+type SubstrateSelfServiceSecretsConfig struct {
+	// Mode is bindings (default), values_only (people only set values of
+	// listed secrets) or off (no binding store is read at all).
+	Mode string `mapstructure:"mode" yaml:"mode,omitempty"`
+	// Namespace holds the self-service values; never the release or
+	// Substrate namespace (the chart refuses it).
+	Namespace string `mapstructure:"namespace" yaml:"namespace,omitempty"`
+	// Provider is the provider name in the generated sources
+	// (ate-secret://k8s.io/<provider>/...), default "default": the
+	// Kubernetes credential provider resolves only local Secrets, under the
+	// name default (GAP-1076).
+	Provider string `mapstructure:"provider" yaml:"provider,omitempty"`
+	// MaxPerPerson bounds one person's bindings (1-200, default 20).
+	MaxPerPerson int `mapstructure:"max_per_person" yaml:"max_per_person,omitempty"`
+	// OutsideTemplates is ask (default) or refuse, for a host no template
+	// covers.
+	OutsideTemplates string `mapstructure:"outside_templates" yaml:"outside_templates,omitempty"`
+	// AskTimeout bounds an administrator ask for a binding (default 72h,
+	// at most 168h).
+	AskTimeout string `mapstructure:"ask_timeout" yaml:"ask_timeout,omitempty"`
+	// AllowEchoBindings lets a person set allow_echo on their own binding.
+	AllowEchoBindings bool `mapstructure:"allow_echo_bindings" yaml:"allow_echo_bindings,omitempty"`
+}
+
+// SubstrateSecretTemplate is one substrate.secret_templates entry.
+type SubstrateSecretTemplate struct {
+	Name      string   `mapstructure:"name"       yaml:"name"`
+	Hosts     []string `mapstructure:"hosts"      yaml:"hosts,omitempty"`
+	Header    string   `mapstructure:"header"     yaml:"header,omitempty"`
+	Form      string   `mapstructure:"form"       yaml:"form,omitempty"`
+	BasicUser string   `mapstructure:"basic_user" yaml:"basic_user,omitempty"`
+	Profiles  []string `mapstructure:"profiles"   yaml:"profiles,omitempty"`
+	Registry  string   `mapstructure:"registry"   yaml:"registry,omitempty"`
+}
+
+// MarshalYAML keeps an explicit empty host list: hosts: [] means no host
+// without an administrator, while an unset list takes a built-in
+// template's hosts. Plain omitempty would turn the first into the second
+// on any config save (RV3 P2-3).
+func (t SubstrateSecretTemplate) MarshalYAML() (any, error) {
+	type plain SubstrateSecretTemplate
+	var n yaml.Node
+	if err := n.Encode(plain(t)); err != nil {
+		return nil, err
+	}
+	if t.Hosts != nil && len(t.Hosts) == 0 && n.Kind == yaml.MappingNode && len(n.Content) >= 2 {
+		k := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "hosts"}
+		v := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle}
+		n.Content = append(n.Content[:2:2], append([]*yaml.Node{k, v}, n.Content[2:]...)...)
+	}
+	return &n, nil
+}
+
+// substrateReservedNamespaces are never the self-service namespace: the
+// gateway gets get/patch on every Secret there and the actors' credential
+// provider reads it (RV3 P3-5).
+var substrateReservedNamespaces = []string{"default", "kube-system", "kube-public", "kube-node-lease"}
+
+// substrateBasicUserRE is secretbind's basic_user rule: printable ASCII,
+// no space and no ":" (RV3 P3-7).
+var substrateBasicUserRE = regexp.MustCompile(`^[!-9;-~]{1,128}$`)
+
+// EffectiveMode is the self-service mode, bindings when unset.
+func (s SubstrateSelfServiceSecretsConfig) EffectiveMode() string {
+	if s.Mode == "" {
+		return SelfServiceBindings
+	}
+	return s.Mode
+}
+
+// EffectiveNamespace is where self-service values live.
+func (s SubstrateSelfServiceSecretsConfig) EffectiveNamespace() string {
+	if s.Namespace == "" {
+		return "defenseclaw-user-secrets"
+	}
+	return s.Namespace
+}
+
+// EffectiveProvider is the provider name of self-service sources. The
+// default is the one name the Kubernetes credential provider answers:
+// "default", the local cluster. The deployment name it had before
+// (k8s-credential-provider) was refused at every egress fetch with "path
+// must begin with default (only local Secrets are supported)", so a bound
+// person secret was never injected (GAP-1076).
+func (s SubstrateSelfServiceSecretsConfig) EffectiveProvider() string {
+	if s.Provider == "" {
+		return "default"
+	}
+	return s.Provider
+}
+
+// EffectiveMaxPerPerson is the per-person binding limit.
+func (s SubstrateSelfServiceSecretsConfig) EffectiveMaxPerPerson() int {
+	if s.MaxPerPerson <= 0 {
+		return 20
+	}
+	return s.MaxPerPerson
+}
+
+// EffectiveOutsideTemplates is ask or refuse.
+func (s SubstrateSelfServiceSecretsConfig) EffectiveOutsideTemplates() string {
+	if s.OutsideTemplates == "" {
+		return "ask"
+	}
+	return s.OutsideTemplates
+}
+
+// EffectiveAskTimeout is the binding ask timeout.
+func (s SubstrateSelfServiceSecretsConfig) EffectiveAskTimeout() time.Duration {
+	if d, err := time.ParseDuration(s.AskTimeout); err == nil && d > 0 {
+		return d
+	}
+	return 72 * time.Hour
+}
+
+var (
+	substrateTemplateNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+	substrateHeaderNameRE   = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+.^_|~-]{1,64}$`)
+)
 
 // SubstrateTemplatesConfig is how the controller admits templates (PLAN
 // §5.3, §6.6): every container image must be pinned by digest and carry a
@@ -187,8 +354,9 @@ type SubstrateIdentityConfig struct {
 	Issuer               string `mapstructure:"issuer"                 yaml:"issuer,omitempty"`
 	Audience             string `mapstructure:"audience"               yaml:"audience,omitempty"`
 	TokenLifetimeSeconds int64  `mapstructure:"token_lifetime_seconds" yaml:"token_lifetime_seconds,omitempty"`
-	// ActorCertOID is the ActorIdentity extension OID in actor
-	// certificates (it changes after the CNCF donation).
+	// ActorCertOID is retired (GAP-0723): nothing reads it. A config that
+	// still sets it loads, with a warning (warnRetiredSubstrateKeys), and
+	// the field is removed in 1.0.14 so those configs keep loading until then.
 	ActorCertOID string `mapstructure:"actor_cert_oid" yaml:"actor_cert_oid,omitempty"`
 	// KeysURL is where the gateway reads the keys that sign actor tokens
 	// (a JWK set). Empty: the in-cluster idp Service,
@@ -206,6 +374,69 @@ type SubstrateIdentityConfig struct {
 	// administrators on the admin listener. The gateway's --admin-groups
 	// flag adds to them.
 	AdminGroups []string `mapstructure:"admin_groups" yaml:"admin_groups,omitempty"`
+	// KubeSignIn false turns the Kubernetes sign-in off (nil = on). It
+	// applies only with no oidc.issuer on an install that is not managed
+	// (Config.SubstrateKubeSignIn). The gateway's --no-kube-sign-in flag
+	// turns it off too. The gateway reads it at start only (restart it after
+	// a change), and routing.admin users entries match against the issuers
+	// people can sign in with then (GAP-0939, GAP-0968).
+	KubeSignIn *bool `mapstructure:"kube_sign_in" yaml:"kube_sign_in,omitempty"`
+	// Revocation is the list of ended sign-ins (B5.1): logout, logout
+	// --all and admin revoke.
+	Revocation SubstrateRevocationConfig `mapstructure:"revocation" yaml:"revocation,omitempty"`
+}
+
+// SubstrateRevocationConfig is the list of ended sign-ins the leader keeps
+// and every gateway replica pulls (B5.1). Enabled is read at start: turning
+// it on or off takes a gateway restart. Managed installs may not turn it
+// off.
+type SubstrateRevocationConfig struct {
+	// Enabled (default true). false: no list, no pull loop; a copied
+	// sign-in token works until it expires (doctor warns).
+	Enabled *bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
+	// SyncInterval is how often a replica pulls from the leader (Go
+	// duration, 1s to 60s, default 5s).
+	SyncInterval string `mapstructure:"sync_interval" yaml:"sync_interval,omitempty"`
+	// MaxStale is how old a replica's copy may get before it refuses
+	// sign-ins with revocation_unavailable (default 60s or 2 x
+	// sync_interval, whichever is longer; at least 2 x sync_interval, so
+	// one slow pull does not make the replica refuse, at most 1h).
+	MaxStale string `mapstructure:"max_stale" yaml:"max_stale,omitempty"`
+	// MaxTokensPerPerson is how many single-token ends the leader keeps
+	// per person before it turns them into one person-wide end (default
+	// 64, 1 to 4096).
+	MaxTokensPerPerson int `mapstructure:"max_tokens_per_person" yaml:"max_tokens_per_person,omitempty"`
+}
+
+// Defaults of substrate.identity.revocation.
+const (
+	DefaultSubstrateRevocationSyncInterval = 5 * time.Second
+	DefaultSubstrateRevocationMaxStale     = 60 * time.Second
+	DefaultSubstrateRevocationMaxTokens    = 64
+)
+
+// EffectiveEnabled reports whether ended sign-ins are kept (default on).
+func (r SubstrateRevocationConfig) EffectiveEnabled() bool {
+	return r.Enabled == nil || *r.Enabled
+}
+
+// EffectiveSyncInterval is the replica pull interval.
+func (r SubstrateRevocationConfig) EffectiveSyncInterval() time.Duration {
+	return durationOr(r.SyncInterval, DefaultSubstrateRevocationSyncInterval)
+}
+
+// EffectiveMaxStale is the age past which a replica refuses sign-ins:
+// max_stale, or 60s or 2 x sync_interval, whichever is longer (RV1-09).
+func (r SubstrateRevocationConfig) EffectiveMaxStale() time.Duration {
+	return durationOr(r.MaxStale, max(DefaultSubstrateRevocationMaxStale, 2*r.EffectiveSyncInterval()))
+}
+
+// EffectiveMaxTokensPerPerson is the per-person single-token cap.
+func (r SubstrateRevocationConfig) EffectiveMaxTokensPerPerson() int {
+	if r.MaxTokensPerPerson <= 0 {
+		return DefaultSubstrateRevocationMaxTokens
+	}
+	return r.MaxTokensPerPerson
 }
 
 // SubstrateOIDCConfig is the people's identity provider (launcher sign-in).
@@ -295,6 +526,16 @@ type SubstrateExtprocConfig struct {
 	Ask             SubstrateExtprocAskConfig   `mapstructure:"ask"   yaml:"ask,omitempty"`
 	Judge           SubstrateExtprocJudgeConfig `mapstructure:"judge" yaml:"judge,omitempty"`
 	DLP             SubstrateExtprocDLPConfig   `mapstructure:"dlp"   yaml:"dlp,omitempty"`
+	// RateLimits holds each actor's requests through the callout to a rate
+	// (GAP-0635); the callout applies its default when unset.
+	RateLimits SubstrateExtprocRateLimitsConfig `mapstructure:"rate_limits" yaml:"rate_limits,omitempty"`
+}
+
+// SubstrateExtprocRateLimitsConfig is the callout's per-actor request rate,
+// across its replicas (extproc.RateLimitsConfig; 0 is the callout's
+// default, 200).
+type SubstrateExtprocRateLimitsConfig struct {
+	PerActorRPS float64 `mapstructure:"per_actor_rps" yaml:"per_actor_rps,omitempty"`
 }
 
 // SubstrateExtprocUIDConfig is the live-UID cache (Go durations; defaults
@@ -374,6 +615,9 @@ type SubstrateEgressConfig struct {
 	// EcosystemPacks (nil = every pack) names package-index packs.
 	EcosystemPacks []string `mapstructure:"ecosystem_packs" yaml:"ecosystem_packs,omitempty"`
 	Registries     []string `mapstructure:"registries"      yaml:"registries,omitempty"`
+	// NoSwapHosts are added to the built-in echo hosts: no secret is added
+	// on a host they cover unless its entry sets inject.allow_echo. Hot.
+	NoSwapHosts []string `mapstructure:"no_swap_hosts" yaml:"no_swap_hosts,omitempty"`
 }
 
 // SubstrateSecret is one entry of substrate.secrets (PLAN §7.2). The value
@@ -396,6 +640,10 @@ type SubstrateSecretInject struct {
 	// Placeholder is the environment variable the actor carries in place
 	// of the value.
 	Placeholder string `mapstructure:"placeholder" yaml:"placeholder,omitempty"`
+	// AllowEcho lets the secret be added on a host that returns the
+	// requests it gets (egressspec.EchoHosts, egress.no_swap_hosts). Off by
+	// default: the real value would come back to the agent.
+	AllowEcho bool `mapstructure:"allow_echo" yaml:"allow_echo,omitempty"`
 }
 
 // Substrate defaults.
@@ -407,7 +655,6 @@ const (
 	// by actor name, so a recreated same-name actor gets the old one until
 	// it expires (GAP-0133); 300 s is the upstream minimum.
 	DefaultSubstrateTokenLifetime = 300
-	DefaultSubstrateActorCertOID  = "1.3.6.1.4.1.11129.2.12.2"
 	// DefaultSubstrateNamespace is where Substrate runs when the API
 	// address does not name another namespace.
 	DefaultSubstrateNamespace = "ate-system"
@@ -432,11 +679,15 @@ const (
 	SubstrateSandboxMicroVM = "microvm"
 	SubstrateAsksDeny       = "deny"
 	SubstrateAsksQueue      = "queue"
-	SubstrateFailClosed     = "closed"
-	SubstrateFailOpen       = "open"
-	SubstrateBodyAuto       = "auto"
-	SubstrateBodyOn         = "on"
-	SubstrateBodyOff        = "off"
+	// substrate.git.push_branch and the floor key git_push (B2 2.4).
+	SubstrateGitPushAllow = "allow"
+	SubstrateGitPushAsk   = "ask"
+	SubstrateGitPushDeny  = "deny"
+	SubstrateFailClosed   = "closed"
+	SubstrateFailOpen     = "open"
+	SubstrateBodyAuto     = "auto"
+	SubstrateBodyOn       = "on"
+	SubstrateBodyOff      = "off"
 )
 
 func orDefault(v, def string) string {
@@ -474,11 +725,328 @@ func (s SubstrateConfig) EffectiveWorkspaceMaxBytes() int64 {
 	return DefaultSubstrateWorkspaceMaxBytes
 }
 
+// SubstrateFilesConfig is substrate.files: the admin-off switches of
+// substrate push (Push) and substrate sync --watch (Sync). The gateway
+// refuses the upload of a push or a sync batch when its switch is off;
+// the first copy of a run is not affected. Sync needs both.
+type SubstrateFilesConfig struct {
+	Push *bool `mapstructure:"push" yaml:"push,omitempty"`
+	Sync *bool `mapstructure:"sync" yaml:"sync,omitempty"`
+}
+
+// PushAllowed is substrate.files.push, true when unset.
+func (f SubstrateFilesConfig) PushAllowed() bool { return f.Push == nil || *f.Push }
+
+// SyncAllowed is substrate.files.sync (and push), true when unset.
+func (f SubstrateFilesConfig) SyncAllowed() bool {
+	return f.PushAllowed() && (f.Sync == nil || *f.Sync)
+}
+
+// SubstrateGitRewrite is one substrate.git.https_rewrite pair: git in an
+// agent reads an address that starts with From as To followed by the rest
+// (a git url.<To>.insteadOf = From rule).
+type SubstrateGitRewrite struct {
+	From string `mapstructure:"from" yaml:"from" json:"from"`
+	To   string `mapstructure:"to" yaml:"to" json:"to"`
+}
+
+// SubstrateGitConfig is substrate.git. The rewrite map is a convenience,
+// not a control: egress still decides which hosts an agent reaches and
+// where a credential is added, so an agent that edits its own git config
+// only breaks its own git calls.
+type SubstrateGitConfig struct {
+	// HTTPSRewrite turns ssh and scp-form addresses into https ones, which
+	// is the only way out of an agent (egress carries no SSH). A list adds
+	// to the rules every actor image bakes in (SubstrateGitBakedRewrites:
+	// the three SaaS scp forms and ssh://git@). Git reads those first, so
+	// a list cannot drop one and a baked rule wins a tie; Validate refuses
+	// a from that is baked with another to. Unset adds nothing. At most 64.
+	HTTPSRewrite []SubstrateGitRewrite `mapstructure:"https_rewrite" yaml:"https_rewrite,omitempty"`
+	// Submodules: run --clone also clones the repository's submodules
+	// (true when unset).
+	Submodules *bool `mapstructure:"submodules" yaml:"submodules,omitempty"`
+	// LFS: run --clone fetches Git LFS files when the template has git-lfs
+	// (true when unset); off leaves them as pointer files.
+	LFS *bool `mapstructure:"lfs" yaml:"lfs,omitempty"`
+	// PushBranch is allow, ask (unset) or deny: whether `substrate pull
+	// --push-branch` pushes an actor's work to its origin as a new branch
+	// (B2 2.4). deny is the admin-off switch: it wins over every profile.
+	PushBranch string `mapstructure:"push_branch" yaml:"push_branch,omitempty"`
+}
+
+// MaxSubstrateGitRewrites caps substrate.git.https_rewrite.
+const MaxSubstrateGitRewrites = 64
+
+// DefaultSubstrateGitHTTPSRewrite is the rewrite map when none is set: the
+// scp-form addresses of the three SaaS git hosts. Actor images bake the
+// same three (kit gitConfig), so an image made before the map still has
+// them.
+func DefaultSubstrateGitHTTPSRewrite() []SubstrateGitRewrite {
+	out := make([]SubstrateGitRewrite, 0, 3)
+	for _, host := range []string{"github.com", "gitlab.com", "bitbucket.org"} {
+		out = append(out, SubstrateGitRewrite{From: "git@" + host + ":", To: "https://" + host + "/"})
+	}
+	return out
+}
+
+// SubstrateGitGenericRewrites are the rules every actor image bakes in
+// besides the map: any ssh://git@ address goes over https to the same host.
+var SubstrateGitGenericRewrites = []SubstrateGitRewrite{
+	{From: "ssh://git@", To: "https://"},
+	{From: "git+ssh://git@", To: "https://"},
+}
+
+// SubstrateGitBakedRewrites are the rules every actor image bakes into
+// /etc/gitconfig (kit gitConfig), in the order git reads them: the generic
+// ssh rules, then the default map.
+func SubstrateGitBakedRewrites() []SubstrateGitRewrite {
+	return append(append([]SubstrateGitRewrite{}, SubstrateGitGenericRewrites...), DefaultSubstrateGitHTTPSRewrite()...)
+}
+
+// SubstrateGitRewriteMap is every rule git in an agent applies, in the
+// order git reads them: the baked rules (the system config), then the
+// pairs of admin (substrate.git.https_rewrite, in the actor user's config,
+// B2 2.5) that WriteGitRewrite writes, which are those CheckSubstrateGitRewrite
+// accepts.
+func SubstrateGitRewriteMap(admin []SubstrateGitRewrite) []SubstrateGitRewrite {
+	out := SubstrateGitBakedRewrites()
+	for _, r := range admin {
+		if CheckSubstrateGitRewrite(r) == nil {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// EffectiveHTTPSRewrite is substrate.git.https_rewrite, the default when
+// unset.
+func (g SubstrateGitConfig) EffectiveHTTPSRewrite() []SubstrateGitRewrite {
+	if g.HTTPSRewrite == nil {
+		return DefaultSubstrateGitHTTPSRewrite()
+	}
+	return g.HTTPSRewrite
+}
+
+// SubmodulesOn is substrate.git.submodules, true when unset.
+func (g SubstrateGitConfig) SubmodulesOn() bool { return g.Submodules == nil || *g.Submodules }
+
+// EffectivePushBranch is substrate.git.push_branch, ask when unset.
+func (g SubstrateGitConfig) EffectivePushBranch() string {
+	if v := strings.ToLower(strings.TrimSpace(g.PushBranch)); v != "" {
+		return v
+	}
+	return SubstrateGitPushAsk
+}
+
+// LFSOn is substrate.git.lfs, true when unset.
+func (g SubstrateGitConfig) LFSOn() bool { return g.LFS == nil || *g.LFS }
+
+// CheckSubstrateGitRewrite refuses a pair git would misread or that is not
+// an https target: from ends in ":" or "/" and has no upper case in its
+// scheme or host (git compares the prefix as written, and remotes name
+// hosts in lower case), to is an https address with a host and no user
+// that ends in "/" (git joins the rest of the address to it as is), and
+// neither carries spaces, quotes, backslashes or control characters (the
+// pair is written into the agent's git config).
+func CheckSubstrateGitRewrite(r SubstrateGitRewrite) error {
+	plain := func(v string) bool {
+		return v != "" && len(v) <= 256 && !strings.ContainsAny(v, "\"\\ \t") &&
+			!strings.ContainsFunc(v, func(c rune) bool { return c < 0x20 || c == 0x7f })
+	}
+	switch {
+	case !plain(r.From) || strings.HasPrefix(r.From, "-"):
+		return fmt.Errorf("from %q must be a plain address prefix", r.From)
+	case !strings.HasSuffix(r.From, ":") && !strings.HasSuffix(r.From, "/"):
+		return fmt.Errorf("from %q must end in : or /", r.From)
+	case gitRewriteHostPart(r.From) != strings.ToLower(gitRewriteHostPart(r.From)):
+		return fmt.Errorf("from %q must name its scheme and host in lower case, as remotes do (git compares it as written)", r.From)
+	case !plain(r.To):
+		return fmt.Errorf("to %q must be a plain https address", r.To)
+	}
+	u, err := url.Parse(r.To)
+	if err != nil || u.Scheme != "https" || !strings.HasPrefix(r.To, "https://") || u.Hostname() == "" || u.User != nil {
+		return fmt.Errorf("to %q must be an https:// address with a host and no user name", r.To)
+	}
+	if !strings.HasSuffix(r.To, "/") {
+		return fmt.Errorf("to %q must end in / (git adds the rest of the address to it as is)", r.To)
+	}
+	return nil
+}
+
+// gitRewriteHostPart is the scheme and host of a rewrite from (no user
+// name, port or path): "ssh://" + "ghe.example" for ssh://git@ghe.example/,
+// "ghe.example" for git@ghe.example:.
+func gitRewriteHostPart(from string) string {
+	scheme, rest := "", from
+	if i := strings.Index(from, "://"); i >= 0 {
+		scheme, rest = from[:i+3], from[i+3:]
+	}
+	if j := strings.IndexAny(rest, "/:"); j >= 0 {
+		rest = rest[:j]
+	}
+	if k := strings.LastIndex(rest, "@"); k >= 0 {
+		rest = rest[k+1:]
+	}
+	return scheme + rest
+}
+
+// RewriteGitURL is the address git in an agent uses for raw with admin,
+// substrate.git.https_rewrite, on top of the baked rules
+// (SubstrateGitRewriteMap). It follows git: the longest insteadOf prefix
+// wins and, on a tie, the rule git read first, so a baked rule. ok is
+// false when no rule matches.
+func RewriteGitURL(raw string, admin []SubstrateGitRewrite) (string, bool) {
+	best := -1
+	out := ""
+	for _, r := range SubstrateGitRewriteMap(admin) {
+		if strings.HasPrefix(raw, r.From) && len(r.From) > best {
+			best, out = len(r.From), r.To+raw[len(r.From):]
+		}
+	}
+	return out, best >= 0
+}
+
+// SubstrateLauncherConfig is substrate.launcher: launcher behaviour the
+// cluster admin sets for everyone.
+type SubstrateLauncherConfig struct {
+	// KeyReplay is what a launcher does with keys typed while its terminal
+	// link is down (B3.1): ask (default) shows them after the reconnect and
+	// sends them on Enter, on sends them, off drops them with a count. A
+	// launcher flag can only tighten it; off is the admin-off switch.
+	KeyReplay string `mapstructure:"key_replay" yaml:"key_replay,omitempty"`
+	// UploadScan tunes the secret scan of a project copy before it goes to
+	// an actor (B1, Linux and macOS copies; the Windows host copy keeps
+	// holding files back).
+	UploadScan SubstrateUploadScanConfig `mapstructure:"upload_scan" yaml:"upload_scan,omitempty"`
+}
+
+// SubstrateUploadScanConfig is substrate.launcher.upload_scan.
+type SubstrateUploadScanConfig struct {
+	// MaxFileBytes is the largest file the scan reads (default 8 MiB); a
+	// bigger one is uploaded unscanned and named in the run's report.
+	MaxFileBytes int64 `mapstructure:"max_file_bytes" yaml:"max_file_bytes,omitempty"`
+	// TimeBudget bounds the scan (a Go duration, default 120s); the files
+	// it did not reach are named in the run's report.
+	TimeBudget string `mapstructure:"time_budget" yaml:"time_budget,omitempty"`
+	// SecretAction is replace (default: the value is replaced with a
+	// placeholder in the uploaded copy) or hold_back (the whole file stays
+	// on the computer). hold_back is the admin-off switch.
+	SecretAction string `mapstructure:"secret_action" yaml:"secret_action,omitempty"`
+	// PlaceholderForm is token (default, DC_SECRET_<n>) or env
+	// (${DC_SECRET_<n>}).
+	PlaceholderForm string `mapstructure:"placeholder_form" yaml:"placeholder_form,omitempty"`
+}
+
+// Upload scan secret actions and placeholder forms.
+const (
+	SubstrateUploadReplace  = "replace"
+	SubstrateUploadHoldBack = "hold_back"
+	SubstratePlaceholderTok = "token"
+	SubstratePlaceholderEnv = "env"
+
+	substrateUploadMaxFileDefault = 8 << 20
+	substrateUploadMaxFileCeiling = 64 << 20
+	substrateUploadBudgetDefault  = 120 * time.Second
+)
+
+// EffectiveMaxFileBytes is upload_scan.max_file_bytes, 8 MiB when unset.
+func (u SubstrateUploadScanConfig) EffectiveMaxFileBytes() int64 {
+	if u.MaxFileBytes > 0 {
+		return u.MaxFileBytes
+	}
+	return substrateUploadMaxFileDefault
+}
+
+// EffectiveTimeBudget is upload_scan.time_budget, 120s when unset or bad.
+func (u SubstrateUploadScanConfig) EffectiveTimeBudget() time.Duration {
+	if d, err := time.ParseDuration(strings.TrimSpace(u.TimeBudget)); err == nil && d > 0 {
+		return d
+	}
+	return substrateUploadBudgetDefault
+}
+
+// EffectiveSecretAction is upload_scan.secret_action, replace when unset.
+// It is matched exactly, as the config schemas do: Replace or a padded
+// value is refused by Validate, not read as replace (RV5-8).
+func (u SubstrateUploadScanConfig) EffectiveSecretAction() string {
+	if u.SecretAction != "" {
+		return u.SecretAction
+	}
+	return SubstrateUploadReplace
+}
+
+// EffectivePlaceholderForm is upload_scan.placeholder_form, token when
+// unset, matched exactly like EffectiveSecretAction.
+func (u SubstrateUploadScanConfig) EffectivePlaceholderForm() string {
+	if u.PlaceholderForm != "" {
+		return u.PlaceholderForm
+	}
+	return SubstratePlaceholderTok
+}
+
+// Key replay modes (substrate.launcher.key_replay).
+const (
+	SubstrateKeyReplayAsk = "ask"
+	SubstrateKeyReplayOn  = "on"
+	SubstrateKeyReplayOff = "off"
+)
+
+// EffectiveKeyReplay is substrate.launcher.key_replay, ask when unset.
+func (l SubstrateLauncherConfig) EffectiveKeyReplay() string {
+	if v := strings.ToLower(strings.TrimSpace(l.KeyReplay)); v != "" {
+		return v
+	}
+	return SubstrateKeyReplayAsk
+}
+
 // Chain egress actions (substrate.chain_egress_action).
 const (
 	SubstrateChainEgressBlock = "block"
 	SubstrateChainEgressAlert = "alert"
 )
+
+// Values of substrate.relay_tls.
+const (
+	SubstrateRelayTLSAuto     = "auto"
+	SubstrateRelayTLSRequired = "required"
+	SubstrateRelayTLSOff      = "off"
+)
+
+// EffectiveRelayTLS is substrate.relay_tls, auto when unset.
+func (s SubstrateConfig) EffectiveRelayTLS() string {
+	if v := strings.ToLower(strings.TrimSpace(s.RelayTLS)); v != "" {
+		return v
+	}
+	return SubstrateRelayTLSAuto
+}
+
+// Values of substrate.relay_cert_reissue.
+const (
+	SubstrateRelayCertReissueAuto   = "auto"
+	SubstrateRelayCertReissueFlag   = "flag"
+	SubstrateRelayCertReissueRefuse = "refuse"
+)
+
+// EffectiveRelayCertReissue is substrate.relay_cert_reissue, auto when
+// unset.
+func (s SubstrateConfig) EffectiveRelayCertReissue() string {
+	if v := strings.ToLower(strings.TrimSpace(s.RelayCertReissue)); v != "" {
+		return v
+	}
+	return SubstrateRelayCertReissueAuto
+}
+
+// RelayCertReissueFor is the active substrate.relay_cert_reissue: auto is
+// refuse in a managed enterprise install and flag in OSS.
+func (s SubstrateConfig) RelayCertReissueFor(managed bool) string {
+	switch v := s.EffectiveRelayCertReissue(); {
+	case v != SubstrateRelayCertReissueAuto:
+		return v
+	case managed:
+		return SubstrateRelayCertReissueRefuse
+	}
+	return SubstrateRelayCertReissueFlag
+}
 
 // EffectiveChainEgressAction is substrate.chain_egress_action, block when
 // unset.
@@ -599,7 +1167,6 @@ func (s SubstrateConfig) LauncherAtespace(atespace string) (string, bool) {
 }
 
 var (
-	substrateOIDRe          = regexp.MustCompile(`^[0-2](\.(0|[1-9][0-9]*))+$`)
 	substratePlaceholderRe  = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 	substrateProfileRe      = regexp.MustCompile(`^[A-Za-z0-9_.*?\[\]-]+$`)
 	substrateAtespaceGlobRe = regexp.MustCompile(`^[a-z0-9*?\[\]-]{1,63}$`)
@@ -620,6 +1187,63 @@ func (s *SubstrateConfig) Validate() error {
 	case SubstrateChainEgressBlock, SubstrateChainEgressAlert:
 	default:
 		bad("chain_egress_action", "%q is not block or alert", s.ChainEgressAction)
+	}
+	switch s.Launcher.EffectiveKeyReplay() {
+	case SubstrateKeyReplayAsk, SubstrateKeyReplayOn, SubstrateKeyReplayOff:
+	default:
+		bad("launcher.key_replay", "%q is not ask, on or off", s.Launcher.KeyReplay)
+	}
+	switch s.Git.EffectivePushBranch() {
+	case SubstrateGitPushAllow, SubstrateGitPushAsk, SubstrateGitPushDeny:
+	default:
+		bad("git.push_branch", "%q is not allow, ask or deny", s.Git.PushBranch)
+	}
+	if n := len(s.Git.HTTPSRewrite); n > MaxSubstrateGitRewrites {
+		bad("git.https_rewrite", "has %d entries; at most %d", n, MaxSubstrateGitRewrites)
+	}
+	seenRewrite := map[string]bool{}
+	baked := map[string]string{}
+	for _, r := range SubstrateGitBakedRewrites() {
+		baked[r.From] = r.To
+	}
+	for i, r := range s.Git.HTTPSRewrite {
+		if err := CheckSubstrateGitRewrite(r); err != nil {
+			bad(fmt.Sprintf("git.https_rewrite[%d]", i), "%v", err)
+		} else if seenRewrite[r.From] {
+			bad(fmt.Sprintf("git.https_rewrite[%d]", i), "from %q is listed twice", r.From)
+		} else if to, ok := baked[r.From]; ok && to != r.To {
+			bad(fmt.Sprintf("git.https_rewrite[%d]", i), "from %q is built into every actor image with to %q, which git keeps; use a longer from (for example %sORG/)", r.From, to, r.From)
+		}
+		seenRewrite[r.From] = true
+	}
+	up := s.Launcher.UploadScan
+	if up.MaxFileBytes < 0 || up.MaxFileBytes > substrateUploadMaxFileCeiling {
+		bad("launcher.upload_scan.max_file_bytes", "%d is not between 0 and %d", up.MaxFileBytes, substrateUploadMaxFileCeiling)
+	}
+	if t := strings.TrimSpace(up.TimeBudget); t != "" {
+		if d, err := time.ParseDuration(t); err != nil || d < time.Second || d > time.Hour {
+			bad("launcher.upload_scan.time_budget", "%q is not a duration from 1s to 1h", up.TimeBudget)
+		}
+	}
+	switch up.EffectiveSecretAction() {
+	case SubstrateUploadReplace, SubstrateUploadHoldBack:
+	default:
+		bad("launcher.upload_scan.secret_action", "%q is not replace or hold_back", up.SecretAction)
+	}
+	switch up.EffectivePlaceholderForm() {
+	case SubstratePlaceholderTok, SubstratePlaceholderEnv:
+	default:
+		bad("launcher.upload_scan.placeholder_form", "%q is not token or env", up.PlaceholderForm)
+	}
+	switch s.EffectiveRelayTLS() {
+	case SubstrateRelayTLSAuto, SubstrateRelayTLSRequired, SubstrateRelayTLSOff:
+	default:
+		bad("relay_tls", "%q is not auto, required or off", s.RelayTLS)
+	}
+	switch s.EffectiveRelayCertReissue() {
+	case SubstrateRelayCertReissueAuto, SubstrateRelayCertReissueFlag, SubstrateRelayCertReissueRefuse:
+	default:
+		bad("relay_cert_reissue", "%q is not auto, flag or refuse", s.RelayCertReissue)
 	}
 	if a := s.API.Address; a != "" {
 		if _, port, err := net.SplitHostPort(a); err != nil || port == "" {
@@ -650,9 +1274,6 @@ func (s *SubstrateConfig) Validate() error {
 	}
 	if aud := id.Audience; aud != "" && len(aud) > 512 {
 		bad("identity.audience", "is longer than 512 bytes")
-	}
-	if oid := id.ActorCertOID; oid != "" && !substrateOIDRe.MatchString(oid) {
-		bad("identity.actor_cert_oid", "%q is not a dotted OID", oid)
 	}
 	if u := id.KeysURL; u != "" && (!httpsURL(u) || strings.TrimSpace(u) != u) {
 		bad("identity.keys_url", "%q must be an https URL with no query or fragment", u)
@@ -723,6 +1344,20 @@ func (s *SubstrateConfig) Validate() error {
 	default:
 		bad("default_sandbox_class", "%q must be gvisor or microvm", s.DefaultSandboxClass)
 	}
+	rv := s.Identity.Revocation
+	if v := rv.SyncInterval; v != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err != nil || d < time.Second || d > time.Minute {
+			bad("identity.revocation.sync_interval", "%q must be a Go duration from 1s to 60s", v)
+		}
+	}
+	if v := rv.MaxStale; v != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err != nil || d < 2*rv.EffectiveSyncInterval() || d > time.Hour {
+			bad("identity.revocation.max_stale", "%q must be a Go duration of at least 2 x sync_interval (%s) and at most 1h", v, 2*rv.EffectiveSyncInterval())
+		}
+	}
+	if n := rv.MaxTokensPerPerson; n < 0 || n > 4096 {
+		bad("identity.revocation.max_tokens_per_person", "%d must be from 1 to 4096 (0 = default 64)", n)
+	}
 	if v := s.IdleSuspendAfter; v != "" {
 		if d, err := time.ParseDuration(strings.TrimSpace(v)); err != nil || d < 0 || (d > 0 && d < time.Minute) {
 			bad("idle_suspend_after", "%q must be a Go duration of at least 1m, or 0s for off", v)
@@ -738,9 +1373,21 @@ func (s *SubstrateConfig) Validate() error {
 			bad("unattended.ask_timeout", "%q must be a Go duration over 0 and at most 24h", v)
 		}
 	}
+	if v := s.Skills.Scan.Timeout; v != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err != nil || d <= 0 || d > MaxSubstrateSkillScanTimeout {
+			bad("skills.scan.timeout", "%q must be a Go duration over 0 and at most 10m", v)
+		}
+	}
+	if v := s.Skills.PendingWait; v != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err != nil || d <= 0 || d > MaxSubstrateSkillPendingWait {
+			bad("skills.pending_wait", "%q must be a Go duration over 0 and at most 8s (under the kit's 9 s first attempt)", v)
+		}
+	}
 	if r := s.Unattended.TelemetrySampling; r != nil && (*r < 0 || *r > 1) {
 		bad("unattended.telemetry_sampling", "%v is outside 0-1", *r)
 	}
+	s.Interactive.validate(bad)
+	s.Usage.validate(bad)
 	if s.RateLimits.PerActorRPS < 0 {
 		bad("rate_limits.per_actor_rps", "must not be negative")
 	}
@@ -757,6 +1404,9 @@ func (s *SubstrateConfig) Validate() error {
 	case SubstrateBodyAuto, SubstrateBodyOn, SubstrateBodyOff:
 	default:
 		bad("extproc.body_inspection", "%q must be auto, on or off", s.Extproc.BodyInspection)
+	}
+	if n := s.Extproc.RateLimits.PerActorRPS; math.IsNaN(n) || n < 0 || n > 1e6 {
+		bad("extproc.rate_limits.per_actor_rps", "%v is outside 0-1000000 (0 is the callout's default)", n)
 	}
 	if n := s.Extproc.BodyMaxBytes; n < 0 || n > DefaultSubstrateBodyMaxBytes {
 		bad("extproc.body_max_bytes", "%d is outside 0-%d (D9 caps bodies at 1 MiB)", n, DefaultSubstrateBodyMaxBytes)
@@ -787,6 +1437,7 @@ func (s *SubstrateConfig) Validate() error {
 
 	checkPatterns("egress.allow", s.Egress.Allow)
 	checkPatterns("egress.registries", s.Egress.Registries)
+	checkPatterns("egress.no_swap_hosts", s.Egress.NoSwapHosts)
 	checkPatterns("allow_passthrough_for", s.AllowPassthroughFor)
 	known := egressspec.EcosystemPacks()
 	for i, p := range s.Egress.EcosystemPacks {
@@ -801,6 +1452,60 @@ func (s *SubstrateConfig) Validate() error {
 			passthrough[p.String()] = true
 		}
 	}
+	ss := s.SelfServiceSecrets
+	if !slices.Contains([]string{"", SelfServiceBindings, SelfServiceValuesOnly, SelfServiceOff}, ss.Mode) {
+		bad("self_service_secrets.mode", "must be bindings, values_only or off")
+	}
+	if ss.Namespace != "" && !egressspec.IsDNS1123Label(ss.Namespace) {
+		bad("self_service_secrets.namespace", "%q is not a Kubernetes namespace name", ss.Namespace)
+	} else if slices.Contains(substrateReservedNamespaces, ss.Namespace) {
+		bad("self_service_secrets.namespace", "%q is a Kubernetes system namespace; use a namespace of its own", ss.Namespace)
+	} else if _, ok := s.LauncherAtespace(ss.Namespace); ok && ss.Namespace != "" {
+		bad("self_service_secrets.namespace", "%q is a launcher atespace, where actors run; use a namespace of its own", ss.Namespace)
+	}
+	if ss.Provider != "" && !egressspec.IsDNS1123Subdomain(ss.Provider) {
+		bad("self_service_secrets.provider", "%q is not a provider name", ss.Provider)
+	}
+	if ss.MaxPerPerson < 0 || ss.MaxPerPerson > 200 {
+		bad("self_service_secrets.max_per_person", "must be 1-200")
+	}
+	if !slices.Contains([]string{"", "ask", "refuse"}, ss.OutsideTemplates) {
+		bad("self_service_secrets.outside_templates", "must be ask or refuse")
+	}
+	if ss.AskTimeout != "" {
+		if d, err := time.ParseDuration(ss.AskTimeout); err != nil || d <= 0 || d > 168*time.Hour {
+			bad("self_service_secrets.ask_timeout", "must be a duration over 0 and at most 168h")
+		}
+	}
+	tmplNames := map[string]bool{}
+	for i, t := range s.SecretTemplates {
+		key := fmt.Sprintf("secret_templates[%d]", i)
+		if !substrateTemplateNameRE.MatchString(t.Name) {
+			bad(key+".name", "%q must be 1-63 lower-case letters, digits and \"-\"", t.Name)
+		} else if tmplNames[t.Name] {
+			bad(key+".name", "%q is listed twice", t.Name)
+		}
+		tmplNames[t.Name] = true
+		checkPatterns(key+".hosts", t.Hosts)
+		if !slices.Contains([]string{"", "bearer", "basic", "raw"}, t.Form) {
+			bad(key+".form", "must be bearer, basic or raw")
+		}
+		if !slices.Contains([]string{"", "none", "npm", "pypi"}, t.Registry) {
+			bad(key+".registry", "must be none, npm or pypi")
+		}
+		if t.Header != "" && !substrateHeaderNameRE.MatchString(t.Header) {
+			bad(key+".header", "%q is not a header name", t.Header)
+		}
+		if t.BasicUser != "" && !substrateBasicUserRE.MatchString(t.BasicUser) {
+			bad(key+".basic_user", "must be 1-128 printable characters with no space or \":\"")
+		}
+		for j, g := range t.Profiles {
+			if _, err := path.Match(g, ""); err != nil {
+				bad(fmt.Sprintf("%s.profiles[%d]", key, j), "%q is not a profile glob", g)
+			}
+		}
+	}
+
 	names := map[string]bool{}
 	for i, sec := range s.Secrets {
 		key := fmt.Sprintf("secrets[%d]", i)
@@ -855,6 +1560,7 @@ func (s *SubstrateConfig) Validate() error {
 	s.validateTemplates(bad)
 
 	s.Bundles.validate(bad)
+	s.Activity.validate(bad)
 	if err := s.Admin.validateAs("admin"); err != nil {
 		errs = append(errs, err)
 	}
@@ -945,6 +1651,9 @@ func (s *SubstrateConfig) ValidateManaged(deploymentMode string) error {
 	}
 	if s.Enabled && len(s.Templates.AllowedImages) == 0 {
 		errs = append(errs, errors.New("templates.allowed_images: managed_enterprise names the template registries and repositories"))
+	}
+	if !s.Identity.Revocation.EffectiveEnabled() {
+		errs = append(errs, errors.New("identity.revocation.enabled: false is not allowed in managed_enterprise (ended sign-ins are always refused)"))
 	}
 	return errors.Join(errs...)
 }
@@ -1048,7 +1757,9 @@ const substrateWorkloadSubjectHint = `%q must be exact or end in ":*" or "/*" (f
 
 func httpsURL(raw string) bool {
 	u, err := url.Parse(raw)
-	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil && u.RawQuery == "" && u.Fragment == ""
+	// '#' and '?' anywhere, empty ones too: the person key is
+	// issuer#subject, so an issuer ending in '#' would be ambiguous.
+	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil && !strings.ContainsAny(raw, "#?")
 }
 
 // SubstrateVersionRange is a space-separated list of comparisons, every one
@@ -1133,4 +1844,62 @@ func (r SubstrateVersionRange) Contains(version string) bool {
 		}
 	}
 	return true
+}
+
+// SubstrateSkillsConfig is the gateway's scan of skill folders an agent adds
+// while it runs (B5.4, GAP-0477): the chart's scanner sidecar runs the
+// laptop's skill-scanner on each folder the kit attaches.
+type SubstrateSkillsConfig struct {
+	Scan SubstrateSkillsScanConfig `mapstructure:"scan" yaml:"scan,omitempty"`
+	// PendingWait is how long one hook post waits for the scans of its skill
+	// folders, in every tier: one deadline for the post, the wait for a scan
+	// slot and every folder included (default 8s, at most 8s: under the
+	// kit's 9 s first attempt, so every post is answered; GAP-0980,
+	// GAP-0982). Past it the folder is still being checked and its scan goes
+	// on (Scan.Timeout): the OSS tiers ask or allow it with an alert; managed
+	// installs and the strict tier refuse every tool call until it has a
+	// verdict. The kit sends it again with its next hook.
+	PendingWait string `mapstructure:"pending_wait" yaml:"pending_wait,omitempty"`
+}
+
+// SubstrateSkillsScanConfig turns the scanner sidecar on or off and bounds
+// one scan.
+type SubstrateSkillsScanConfig struct {
+	// Enabled uses the scanner sidecar (nil = on). Off: no folder is scanned
+	// and the fail mode decides, as before the sidecar (managed installs and
+	// the strict tier refuse every new skill). This is the admin-off switch.
+	Enabled *bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
+	// Timeout bounds one folder's scan (default 20s, at most 10m); past it
+	// the fail mode decides (reason skill_scan_timeout).
+	Timeout string `mapstructure:"timeout" yaml:"timeout,omitempty"`
+}
+
+const (
+	DefaultSubstrateSkillScanTimeout = 20 * time.Second
+	MaxSubstrateSkillScanTimeout     = 10 * time.Minute
+	DefaultSubstrateSkillPendingWait = 8 * time.Second
+	MaxSubstrateSkillPendingWait     = 8 * time.Second
+)
+
+// SkillScanEnabled says whether the gateway scans skill folders (default on).
+func (s SubstrateConfig) SkillScanEnabled() bool {
+	return s.Skills.Scan.Enabled == nil || *s.Skills.Scan.Enabled
+}
+
+// EffectiveSkillScanTimeout is skills.scan.timeout, bounded.
+func (s SubstrateConfig) EffectiveSkillScanTimeout() time.Duration {
+	d := durationOr(s.Skills.Scan.Timeout, DefaultSubstrateSkillScanTimeout)
+	if d <= 0 || d > MaxSubstrateSkillScanTimeout {
+		return DefaultSubstrateSkillScanTimeout
+	}
+	return d
+}
+
+// EffectiveSkillPendingWait is skills.pending_wait, bounded.
+func (s SubstrateConfig) EffectiveSkillPendingWait() time.Duration {
+	d := durationOr(s.Skills.PendingWait, DefaultSubstrateSkillPendingWait)
+	if d <= 0 || d > MaxSubstrateSkillPendingWait {
+		return DefaultSubstrateSkillPendingWait
+	}
+	return d
 }

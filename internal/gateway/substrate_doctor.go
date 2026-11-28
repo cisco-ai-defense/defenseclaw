@@ -29,14 +29,18 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/secretbind"
 )
 
 // Gateway-side checks for `defenseclaw substrate doctor --cluster`, from where
 // the gateway runs (its DNS, its network):
 //
 //	GET /api/v1/substrate/doctor   (administrators)  {"checks":[{id,status,detail,fix}]}
-//	GET /api/v1/substrate/info     (no sign-in)      {sign_in, issuer, client_id, attach, actor_tokens}
+//	GET /api/v1/substrate/info     (no sign-in)      {sign_in, issuer, client_id, attach, actor_tokens, egress_callout}
 //
 // substrate.model_upstreams_private (GAP-0040): a cluster that reaches a
 // model provider through a VPC interface endpoint resolves the provider
@@ -123,6 +127,11 @@ func (a *APIServer) substrateDoctor(st *substrateState) http.HandlerFunc {
 		if st.cfg.SignInServer != nil {
 			checks = append(checks, st.checkSignIn(r.Context()))
 		}
+		if st.cfg.EgressCallout != nil {
+			if cs, ok := st.cfg.EgressCallout(r.Context()); ok {
+				checks = append(checks, SubstrateEgressCalloutCheck(cs))
+			}
+		}
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{"checks": checks})
 	}
 }
@@ -130,7 +139,7 @@ func (a *APIServer) substrateDoctor(st *substrateState) http.HandlerFunc {
 // substrateInfo is what a launcher needs before it signs in. It names
 // nothing secret.
 func (a *APIServer) substrateInfo(st *substrateState) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		info := map[string]any{}
 		for k, v := range st.cfg.Info {
@@ -143,8 +152,111 @@ func (a *APIServer) substrateInfo(st *substrateState) http.HandlerFunc {
 		if h, ok := st.signIn.report(); ok {
 			info["sign_in_server"] = h
 		}
+		if st.cfg.EgressCallout != nil {
+			// At most one leader read per interval (the create path's
+			// controller cache), and never a slow answer for a launcher.
+			ctx, cancel := context.WithTimeout(r.Context(), egressCalloutInfoWait)
+			cs, ok := st.cfg.EgressCallout(ctx)
+			cancel()
+			if ok {
+				info["egress_callout"] = SubstrateEgressCalloutOf(cs)
+			}
+		}
 		writeSubstrateJSON(w, http.StatusOK, info)
 	}
+}
+
+// egressCalloutInfoWait bounds the slot read /info may wait for.
+const egressCalloutInfoWait = 3 * time.Second
+
+// Egress callout states (the /info egress_callout member).
+const (
+	EgressCalloutDefenseClaw = "defenseclaw"
+	EgressCalloutOther       = "other"
+	EgressCalloutNone        = "none"
+	EgressCalloutUnknown     = "unknown"
+)
+
+// SubstrateEgressCallout is the /info egress_callout member (GAP-0497):
+// whether the DefenseClaw callout holds Substrate's egress callout slot, and
+// when it does not, which DefenseClaw checks are off and what the fail mode
+// does about it. It never names the other callout (/info takes no sign-in);
+// the administrators' /doctor row does.
+type SubstrateEgressCallout struct {
+	// State is defenseclaw, other (another callout holds the slot), none
+	// (no callout is registered) or unknown (the controller could not read
+	// it, or its last report through the leader is missing or stale).
+	State string `json:"state"`
+	// FailMode is closed (managed agents reach only DefenseClaw while
+	// another callout holds the slot; unattended runs always), open
+	// (agents keep their egress without the checks) or off
+	// (substrate.extproc.enabled: false).
+	FailMode string `json:"fail_mode"`
+	// ChecksOff are the DefenseClaw checks that do not run (other, none).
+	ChecksOff []string `json:"checks_off,omitempty"`
+	// Since is when the slot last changed (RFC 3339).
+	Since string `json:"since,omitempty"`
+}
+
+// SubstrateEgressCalloutOf is the /info member of a controller status.
+func SubstrateEgressCalloutOf(cs controller.CalloutStatus) SubstrateEgressCallout {
+	out := SubstrateEgressCallout{FailMode: cs.FailMode}
+	switch {
+	case !cs.Known || cs.Err != "":
+		// What could not be read is never the DefenseClaw callout.
+		out.State = EgressCalloutUnknown
+	case cs.Ours:
+		out.State = EgressCalloutDefenseClaw
+	case cs.Holder == "":
+		out.State = EgressCalloutNone
+	default:
+		out.State = EgressCalloutOther
+	}
+	if out.State == EgressCalloutOther || out.State == EgressCalloutNone {
+		out.ChecksOff = slices.Clone(controller.CalloutChecks)
+	}
+	if !cs.Since.IsZero() {
+		out.Since = cs.Since.UTC().Format(time.RFC3339)
+	}
+	return out
+}
+
+// SubstrateEgressCalloutCheck is the administrators' doctor row for the
+// slot, naming what holds it.
+func SubstrateEgressCalloutCheck(cs controller.CalloutStatus) SubstrateCheck {
+	const id = "substrate.egress_callout"
+	switch m := SubstrateEgressCalloutOf(cs); m.State {
+	case EgressCalloutDefenseClaw:
+		return SubstrateCheck{ID: id, Status: "pass", Detail: "the DefenseClaw callout holds Substrate's egress callout slot (" + cs.Holder + ")"}
+	case EgressCalloutUnknown:
+		why := cs.Err
+		if why == "" {
+			why = "the slot has not been read yet"
+		}
+		return SubstrateCheck{ID: id, Status: "warn", Detail: "cannot verify the egress callout: " + why,
+			Fix: "check the controller's log: the DefenseClaw 1.0.10 chart lets the controller's ServiceAccount get the atenet-egress ConfigMap " +
+				"in the Substrate namespace. Check the slot with your own kubeconfig: defenseclaw substrate doctor --cluster --install-file FILE"}
+	default:
+		what := "no egress callout is registered"
+		if cs.Holder != "" {
+			what = "egress goes to another callout (" + cs.Holder + ")"
+		}
+		return SubstrateCheck{ID: id, Status: "fail",
+			Detail: what + ": these DefenseClaw checks do not run: " + strings.Join(m.ChecksOff, ", ") + "; " + egressCalloutFailModeText(m.FailMode),
+			Fix:    "register the DefenseClaw callout again: defenseclaw substrate setup --install-file FILE, then ate-setup deploy with that file"}
+	}
+}
+
+// egressCalloutFailModeText says what the fail mode does while the slot is
+// not DefenseClaw's.
+func egressCalloutFailModeText(mode string) string {
+	switch mode {
+	case controller.CalloutFailOpen:
+		return "fail open: agents keep their egress without them (unattended runs reach only DefenseClaw)"
+	case controller.CalloutOff:
+		return "substrate.extproc.enabled is false: agents keep their egress without them"
+	}
+	return "fail closed: managed agents reach only DefenseClaw until the DefenseClaw callout is back"
 }
 
 // actorTokenRefusalWindow is how long a cluster-wide actor token refusal
@@ -332,6 +444,21 @@ func (st *substrateState) signInChanged(ctx context.Context, before string, d id
 	}
 }
 
+// SubstrateRelayCertReissueCheck is the doctor row for
+// substrate.relay_cert_reissue (GAP-0861): the configured value and the
+// active mode.
+func SubstrateRelayCertReissueCheck(configured, active string) SubstrateCheck {
+	src := "set to " + active
+	if configured == config.SubstrateRelayCertReissueAuto {
+		src = "auto: " + active + " in this install"
+	}
+	detail := "relay_cert_reissue is " + active + " (" + src + "): a second relay serving certificate for an actor without proof of the live key is issued with a HIGH audit row on every replica"
+	if active == config.SubstrateRelayCertReissueRefuse {
+		detail = "relay_cert_reissue is " + active + " (" + src + "): a second relay serving certificate for an actor without proof of the live key is refused on every replica and after restarts; the owner or an administrator clears it with recover"
+	}
+	return SubstrateCheck{ID: "substrate.relay_cert_reissue", Status: "pass", Detail: detail}
+}
+
 // SignInServerCheck is the doctor row for a sign-in server check, with a
 // fix for each cause (GAP-0262).
 func SignInServerCheck(d identity.IssuerDiagnosis) SubstrateCheck {
@@ -362,6 +489,112 @@ func SignInServerCheck(d identity.IssuerDiagnosis) SubstrateCheck {
 	case identity.IssuerKeys:
 		c.Detail = "the sign-in server's key set does not load (" + d.Detail + "): no sign-in can be verified"
 		c.Fix = "check the sign-in server's jwks_uri and that the gateway reaches it"
+	}
+	return c
+}
+
+// SubstrateSecretEchoHits are the echo-host entries (egressspec.EchoHosts,
+// then substrate.egress.no_swap_hosts) that a host of sec covers, each once.
+func SubstrateSecretEchoHits(sec config.SubstrateSecret, noSwap []string) []string {
+	var hits []string
+	for _, h := range sec.Inject.Hosts {
+		for _, e := range egressspec.EchoHostsCoveredWith(h, noSwap) {
+			if !slices.Contains(hits, e) {
+				hits = append(hits, e)
+			}
+		}
+	}
+	return hits
+}
+
+// SubstrateSecretEchoHostCheck is the doctor row substrate.secret_echo_host
+// (B1 D1-6): it fails when an admin secret is bound to a host that returns
+// the requests it gets, because the controller drops that binding
+// (secret_echo_host) and the agent no longer gets the secret there. It
+// warns for an entry that keeps the echo with inject.allow_echo.
+func SubstrateSecretEchoHostCheck(secrets []config.SubstrateSecret, noSwap []string) SubstrateCheck {
+	c := SubstrateCheck{ID: "substrate.secret_echo_host", Status: "pass",
+		Detail: "no secret is bound to a host that returns the requests it gets"}
+	var dropped, kept []string
+	for _, sec := range secrets {
+		hits := SubstrateSecretEchoHits(sec, noSwap)
+		if len(hits) == 0 {
+			continue
+		}
+		line := sec.Name + " (" + strings.Join(hits, ", ") + ")"
+		if sec.Inject.AllowEcho {
+			kept = append(kept, line)
+		} else {
+			dropped = append(dropped, line)
+		}
+	}
+	switch {
+	case len(dropped) > 0:
+		c.Status = "fail"
+		c.Detail = "these secrets are not added on hosts that return the requests they get: " + strings.Join(dropped, "; ")
+		c.Fix = "bind each secret to the API host that needs it; to keep the echo on purpose, set inject.allow_echo: true on the entry"
+	case len(kept) > 0:
+		c.Status = "warn"
+		c.Detail = "inject.allow_echo adds these secrets on hosts that return them to the agent: " + strings.Join(kept, "; ")
+		c.Fix = "remove inject.allow_echo unless the echo is intended"
+	}
+	return c
+}
+
+// SubstrateSecretBindingFormCheck is the substrate.secret_binding_form row
+// (RV3 P4-3): it warns for each binding whose template's form or basic
+// user changed since its value was stored, because the stored value then
+// makes an invalid header until the person sets it again. A binding stored
+// before 1.0.11 records no form and is not judged. It reads the same
+// Binding.StoredForm and Template.FormStamp as the person's list and test
+// status "template changed" (GAP-0778).
+func SubstrateSecretBindingFormCheck(store *secretbind.Store, templates []config.SubstrateSecretTemplate) SubstrateCheck {
+	c := SubstrateCheck{ID: "substrate.secret_binding_form", Status: "pass", Detail: "every binding's value is in its template's form"}
+	if store == nil {
+		c.Detail = "self-service bindings are off"
+		return c
+	}
+	catalog := secretbind.Catalog(templates)
+	var stale []string
+	for _, b := range store.All() {
+		t, ok := secretbind.Find(catalog, b.Template)
+		if !ok || b.StoredForm == "" || b.State != secretbind.Active {
+			continue
+		}
+		if now := t.FormStamp(b); now != b.StoredForm {
+			stale = append(stale, b.Name+" ("+b.Template+": "+b.StoredForm+" -> "+now+")")
+		}
+	}
+	if len(stale) > 0 {
+		sort.Strings(stale)
+		c.Status = "warn"
+		c.Detail = "these bindings hold a value in a form their template no longer uses, so the header Substrate adds is not valid: " + strings.Join(stale, "; ")
+		c.Fix = "ask each owner to run defenseclaw substrate secrets set NAME again, or put the template's form back"
+	}
+	return c
+}
+
+// SubstrateSecretBindingStoreCheck is the substrate.secret_bindings row: the
+// self-service bindings ConfigMap reads, and no entry in it was left out as
+// invalid (a hand edit). A left-out entry is dropped on the next change, so
+// the row names it first (RV3 P3-2).
+func SubstrateSecretBindingStoreCheck(store *secretbind.Store) SubstrateCheck {
+	c := SubstrateCheck{ID: "substrate.secret_bindings", Status: "pass", Detail: "the self-service bindings read"}
+	if store == nil {
+		c.Detail = "self-service bindings are off"
+		return c
+	}
+	loaded, dropped, err := store.Health()
+	switch {
+	case err != nil && !loaded:
+		c.Status, c.Detail = "fail", "the self-service bindings do not read: "+err.Error()
+		c.Fix = "check that the gateway can get and patch its bindings ConfigMap"
+	case err != nil:
+		c.Status, c.Detail = "warn", "the last read of the self-service bindings failed, the gateway uses the one before: "+err.Error()
+		c.Fix = "check the bindings ConfigMap: a hand edit may have left it unreadable"
+	case len(dropped) > 0:
+		c.Status, c.Detail = "warn", "these binding entries are not valid and are left out: "+strings.Join(dropped, ", ")
+		c.Fix = "fix or remove them in the bindings ConfigMap; the next add or rm rewrites it without them"
 	}
 	return c
 }

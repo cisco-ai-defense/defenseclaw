@@ -12,7 +12,6 @@ import (
 	"io"
 	"math"
 	"net/netip"
-	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -24,20 +23,20 @@ import (
 )
 
 var (
-	providerTokenRE = regexp.MustCompile(`(?:AKIA|ASIA|AROA|AGPA|AIDA|AIPA|ANPA|ANVA)[A-Z0-9]{16}|(?:ghp_|gho_|ghu_|ghs_|ghr_)[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|glpat-[A-Za-z0-9_-]{20,255}|xoxb-[0-9]{10,13}-[0-9]{10,13}-[A-Za-z0-9]{24,128}|(?:xoxp-|xoxa-|xoxr-|xoxs-)[A-Za-z0-9-]{24,200}|(?:sk_live_|sk_test_|rk_live_|rk_test_|pk_live_|pk_test_)[A-Za-z0-9]{20,128}|AIza[A-Za-z0-9_-]{35}|sk-proj-[A-Za-z0-9_+=.-]{16,248}|sk-ant-[A-Za-z0-9_+=.-]{17,249}|sk-or-[A-Za-z0-9_+=.-]{18,250}|sk-[A-Za-z0-9_+=.-]{21,253}|eyJ[A-Za-z0-9_-]*={0,2}\.[A-Za-z0-9_-]+={0,2}\.[A-Za-z0-9_-]+={0,2}`)
-	authorizationRE = regexp.MustCompile(`(?i)^(authorization|proxy-authorization)[\t ]*[:=][\t ]*(bearer|basic|digest|token|apikey)[\t ]+([^\r\n]+)$`)
-	assignmentKeyRE = regexp.MustCompile(`(?i)(password|passwd|pwd|secret|client_secret|api_key|apikey|access_token|refresh_token|private_key|signing_key)`)
-	dsnKeyRE        = regexp.MustCompile(`(?i)(password|passwd|pwd|pass|secret|client_secret|api_key|apikey|access_token|refresh_token|token|signature|credential)`)
-	entropyRE       = regexp.MustCompile(`[A-Za-z0-9+/_=-]{20,256}`)
-	uriRE           = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\x00-\x20<>"']+`)
-	cloudLabelRE    = regexp.MustCompile(`(?i)(aws_account_id|azure_tenant_id|azure_subscription_id|gcp_project_number|gcp_project_id)[\t ]*[:=][\t ]*([A-Za-z0-9-]+)`)
-	arnRE           = regexp.MustCompile(`arn:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]*:([0-9]{12}):[^\x00-\x20:]+`)
-	azurePathRE     = regexp.MustCompile(`(?i)/(subscriptions|tenants)/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:/|$)`)
-	gcpPathRE       = regexp.MustCompile(`(?:^|/)projects/([a-z][a-z0-9-]{4,28}[a-z0-9])(?:/|$)`)
-	gcpServiceRE    = regexp.MustCompile(`[A-Za-z0-9._%+-]+@([a-z][a-z0-9-]{4,28}[a-z0-9])\.iam\.gserviceaccount\.com`)
-	emailRE         = regexp.MustCompile(`[A-Za-z0-9!#$%&'*+/=?^_` + "`" + `{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_` + "`" + `{|}~-]+)*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+`)
-	telephoneRE     = regexp.MustCompile(`(?:\+1[ .-])?(?:\([2-9][0-9]{2}\)|[2-9][0-9]{2})[ .-][2-9][0-9]{2}[ .-][0-9]{4}`)
-	nationalIDRE    = regexp.MustCompile(`[0-9]{3}-[0-9]{2}-[0-9]{4}`)
+	providerTokenRE = lazyregexp.New(`(?:AKIA|ASIA|AROA|AGPA|AIDA|AIPA|ANPA|ANVA)[A-Z0-9]{16,32}|(?:ghp_|gho_|ghu_|ghs_|ghr_)[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|glpat-[A-Za-z0-9_-]{20,255}|xoxb-[0-9]{10,13}-[0-9]{10,13}-[A-Za-z0-9]{24,128}|(?:xoxp-|xoxa-|xoxr-|xoxs-)[A-Za-z0-9-]{24,200}|(?:sk_live_|sk_test_|rk_live_|rk_test_|pk_live_|pk_test_)[A-Za-z0-9]{20,128}|AIza[A-Za-z0-9_-]{35}|sk-proj-[A-Za-z0-9_+=.-]{16,248}|sk-ant-[A-Za-z0-9_+=.-]{17,249}|sk-or-[A-Za-z0-9_+=.-]{18,250}|sk-[A-Za-z0-9_+=.-]{21,253}|eyJ[A-Za-z0-9_-]*={0,2}\.[A-Za-z0-9_-]+={0,2}\.[A-Za-z0-9_-]+={0,2}`)
+	authorizationRE = lazyregexp.New(`(?i)^(authorization|proxy-authorization)[\t ]*[:=][\t ]*(bearer|basic|digest|token|apikey)[\t ]+([^\r\n]+)$`)
+	assignmentKeyRE = lazyregexp.New(`(?i)(password|passwd|pwd|secret|client_secret|api_key|apikey|access_token|refresh_token|private_key|signing_key)`)
+	dsnKeyRE        = lazyregexp.New(`(?i)(password|passwd|pwd|pass|secret|client_secret|api_key|apikey|access_token|refresh_token|token|signature|credential)`)
+	entropyRE       = lazyregexp.New(`[A-Za-z0-9+/_=-]{20,256}`)
+	uriRE           = lazyregexp.New(`[A-Za-z][A-Za-z0-9+.-]*://[^\x00-\x20<>"']+`)
+	cloudLabelRE    = lazyregexp.New(`(?i)(aws_account_id|azure_tenant_id|azure_subscription_id|gcp_project_number|gcp_project_id)[\t ]*[:=][\t ]*([A-Za-z0-9-]+)`)
+	arnRE           = lazyregexp.New(`arn:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]*:([0-9]{12}):[^\x00-\x20:]+`)
+	azurePathRE     = lazyregexp.New(`(?i)/(subscriptions|tenants)/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:/|$)`)
+	gcpPathRE       = lazyregexp.New(`(?:^|/)projects/([a-z][a-z0-9-]{4,28}[a-z0-9])(?:/|$)`)
+	gcpServiceRE    = lazyregexp.New(`[A-Za-z0-9._%+-]+@([a-z][a-z0-9-]{4,28}[a-z0-9])\.iam\.gserviceaccount\.com`)
+	emailRE         = lazyregexp.New(`[A-Za-z0-9!#$%&'*+/=?^_` + "`" + `{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_` + "`" + `{|}~-]+)*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+`)
+	telephoneRE     = lazyregexp.New(`(?:\+1[ .-])?(?:\([2-9][0-9]{2}\)|[2-9][0-9]{2})[ .-][2-9][0-9]{2}[ .-][0-9]{4}`)
+	nationalIDRE    = lazyregexp.New(`[0-9]{3}-[0-9]{2}-[0-9]{4}`)
 	uuidRE          = lazyregexp.New(`[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}`)
 )
 
@@ -75,7 +74,7 @@ func recognize(
 	case "credentials.private_key":
 		return recognizePrivateKeys(input), nil
 	case "credentials.authorization":
-		return recognizeAuthorization(input), nil
+		return append(recognizeAuthorization(input), recognizeInlineCredentials(input)...), nil
 	case "credentials.cookie":
 		return recognizeCookies(input), nil
 	case "credentials.connection_string":
@@ -112,17 +111,61 @@ func recognizeProviderTokens(input string) []candidate {
 		if strings.HasPrefix(value, "eyJ") && strings.Count(value, ".") == 2 {
 			accepted = accepted && validJWT(value)
 		}
+		if isAWSKeyIDPrefix(value) {
+			accepted = awsKeyBoundary(input, index[0], index[1]) &&
+				(len(value) == awsKeyIDLength || awsNearKey(value[4:]))
+		}
 		result = append(result, candidate{start: index[0], end: index[1], accepted: accepted})
 	}
 	return result
 }
 
+// awsKeyIDLength is the length of an AWS access key id: a four-letter
+// prefix and 16 key characters.
+const awsKeyIDLength = 20
+
+func isAWSKeyIDPrefix(value string) bool {
+	switch value[:4] {
+	case "AKIA", "ASIA", "AROA", "AGPA", "AIDA", "AIPA", "ANPA", "ANVA":
+		return true
+	}
+	return false
+}
+
+// awsNearKey: a run of 17-32 key characters after an AWS key id prefix is a
+// near-key (GAP-0426: the J22 canaries AKIA+17 and AKIA+18, a key id with a
+// pasted suffix) and is redacted like the key id, which the exact 20-character
+// shape alone missed. A near-key needs a digit, so an upper-case word or
+// heading that starts like a key id (ASIAPACIFIC...) stays readable; a real
+// 20-character key id needs none.
+func awsNearKey(suffix string) bool {
+	return strings.ContainsAny(suffix, "0123456789")
+}
+
+// awsKeyBoundary is providerBoundary for an AWS key id, whose characters are
+// only A-Z and 0-9: on the right, '.', '-', '+' and '=' end it, so a key id
+// at the end of a sentence ("my key is AKIA....") or before a separator is
+// still a key id (GAP-0426). A letter, digit or '_' still joins it to a
+// longer token on either side.
+func awsKeyBoundary(input string, start, end int) bool {
+	return (start == 0 || input[start-1] == '=' || afterEncodedEquals(input, start) || !isProviderByte(input[start-1])) &&
+		(end == len(input) || !isASCIIAlphaNum(input[end]) && input[end] != '_')
+}
+
 // providerBoundary: a token stands alone, or follows an assignment's '='
 // (GAP-0426: AWS_ACCESS_KEY_ID=AKIA... in a .env file or a tool result was
-// never redacted, because '=' counted as part of a longer token).
+// never redacted, because '=' counted as part of a longer token), or follows
+// a URL-encoded '=' (GAP-0512: token%3DAKIA... in a logged URL or form body,
+// where the 'D' of "%3D" counted as part of a longer token).
 func providerBoundary(input string, start, end int) bool {
-	return (start == 0 || input[start-1] == '=' || !isProviderByte(input[start-1])) &&
+	return (start == 0 || input[start-1] == '=' || afterEncodedEquals(input, start) || !isProviderByte(input[start-1])) &&
 		(end == len(input) || !isProviderByte(input[end]))
+}
+
+// afterEncodedEquals reports whether input[:start] ends with "%3D" or "%3d".
+func afterEncodedEquals(input string, start int) bool {
+	return start >= 3 && input[start-3] == '%' && input[start-2] == '3' &&
+		(input[start-1] == 'D' || input[start-1] == 'd')
 }
 
 func isProviderByte(value byte) bool {
@@ -504,10 +547,11 @@ func overlapsAnyRange(start, end int, ranges [][]int) bool {
 }
 
 func recognizeAssignments(input string) []candidate {
-	return scanKeyValues(input, assignmentKeyRE, false)
+	result := append(scanKeyValues(input, assignmentKeyRE, false), recognizeCredentialKeys(input)...)
+	return append(result, recognizeProseCredentials(input)...)
 }
 
-func scanKeyValues(input string, keyPattern *regexp.Regexp, dsn bool) []candidate {
+func scanKeyValues(input string, keyPattern *lazyregexp.Regexp, dsn bool) []candidate {
 	indices := keyPattern.FindAllStringIndex(input, -1)
 	result := make([]candidate, 0, len(indices))
 	for _, index := range indices {
@@ -609,6 +653,19 @@ func recognizeHighEntropy(input string, fieldClass observability.FieldClass, pri
 	for _, index := range indices {
 		boundary := entropyBoundary(input, index[0], index[1])
 		span := input[index[0]:index[1]]
+		// DefenseClaw's own route text (a substrate API route in an audit row) is
+		// a public grammar, not key material (GAP-1145): its fixed prefix and
+		// path words stay readable; what follows them is judged as before.
+		if routeEnd := routeGrammarEnd(span); routeEnd > 0 {
+			// The span is judged as written, as before, so nothing the detector
+			// redacted after the grammar stops being redacted; only the grammar
+			// itself, which is never a value, stays readable. A span that is
+			// only grammar has nothing left to redact.
+			accepted := boundary && validHighEntropy(span, fieldClass) &&
+				routeEnd < len(span) && !overlapsCredentialClaim(index[0]+routeEnd, index[1], prior)
+			result = append(result, candidate{start: index[0] + routeEnd, end: index[1], accepted: accepted})
+			continue
+		}
 		parts, folderFound := splitAtProductFolders(span)
 		// A product folder component is neutral. A span without one is judged
 		// exactly as before. A span with one is a secret only when the detector
@@ -634,6 +691,45 @@ func recognizeHighEntropy(input string, fieldClass observability.FieldClass, pri
 		}
 	}
 	return result
+}
+
+// routeGrammarPrefix is the fixed start of DefenseClaw's substrate API routes.
+const routeGrammarPrefix = "/api/v1/substrate/"
+
+// routeGrammarWords are the path words DefenseClaw's own substrate routes
+// use. A word is exempt only as a whole path component directly after the
+// prefix or another exempt word; a value that is not one of these, or that
+// merely contains one, is judged as before.
+var routeGrammarWords = map[string]struct{}{
+	"actors": {}, "admin": {}, "ask": {}, "asks": {}, "approvals": {}, "attach": {}, "batches": {},
+	"bundle": {}, "callout": {}, "decisions": {}, "doctor": {}, "explain": {}, "files": {}, "hook": {},
+	"info": {}, "inspect": {}, "launcher": {}, "mcp": {}, "notify": {}, "policy": {}, "push": {},
+	"readyz": {}, "recover": {}, "relay": {}, "reset": {}, "revocations": {}, "revoke": {}, "rollback": {},
+	"secret-templates": {}, "secrets": {}, "session-cert": {}, "signin": {}, "snapshot": {}, "status": {},
+	"task": {}, "test": {}, "usage": {}, "verdict": {},
+}
+
+// routeGrammarEnd is how many leading bytes of span are DefenseClaw's fixed
+// route grammar: the literal prefix and the run of its path words that
+// follows it. It is 0 unless span starts with the prefix. The rest of the
+// span (an atespace, a name, an id, anything else) is not exempt.
+func routeGrammarEnd(span string) int {
+	if !strings.HasPrefix(span, routeGrammarPrefix) {
+		return 0
+	}
+	end := len(routeGrammarPrefix)
+	for end < len(span) {
+		next := strings.IndexByte(span[end:], byte(0x2f))
+		word, step := span[end:], len(span)-end
+		if next >= 0 {
+			word, step = span[end:end+next], next+1
+		}
+		if _, ok := routeGrammarWords[word]; !ok {
+			break
+		}
+		end += step
+	}
+	return end
 }
 
 // joinRanges rebuilds span with the product folder components taken out: the
@@ -703,7 +799,7 @@ func validHighEntropy(value string, fieldClass observability.FieldClass) bool {
 	if looksUUID(value) || (len(value) == 32 && allHex(value)) || (len(value) == 64 && allHex(value) && fieldClass == observability.FieldClassIdentifier) {
 		return false
 	}
-	if identifierShaped(value) {
+	if identifierShaped(value) || labelWithSuffixShaped(value) {
 		return false
 	}
 	classes := 0
@@ -737,6 +833,109 @@ func validHighEntropy(value string, fieldClass observability.FieldClass) bool {
 // rule fired. The shape needs at least three segments, at least one of them an
 // upper-case word of three or more letters, and every mixed or numeric segment
 // at most four characters; random keys with long mixed groups still match.
+// labelWithSuffixShaped reports a Substrate actor name, attribution data
+// rather than key material (GAP-0520): [<atespace>/]<words>[-<n>]-<hex>,
+// where the hex suffix is the launcher's 8 digits (newSubstrateID(4)) or the
+// gateway's 6 (substrateActorName). Before the suffix come at most five
+// segments and 40 characters, each a word (at most 12 lower-case letters
+// and digits, at least three letters, at most three digits, no five
+// consonants in a row, and not a hex-only group of six or more) or a counter (at most four digits), and at
+// least one is a word; short parts of at most four characters (g3, r102)
+// may sit between them. The atespace, when present, is at most 32
+// characters of the same words and parts. Anything else (a bare hex token, a longer
+// suffix, upper case, random groups) is judged by the detector as before.
+func labelWithSuffixShaped(value string) bool {
+	if space, name, ok := strings.Cut(value, "/"); ok {
+		return len(space) <= 32 && dnsLabel(space) && wordsAndCounters(strings.Split(space, "-"), true) &&
+			!strings.Contains(name, "/") && labelWithSuffixShaped(name)
+	}
+	if !dnsLabel(value) {
+		return false
+	}
+	segments := strings.Split(value, "-")
+	if len(segments) < 2 || len(segments) > 6 {
+		return false
+	}
+	suffix := segments[len(segments)-1]
+	if (len(suffix) != 6 && len(suffix) != 8) || !allHex(suffix) {
+		return false
+	}
+	head := segments[:len(segments)-1]
+	if len(strings.Join(head, "-")) > 40 {
+		return false
+	}
+	return wordsAndCounters(head, false)
+}
+
+// wordsAndCounters reports segments that are all words or counters (see
+// labelWithSuffixShaped), with at least one word; an atespace (atespace
+// true) may be short parts only, such as "t".
+func wordsAndCounters(segments []string, atespace bool) bool {
+	word := false
+	for _, segment := range segments {
+		letters, digits := 0, 0
+		for i := range len(segment) {
+			switch c := segment[i]; {
+			case isASCIILower(c):
+				letters++
+			case isASCIIDigit(c):
+				digits++
+			default:
+				return false
+			}
+		}
+		switch {
+		case segment == "" || len(segment) > 16:
+			return false
+		case letters == 0:
+			if digits > 4 {
+				return false
+			}
+		case len(segment) >= 6 && allHex(segment):
+			return false // a hex group is not a word
+		case letters >= 3 && digits <= 3:
+			if len(segment) > 12 || consonantRun(segment) >= 5 {
+				return false // random letters, not a word
+			}
+			word = true
+		case len(segment) <= 4:
+			// a short part: dc, t, l5, g3, r102
+		default:
+			return false
+		}
+	}
+	return word || atespace
+}
+
+// consonantRun is the longest run of lower-case consonants in s (y counts
+// as a vowel); readable words rarely have five in a row, random letters do.
+func consonantRun(s string) int {
+	longest, run := 0, 0
+	for i := range len(s) {
+		c := s[i]
+		if isASCIILower(c) && !strings.ContainsRune("aeiouy", rune(c)) {
+			run++
+			longest = max(longest, run)
+			continue
+		}
+		run = 0
+	}
+	return longest
+}
+
+// dnsLabel reports a lower-case DNS-1123 label.
+func dnsLabel(value string) bool {
+	if value == "" || len(value) > 63 || value[0] == '-' || value[len(value)-1] == '-' {
+		return false
+	}
+	for i := range len(value) {
+		if c := value[i]; !isASCIILower(c) && !isASCIIDigit(c) && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
 func identifierShaped(value string) bool {
 	segments := strings.FieldsFunc(value, func(character rune) bool { return character == '-' || character == '_' })
 	if len(segments) < 3 || strings.Count(value, "-")+strings.Count(value, "_") != len(segments)-1 {
@@ -896,7 +1095,7 @@ func recognizeCloudIdentifiers(input string) []candidate {
 	for _, parts := range azurePathRE.FindAllStringSubmatchIndex(input, -1) {
 		result = append(result, candidate{start: parts[4], end: parts[5], accepted: validUUID(input[parts[4]:parts[5]])})
 	}
-	for _, pattern := range []*regexp.Regexp{gcpPathRE, gcpServiceRE} {
+	for _, pattern := range []*lazyregexp.Regexp{gcpPathRE, gcpServiceRE} {
 		for _, parts := range pattern.FindAllStringSubmatchIndex(input, -1) {
 			result = append(result, candidate{start: parts[2], end: parts[3], accepted: validGCPProjectID(input[parts[2]:parts[3]])})
 		}

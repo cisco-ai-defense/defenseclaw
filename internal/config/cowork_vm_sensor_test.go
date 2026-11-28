@@ -5,7 +5,10 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -43,6 +46,8 @@ func TestCoworkVMSensorArgumentsAndValidation(t *testing.T) {
 		{"bad collector", func(c *EnterpriseCoworkVMSensorConfig) { c.Collector = "https://edr.example.com" }},
 		{"bad port", func(c *EnterpriseCoworkVMSensorConfig) { c.Collector = "edr.example.com:65536" }},
 		{"zero port", func(c *EnterpriseCoworkVMSensorConfig) { c.Collector = "edr.example.com:0" }},
+		{"collector host ends in dash", func(c *EnterpriseCoworkVMSensorConfig) { c.Collector = "otel-:4318" }},
+		{"collector host ends in dot", func(c *EnterpriseCoworkVMSensorConfig) { c.Collector = "edr.example.com.:443" }},
 		{"uppercase vendor", func(c *EnterpriseCoworkVMSensorConfig) { c.Vendor = "Cisco" }},
 		{"relative source", func(c *EnterpriseCoworkVMSensorConfig) { c.SourceDir = "cowork" }},
 		{"drive-relative source", func(c *EnterpriseCoworkVMSensorConfig) { c.SourceDir = `C:cowork` }},
@@ -174,7 +179,7 @@ func TestCoworkVMSensorClosedSchemaAndProfile(t *testing.T) {
 	}
 	for _, block := range []string{
 		"{mode: true}", "{mode: enabled}", "{mode: on}", "{unexpected: value}", "[]", "null",
-		"{tenant: 123}", "{device: [x]}", "{collector: true}", "{vendor: Cisco}",
+		"{tenant: 123}", "{device: [x]}", "{collector: true}", "{collector: 'otel-:4318'}", "{collector: 'otel.:4318'}", "{vendor: Cisco}",
 		"{source_dir: 123}", "{package_sha256: abc}", "{signature_sha256: abc}",
 	} {
 		if err := ValidateV8SchemaBytes("config.yaml", coworkVMSensorSource(block)); err == nil {
@@ -207,6 +212,44 @@ func TestCoworkVMSensorFullRuntimeLoad(t *testing.T) {
 		cfg, err = LoadRuntimeV8InspectionCandidateFromBytes(path, coworkVMSensorSource(block))
 		if err != nil || cfg.Enterprise.CoworkVMSensor.EffectiveMode() != "off" {
 			t.Fatalf("off runtime load: %+v, %v", cfg, err)
+		}
+	}
+}
+
+// TestCoworkCollectorMatchesVMInstaller keeps the host-side collector check
+// the same as the one the VM's install.sh applies at every VM start
+// (GAP-1736): a value validate accepts must not then fail in the VM with
+// exit 14, and the reverse.
+func TestCoworkCollectorMatchesVMInstaller(t *testing.T) {
+	script, err := os.ReadFile(filepath.Join("..", "..", "packaging", "cowork-vm", "install.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	match := regexp.MustCompile(`\[\[ "\$collector" =~ (\S+) \]\]`).FindSubmatch(script)
+	if match == nil {
+		t.Fatal("install.sh has no collector check")
+	}
+	vm := regexp.MustCompile(string(match[1]))
+	vmAccepts := func(collector string) bool {
+		m := vm.FindStringSubmatch(collector)
+		if m == nil || len(collector) > 200 { // install.sh caps every argument value at 200
+			return false
+		}
+		port, err := strconv.Atoi(m[len(m)-1])
+		return err == nil && port >= 1 && port <= 65535
+	}
+	for _, collector := range []string{
+		"edr.example.com:443", "e:1", "10.0.0.1:4318", "a-b.c-d:65535", "e1:01",
+		"otel-:4318", "otel.:4318", "-otel:4318", ".otel:4318", "otel:", ":4318", "otel:0",
+		"otel:65536", "otel:123456", "otel_1:4318", "https://otel:4318", "otel:4318/x",
+		"[::1]:4318", "o-.-o:4318", strings.Repeat("c", 150) + ":4318",
+		strings.Repeat("c", 195) + ":4318", strings.Repeat("c", 196) + ":4318", strings.Repeat("c", 248) + ":4318",
+	} {
+		c := goodCoworkVMSensor()
+		c.Collector = collector
+		_, err := c.InstallArguments("")
+		if hostAccepts := err == nil; hostAccepts != vmAccepts(collector) {
+			t.Errorf("collector %q: host validation accepts=%v, VM install.sh accepts=%v (%v)", collector, hostAccepts, vmAccepts(collector), err)
 		}
 	}
 }

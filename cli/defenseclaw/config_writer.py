@@ -96,7 +96,10 @@ MANAGED_NOT_INITIALIZED = (
 # routing and plugin_dir, read once at start; the guardrail listener and
 # enablement; the hook self-heal settings; the enterprise sandbox runtime,
 # enterprise.openshell). "*" matches one segment. Everything else is hot, the
-# connector set (guardrail.connectors.<c>.enabled) too. Mirrors
+# connector set (guardrail.connectors.<c>.enabled) too. The routing keys stay
+# listed because the writer cannot see the classifier the gateway runs: `config
+# set` says routing.enabled applies on reload, not on a restart, only when
+# config.yaml names an in-gateway classifier (cmd_config, rel-1-0-10 GAP-1669). Mirrors
 # internal/config/configwrite restartKeys, in the same order (a test compares
 # them).
 RESTART_KEYS = (
@@ -937,12 +940,12 @@ _CASCADE_LANE_KEY = re.compile(r"^guardrail\.cascade\.lanes\.(effects|secret_flo
 def _cascade_lane_refusal(name: str, lane: str, value: Any) -> str:
     """Why a cascade lane value is refused, as the gateway words it (GAP-0546).
 
-    The effects and secret_flow lanes ship shadow-only in 1.0.10, so "on" is a
-    valid spelling that this release does not offer: say that, not "not in the
-    expected format". Mirrors internal/config/cascade_lanes.go Validate.
+    The secret_flow lane ships shadow-only, so "on" is a valid spelling that
+    this release does not offer: say that, not "not in the expected format".
+    Mirrors internal/config/cascade_lanes.go Validate.
     """
-    allowed = "on, shadow, off" if lane == "nonshell" else "off, shadow"
-    if lane != "nonshell" and isinstance(value, str) and value.strip().lower() == "on":
+    allowed = "off, shadow" if lane == "secret_flow" else "on, shadow, off"
+    if lane == "secret_flow" and isinstance(value, str) and value.strip().lower() == "on":
         return f'{name} "{value}" is not available in 1.0.10; allowed: {allowed}.'
     return f"{name} must be one of {allowed}."
 

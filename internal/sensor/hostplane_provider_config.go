@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/procprobe"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // providerConfig is a credential-adjacent provider configuration file a CLI
@@ -64,7 +66,7 @@ type providerConfigFacts struct {
 func defaultProviderConfigFacts() providerConfigFacts {
 	return providerConfigFacts{
 		home: procprobe.CachedOwnerHome, env: processStartEnv,
-		realPath: filepath.EvalSymlinks, owner: fileOwnerUID,
+		realPath: winpath.EvalLinks, owner: fileOwnerUID,
 	}
 }
 
@@ -145,9 +147,14 @@ func (f providerConfigFacts) ownFile(path string, pid, uid int, config providerC
 const maxProcessEnv = 1 << 20
 
 // processStartEnv is the value of name in the environment process pid
-// started with, from /proc/<pid>/environ. Elsewhere there is no such file,
-// and only the account's home counts.
+// started with, from /proc/<pid>/environ on Linux. Elsewhere there is no such
+// file, and only the account's home counts: a /proc folder there is no start
+// environment (on Windows \proc at the drive root is a folder any account may
+// make), so it is never read.
 func processStartEnv(pid int, name string) (string, bool) {
+	if runtime.GOOS != "linux" {
+		return "", false
+	}
 	file, err := os.Open(filepath.Join("/proc", strconv.Itoa(pid), "environ"))
 	if err != nil {
 		return "", false

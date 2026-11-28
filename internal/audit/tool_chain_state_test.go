@@ -27,7 +27,7 @@ func TestToolChainStateIsCreatedWhenUpgradingFrom0810(t *testing.T) {
 		"runtime assets: add durable connector session provenance state" {
 		t.Fatal("migration 29 is no longer the last 0.8.10 migration")
 	}
-	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	store, err := NewStore(realMigrationPath(filepath.Join(t.TempDir(), "audit.db")))
 	if err != nil {
 		t.Fatal(err)
 	}

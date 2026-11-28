@@ -49,6 +49,9 @@ type PluginScanner struct {
 	// the embedded Windows runtime needs it: the defenseclaw CLI resolves
 	// it from config itself.
 	LLM config.LLMConfig
+	// Contain runs the scanner command; nil is RunTracked's namespace
+	// containment. Only the pod's scan worker sets it (GAP-0828).
+	Contain func(*exec.Cmd) error
 }
 
 func NewPluginScanner(binaryPath string) *PluginScanner {
@@ -126,7 +129,7 @@ func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := runScannerCommand(cmd)
+	err := contain(s.Contain, cmd)
 	duration := time.Since(start)
 	stderrStr := stderr.String()
 

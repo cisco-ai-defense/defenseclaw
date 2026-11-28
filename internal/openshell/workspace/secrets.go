@@ -31,6 +31,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -89,9 +90,13 @@ const (
 )
 
 type secretScanOptions struct {
-	patterns    []string // operator mask globs; apply to tracked files too
-	unmask      []string // operator exceptions (paths or globs)
-	maskTracked bool     // mask tracked secret names even when unchanged
+	patterns []string // operator mask globs; apply to tracked files too
+	unmask   []string // operator exceptions (paths or globs)
+	// unmaskExact are files shared by exact relative path only: a push
+	// carries the run's shared files this way, so a root .env the run
+	// shared does not turn into a base-name rule for every .env below.
+	unmaskExact []string
+	maskTracked bool // mask tracked secret names even when unchanged
 	// tracked is the project's index (live mounts of a git project).
 	tracked         map[string]trackedEntry
 	detector        SecretDetector
@@ -102,6 +107,14 @@ type secretScanOptions struct {
 	// unmaskAsked are the run's own --unmask values (a copy names each one
 	// that matches no file it takes).
 	unmaskAsked []string
+	// rewrite, maxFileBytes, timeBudget and clock tune a copy's upload
+	// scan (StageOptions.RewriteSecrets, ScanMaxFileBytes, ScanTimeBudget).
+	rewrite string
+	// prior seeds the placeholder numbering (StageOptions.PriorSecretLines).
+	prior        []SecretLine
+	maxFileBytes int64
+	timeBudget   time.Duration
+	clock        func() time.Time
 }
 
 // trackedEntry is a path in the project's index.
@@ -231,7 +244,7 @@ func detectSecrets(root string, opts secretScanOptions) (*secretScan, error) {
 		trackedLimit = defaultMaxTrackedCompares
 	}
 	trackedReads, uncompared := trackedLimit, 0
-	unmasked := func(rel string) bool { return unmaskedBy(opts.unmask, rel) }
+	unmasked := opts.isUnmasked
 	add := func(m MaskedPath) {
 		if unmasked(m.Rel) {
 			res.unmasked = append(res.unmasked, m.Rel)
@@ -445,4 +458,18 @@ func (e trackedEntry) holds(content []byte) bool {
 		return false
 	}
 	return hex.EncodeToString(sum) == strings.ToLower(e.oid)
+}
+
+// isUnmasked reports whether an operator exception keeps rel visible: an
+// --unmask path, directory or glob, or one of the exact shared files.
+func (o secretScanOptions) isUnmasked(rel string) bool {
+	if unmaskedBy(o.unmask, rel) {
+		return true
+	}
+	for _, e := range o.unmaskExact {
+		if e == rel {
+			return true
+		}
+	}
+	return false
 }

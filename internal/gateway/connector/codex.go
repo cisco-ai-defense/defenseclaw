@@ -448,6 +448,22 @@ func (c *CodexConnector) checkAgentSettings(opts SetupOpts) error {
 			))
 		}
 	}
+	// Setup cannot rewrite a DefenseClaw handler that shares a matcher group
+	// with other handlers in two layouts: a second DefenseClaw handler there
+	// (GAP-1983, GAP-2007), and DefenseClaw's handler in a group whose
+	// matcher is not DefenseClaw's (GAP-2007). Run Setup's own hook merge on
+	// the file as read and refuse them here, before Setup changes anything:
+	// `defenseclaw setup` asks this before it restarts the gateway, so the
+	// running gateway keeps its registration, and a gateway start keeps every
+	// other connector instead of failing.
+	if hooks, ok := cfg["hooks"].(map[string]interface{}); ok && strings.TrimSpace(opts.DataDir) != "" {
+		hooksDir := filepath.Join(opts.DataDir, "hooks")
+		hookScript := filepath.ToSlash(filepath.Join(hooksDir, "codex-hook.sh"))
+		var repair *codexHookRepairError
+		if err := mergeOwnedCodexHooks(hooks, path, hookScript, hooksDir, opts, true); errors.As(err, &repair) {
+			return refuseForAgentConfig(err)
+		}
+	}
 	return nil
 }
 
@@ -669,7 +685,7 @@ func (c *CodexConnector) VerifyClean(opts SetupOpts) error {
 				for eventType, val := range hooks {
 					list, _ := val.([]interface{})
 					for _, entry := range list {
-						if isOwnedHook(entry, hooksDir) {
+						if isOwnedCodexHookGroup(entry, hooksDir) {
 							residual = append(residual, fmt.Sprintf("config.toml hooks[%s] still contains defenseclaw hook", eventType))
 							break
 						}
@@ -3563,20 +3579,10 @@ func mergeOwnedCodexHooks(
 	for eventType, value := range generatedHooks {
 		newEntries, _ := value.([]interface{})
 		existing, _ := hooks[eventType].([]interface{})
-		merged, err := replaceCodexHookInPlace(
-			existing,
-			newEntries,
-			isManaged,
-			func(_ map[string]interface{}, handlers []interface{}) bool {
-				// inferTrustedCodexManagedHookCommands already proved this exact
-				// singleton belongs to a complete shipped profile with matching
-				// positional trust. It is therefore safe to discard an accumulated
-				// predecessor even when a later reviewed contract changed only the
-				// generated matcher (for example SessionStart adding compact).
-				return len(handlers) == 1 &&
-					(isInferredManaged(handlers[0]) || (replaceCommandless && codexCommandlessHandler(handlers[0])))
-			},
-		)
+		merged, err := replaceCodexHookInPlace(existing, newEntries, isManaged)
+		if refusal := codexSharedGroupHookRefusal(configPath, eventType, err); refusal != nil {
+			return refusal
+		}
 		if err != nil {
 			return fmt.Errorf("repair Codex hooks.%s: %w", eventType, err)
 		}
@@ -4110,7 +4116,6 @@ func replaceOwnedCodexHookInPlace(existing, generated []interface{}, hooksDir st
 func replaceCodexHookInPlace(
 	existing, generated []interface{},
 	isManaged func(interface{}) bool,
-	canRemoveReviewedDuplicate ...func(map[string]interface{}, []interface{}) bool,
 ) ([]interface{}, error) {
 	if len(generated) != 1 {
 		return nil, fmt.Errorf("generated group count = %d, want 1", len(generated))
@@ -4124,6 +4129,7 @@ func replaceCodexHookInPlace(
 		return nil, fmt.Errorf("generated handler count = %d, want 1", len(generatedHandlers))
 	}
 
+	primaryGroup, primaryHandler := codexHookPrimarySlot(existing, generatedGroup, isManaged)
 	result := make([]interface{}, 0, len(existing)+1)
 	replaced := false
 	for groupIndex, rawGroup := range existing {
@@ -4140,24 +4146,24 @@ func replaceCodexHookInPlace(
 		updatedHandlers := make([]interface{}, 0, len(handlers))
 		groupReplaced := false
 		duplicateRemoved := false
-		for _, handler := range handlers {
+		for handlerIndex, handler := range handlers {
 			if !isManaged(handler) {
 				updatedHandlers = append(updatedHandlers, handler)
 				continue
 			}
-			if replaced {
-				// A trusted predecessor matrix can contain several historical
-				// DataDir paths. Only an otherwise exact, single-handler generated
-				// group is safe to remove automatically. Shared or edited groups
-				// remain an explicit manual-repair case because deleting one handler
-				// could re-index unrelated positional trust state.
-				removable := codexDuplicateGroupCanBeRemoved(group, generatedGroup, handlers)
-				if !removable && len(canRemoveReviewedDuplicate) > 0 &&
-					canRemoveReviewedDuplicate[0] != nil {
-					removable = canRemoveReviewedDuplicate[0](group, handlers)
-				}
-				if !removable {
-					return nil, fmt.Errorf("multiple DefenseClaw handlers require manual repair")
+			if groupIndex != primaryGroup || handlerIndex != primaryHandler {
+				// A second DefenseClaw handler of this event: a historical
+				// DataDir path of a trusted predecessor matrix, or a copy of
+				// DefenseClaw's script from another account or a dotfiles
+				// repo (GAP-1923). isManaged proved it is DefenseClaw's, so a
+				// group that holds only it goes, whatever its matcher or
+				// timeout: dropping or emptying that one group re-indexes no
+				// other handler (GAP-1983). Removing it from a group of other
+				// handlers would move theirs and break Codex's positional
+				// trust, so that one is the user's to delete.
+				if len(handlers) != 1 {
+					command, _ := handler.(map[string]interface{})["command"].(string)
+					return nil, codexSharedGroupHookCopyError{group: groupIndex, command: command}
 				}
 				duplicateRemoved = true
 				continue
@@ -4167,12 +4173,16 @@ func replaceCodexHookInPlace(
 			groupReplaced = true
 		}
 		if groupReplaced {
-			matcher, generatedMatcherPresent := generatedGroup["matcher"]
-			currentMatcher, currentMatcherPresent := group["matcher"]
-			if len(updatedHandlers) > 1 &&
-				(currentMatcherPresent != generatedMatcherPresent || !codexValueMatches(currentMatcher, matcher)) {
-				return nil, fmt.Errorf("shared DefenseClaw matcher group was edited; refusing to change unrelated handler semantics")
+			// codexHookPrimarySlot found no group the generated handler can
+			// keep: DefenseClaw's handler shares a group of other handlers
+			// under a matcher that is not DefenseClaw's. Setting DefenseClaw's
+			// matcher would change what those handlers run on.
+			if len(updatedHandlers) > 1 && !codexGroupHasGeneratedMatcher(group, generatedGroup) {
+				primary, _ := handlers[primaryHandler].(map[string]interface{})
+				command, _ := primary["command"].(string)
+				return nil, codexEditedSharedGroupError{group: groupIndex, command: command, matcher: group["matcher"]}
 			}
+			matcher, generatedMatcherPresent := generatedGroup["matcher"]
 			if generatedMatcherPresent {
 				group["matcher"] = matcher
 			} else {
@@ -4201,28 +4211,124 @@ func replaceCodexHookInPlace(
 	return result, nil
 }
 
-func codexDuplicateGroupCanBeRemoved(
-	group map[string]interface{},
+// codexHookPrimarySlot picks the DefenseClaw handler whose slot the
+// generated handler takes: the first one in a group it can keep, that is a
+// group with no other handler or one under DefenseClaw's matcher. A copy in
+// the user's own group under the user's matcher, ahead of DefenseClaw's group
+// (the order when the user's group existed before the first Setup), is then
+// a second handler and is refused with the exact delete step (GAP-2007). With
+// no such group it is the first DefenseClaw handler; -1, -1 when there is none.
+func codexHookPrimarySlot(
+	existing []interface{},
 	generatedGroup map[string]interface{},
-	handlers []interface{},
-) bool {
-	if len(handlers) != 1 || len(group) != len(generatedGroup) {
-		return false
-	}
-	for key, expected := range generatedGroup {
-		if key == "hooks" {
+	isManaged func(interface{}) bool,
+) (int, int) {
+	firstGroup, firstHandler := -1, -1
+	for groupIndex, rawGroup := range existing {
+		group, ok := rawGroup.(map[string]interface{})
+		if !ok {
 			continue
 		}
-		if actual, present := group[key]; !present || !codexValueMatches(actual, expected) {
-			return false
+		handlers, ok := group["hooks"].([]interface{})
+		if !ok {
+			continue
+		}
+		managed, others := -1, false
+		for handlerIndex, handler := range handlers {
+			if !isManaged(handler) {
+				others = true
+			} else if managed < 0 {
+				managed = handlerIndex
+			}
+		}
+		if managed < 0 {
+			continue
+		}
+		if !others || codexGroupHasGeneratedMatcher(group, generatedGroup) {
+			return groupIndex, managed
+		}
+		if firstGroup < 0 {
+			firstGroup, firstHandler = groupIndex, managed
 		}
 	}
-	for key := range group {
-		if _, expected := generatedGroup[key]; !expected {
-			return false
+	return firstGroup, firstHandler
+}
+
+// codexGroupHasGeneratedMatcher reports whether group has DefenseClaw's
+// matcher (both absent, or equal).
+func codexGroupHasGeneratedMatcher(group, generatedGroup map[string]interface{}) bool {
+	matcher, generatedPresent := generatedGroup["matcher"]
+	current, currentPresent := group["matcher"]
+	return currentPresent == generatedPresent && codexValueMatches(current, matcher)
+}
+
+// codexSharedGroupHookCopyError is a second DefenseClaw handler of one event
+// inside a matcher group that also holds other handlers (GAP-1983).
+type codexSharedGroupHookCopyError struct {
+	group   int
+	command string
+}
+
+func (e codexSharedGroupHookCopyError) Error() string {
+	return fmt.Sprintf("matcher group %d holds a second DefenseClaw handler next to other handlers: %s", e.group+1, e.command)
+}
+
+// codexEditedSharedGroupError is DefenseClaw's handler in a matcher group of
+// other handlers whose matcher is not DefenseClaw's (GAP-2007).
+type codexEditedSharedGroupError struct {
+	group   int
+	command string
+	matcher interface{}
+}
+
+func (e codexEditedSharedGroupError) Error() string {
+	return fmt.Sprintf("matcher group %d holds the DefenseClaw handler next to other handlers under matcher %v: %s", e.group+1, e.matcher, e.command)
+}
+
+// codexHookRepairError names the one handler the user must delete.
+type codexHookRepairError struct{ message string }
+
+func (e *codexHookRepairError) Error() string { return e.message }
+
+// codexSharedGroupHookRefusal is the exact repair step for a DefenseClaw
+// handler Setup cannot take out of, or rewrite in, a group of other handlers,
+// and nil for any other error. checkAgentSettings raises it before Setup
+// changes anything (GAP-1983, GAP-2007).
+func codexSharedGroupHookRefusal(configPath, eventType string, err error) error {
+	var shared codexSharedGroupHookCopyError
+	var edited codexEditedSharedGroupError
+	switch {
+	case errors.As(err, &shared):
+		return &codexHookRepairError{message: fmt.Sprintf(
+			"Codex config %s has a second DefenseClaw hook handler in the %s matcher group %d, next to other handlers: command = %s. "+
+				"Codex trusts each hook by its position, so DefenseClaw does not take one handler out of a shared group; "+
+				"delete that [[hooks.%s.hooks]] entry from the file, then run: defenseclaw setup codex",
+			configPath, eventType, shared.group+1, codexTOMLStringForMessage(shared.command), eventType,
+		)}
+	case errors.As(err, &edited):
+		matcher := "no matcher"
+		if value, ok := edited.matcher.(string); ok {
+			matcher = "matcher = " + codexTOMLStringForMessage(value)
+		} else if edited.matcher != nil {
+			matcher = fmt.Sprintf("matcher = %v", edited.matcher)
 		}
+		return &codexHookRepairError{message: fmt.Sprintf(
+			"Codex config %s has the DefenseClaw hook handler in the %s matcher group %d, next to other handlers, under %s: command = %s. "+
+				"DefenseClaw does not change the matcher your handlers run under; "+
+				"delete that [[hooks.%s.hooks]] entry from the file, then run: defenseclaw setup codex",
+			configPath, eventType, edited.group+1, matcher, codexTOMLStringForMessage(edited.command), eventType,
+		)}
 	}
-	return true
+	return nil
+}
+
+// codexTOMLStringForMessage names a value as the file can hold it: a TOML
+// literal string keeps a Windows path's backslashes as written.
+func codexTOMLStringForMessage(value string) string {
+	if strings.ContainsAny(value, "'\n") {
+		return fmt.Sprintf("%q", value)
+	}
+	return "'" + value + "'"
 }
 
 func codexHasPreservedGroupAfter(
@@ -4277,8 +4383,9 @@ func isOwnedCodexHookHandler(rawHook interface{}, hooksDir string) bool {
 	}
 	// A user edit of our generated script's path or name is still a
 	// DefenseClaw registration: repair replaces it in place and teardown
-	// must not strand its positional trust state (GAP-1032, GAP-0907).
-	if command, _ := handler["command"].(string); editedDefenseClawHookCommand(command, "codex-hook.sh") {
+	// must not strand its positional trust state (GAP-1032, GAP-0907), and
+	// so is a copy named by a Windows path (GAP-1923).
+	if command, _ := handler["command"].(string); editedDefenseClawHookCommandByAnyPath(command, "codex-hook.sh") {
 		return true
 	}
 	for _, key := range []string{"commandWindows", "command_windows"} {
@@ -4287,6 +4394,66 @@ func isOwnedCodexHookHandler(rawHook interface{}, hooksDir string) bool {
 			continue
 		}
 		if isOwnedHookHandler(map[string]interface{}{"command": candidate}, hooksDir) {
+			return true
+		}
+	}
+	// A launcher or guard name edited in place inside the Windows direct
+	// cmd.exe start is still DefenseClaw's registration (GAP-2281), as it is
+	// in the Claude Code exec form (GAP-1364).
+	for _, key := range []string{"command", "commandWindows", "command_windows"} {
+		if candidate, _ := handler[key].(string); isRenamedCodexCmdDirectHookCommand(candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+// isRenamedCodexCmdDirectHookCommand reports a Windows Codex direct cmd.exe
+// start (windowsCmdDirectHookCommand, or the guarded start of
+// windowsCodexGuardedHookCommand) whose quoted program is a DefenseClaw
+// executable renamed in place next to ours (isRenamedDefenseClawHookExecutable)
+// and whose whole command is, byte for byte, the one Setup renders for that
+// program with one of DefenseClaw's Codex event and contract bindings. A
+// foreign cmd.exe hook, another program, another folder, or any argv that is
+// not exactly ours stays the operator's. Windows only: no other OS writes
+// this form.
+func isRenamedCodexCmdDirectHookCommand(command string) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	prefix := windowsSystemCmdExe() + ` /d /v:off /c "`
+	if !strings.HasPrefix(command, prefix) {
+		return false
+	}
+	program, _, ok := strings.Cut(command[len(prefix):], `"`)
+	if !ok || !isRenamedDefenseClawHookExecutable(program) {
+		return false
+	}
+	for _, contract := range builtinHookContracts["codex"] {
+		for _, event := range contract.Events {
+			arguments := nativeHookBridgeArguments("codex", event, contract.ContractID, nil)
+			if direct, ok := windowsCmdDirectHookCommand(program, arguments); ok && command == direct {
+				return true
+			}
+			if guarded, ok := windowsCodexGuardedHookCommand(program, event, contract.ContractID); ok && command == guarded {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isOwnedCodexHookGroup reports a Codex hook group that holds a handler
+// isOwnedCodexHookHandler claims, so VerifyClean reports every registration
+// Teardown removes (GAP-2281).
+func isOwnedCodexHookGroup(rawGroup interface{}, hooksDir string) bool {
+	group, ok := rawGroup.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	handlers, _ := group["hooks"].([]interface{})
+	for _, handler := range handlers {
+		if isOwnedCodexHookHandler(handler, hooksDir) {
 			return true
 		}
 	}

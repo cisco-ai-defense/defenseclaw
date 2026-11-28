@@ -576,13 +576,363 @@ enum GatewayAdminStop {
     }
 }
 
+/// Hands one root-owned file in a folder the account can write over to the
+/// account (GAP-1964). A link count read in that folder proves nothing: the
+/// account adds and removes names there at will, and one lookup reads the
+/// name and the count at two different moments, so a hard link to a root file
+/// outside the folder that is unlinked between them reads one link (CI saw
+/// it). So the file's name is first moved (renameat, which never follows a
+/// link) into the holding folder (holdingPath), which is in no folder the
+/// account can write (GAP-1972): every folder on its path is a real folder
+/// owned by root that nobody else can write, and the holding folder is the
+/// helper's own, mode 700, with no access rules, all checked by descriptor.
+/// The account can neither add, remove nor rename a name there, nor rename
+/// the folder, so while the file is held its count includes that name and
+/// every name it has outside the account's folder: a root file the account
+/// linked in reads at least two links for as long as it is held. The held
+/// file is then opened by that name and checked through its own descriptor
+/// (the inode inspected, the same mode and owner, exactly one link), changed
+/// only through that descriptor and moved back under its name, never over a
+/// name made in the meantime (then next to it, as <name>.defenseclaw-kept).
+/// A file that fails the checks is moved back unchanged.
+///
+/// A record of where the file came from and what was inspected is written to
+/// the holding folder before the move and removed once the file is back. A
+/// file that could go back under neither name, or that a repair stopped part
+/// way left there, stays held with its record: recover() returns it at the
+/// end of the next repair of the same folder, through the same checks, and
+/// unclaimed() reports one whose folder is no longer repaired. The holding
+/// folder is on the startup disk's data volume, with the account homes; a
+/// file on another volume cannot be moved into it and is reported instead.
+final class GatewayAdminHandover {
+    enum Result: Equatable { case handed(kept: Bool), skipped(kept: Bool), failed, held, refused }
+
+    static let keptSuffix = ".defenseclaw-kept"
+    static let holdingName = "com.cisco.defenseclaw.macos.GatewayAdmin"
+    #if GATEWAY_ADMIN_HELPER_TESTING
+    static var holdingParent = "/private/var/db"
+    #else
+    static let holdingParent = "/private/var/db"
+    #endif
+    static var holdingPath: String { holdingParent + "/" + holdingName }
+
+    /// A held file's record: its path below the walk's root, the name the
+    /// repair shows, what the walk inspected and the account it goes to.
+    struct Record: Codable {
+        var path: String
+        var shown: String
+        var inode: UInt64
+        var device: Int32
+        var mode: UInt16
+        var owner: UInt32
+        var account: UInt32
+    }
+
+    private var root: Int32
+    private let account: uid_t
+    private let shownPrefix: String
+    private var device: dev_t = 0
+    private var scope = ""
+    private var holding: Int32 = -1
+    private var tried = false
+    private var otherVolume = false
+    private var made: Set<String> = []
+
+    /// root is the walk's own root folder, account the one the files go to,
+    /// shownPrefix what the report puts before a path below root.
+    init(root given: Int32, account: uid_t, shownPrefix: String = "") {
+        root = dup(given)
+        self.account = account
+        self.shownPrefix = shownPrefix
+        var status = stat()
+        if root >= 0, fstat(root, &status) == 0 {
+            device = status.st_dev
+            scope = Self.scope(account, status)
+        } else {
+            tried = true
+        }
+    }
+
+    deinit { finish() }
+
+    /// Closes the folders; idempotent. The holding folder stays: a file that
+    /// could not go back waits there for the next repair.
+    func finish() {
+        if holding >= 0 { close(holding); holding = -1 }
+        if root >= 0 { close(root); root = -1 }
+        tried = true
+    }
+
+    func handOver(_ directory: Int32, _ name: String, inspected entry: stat, path: String, shown: String,
+                  change: (Int32) -> Int32) -> Result {
+        guard entry.st_dev == device else { return .skipped(kept: false) }
+        guard let holding = openHolding() else { return otherVolume ? .refused : .failed }
+        let id = scope + Self.randomName()
+        let record = Record(path: path, shown: shownPrefix + path, inode: UInt64(entry.st_ino), device: entry.st_dev,
+                            mode: entry.st_mode, owner: entry.st_uid, account: account)
+        guard Self.writeRecord(record, in: holding, as: id + ".record") else { return .failed }
+        made.insert(id)
+        guard renameat(directory, name, holding, id + ".held") == 0 else {
+            _ = unlinkat(holding, id + ".record", 0)
+            return .failed
+        }
+        #if GATEWAY_ADMIN_HELPER_TESTING
+        // Declared by Tests/GatewayAdminHelperTests.swift: true stops the
+        // repair right after the move, as if the helper died there.
+        if GatewayAdminHandover.movedForTesting?(shown) == true {
+            finish()
+            return .failed
+        }
+        #endif
+        return settle(id, record, into: directory, as: name, shown: shown, resumed: false, change: change)
+    }
+
+    /// Returns the files an earlier repair of this root left held, through
+    /// the same checks, under their name or next to it.
+    func recover(change: (Int32, String) -> Int32) -> GatewayAdminOwnershipRepair.Outcome {
+        var outcome = GatewayAdminOwnershipRepair.Outcome()
+        guard let holding = openHolding(), let names = GatewayAdminDirectory.names(of: holding) else { return outcome }
+        for recordName in names.sorted() where recordName.hasPrefix(scope) && recordName.hasSuffix(".record") {
+            let id = String(recordName.dropLast(".record".count))
+            guard !made.contains(id) else { continue }
+            var status = stat()
+            guard fstatat(holding, id + ".held", &status, AT_SYMLINK_NOFOLLOW) == 0 else {
+                // Nothing was moved, or it went back before its record was removed.
+                if errno == ENOENT { _ = unlinkat(holding, recordName, 0) }
+                continue
+            }
+            guard let record = Self.readRecord(in: holding, recordName) else {
+                outcome.merge(GatewayAdminOwnershipRepair.Outcome(incomplete: true, held: [id]))
+                continue
+            }
+            let components = record.path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+            guard let name = components.last, let directory = folder(components.dropLast()) else {
+                outcome.merge(GatewayAdminOwnershipRepair.Outcome(incomplete: true, held: [record.shown]))
+                continue
+            }
+            let result = settle(id, record, into: directory, as: name, shown: record.shown, resumed: true,
+                                change: { change($0, record.shown) })
+            close(directory)
+            outcome.add(result, record.shown)
+        }
+        return outcome
+    }
+
+    /// The held files of account from a repair of a folder none of roots is
+    /// (it moved or was removed), by the name the report showed.
+    static func unclaimed(account: uid_t, roots: [Int32]) -> [String] {
+        guard let holding = openHoldingFolder(create: false) else { return [] }
+        defer { close(holding) }
+        let scopes = roots.compactMap { root -> String? in
+            var status = stat()
+            return fstat(root, &status) == 0 ? scope(account, status) : nil
+        }
+        return (GatewayAdminDirectory.names(of: holding) ?? []).sorted().compactMap { name in
+            guard name.hasPrefix(String(account) + "."), name.hasSuffix(".record"),
+                  !scopes.contains(where: { name.hasPrefix($0) }) else { return nil }
+            var status = stat()
+            guard fstatat(holding, String(name.dropLast(".record".count)) + ".held", &status, AT_SYMLINK_NOFOLLOW) == 0
+            else { return nil }
+            return readRecord(in: holding, name)?.shown ?? name
+        }
+    }
+
+    /// Checks the held file through its own descriptor, changes it when it is
+    /// the file inspected (same owner and mode, one link) and moves it back.
+    /// resumed: an earlier repair stopped after the move, maybe after the
+    /// change, which only the helper can have made to a held file.
+    private func settle(_ id: String, _ record: Record, into directory: Int32, as name: String, shown: String,
+                        resumed: Bool, change: (Int32) -> Int32) -> Result {
+        enum Checked { case handed, skipped, failed }
+        var checked = Checked.failed
+        let file = openat(holding, id + ".held", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC)
+        if file >= 0 {
+            #if GATEWAY_ADMIN_HELPER_TESTING
+            // Declared by Tests/GatewayAdminHelperTests.swift.
+            GatewayAdminHandover.openedForTesting?(shown)
+            #endif
+            var opened = stat()
+            let same = fstat(file, &opened) == 0 && UInt64(opened.st_ino) == record.inode && opened.st_dev == record.device
+            if same, opened.st_mode == record.mode, opened.st_uid == record.owner, opened.st_nlink == 1 {
+                checked = change(file) == 0 ? .handed : .failed
+            } else if same, resumed, opened.st_mode & S_IFMT == S_IFREG, opened.st_uid == record.account,
+                      opened.st_nlink == 1 {
+                checked = .handed
+            } else {
+                checked = .skipped
+            }
+            close(file)
+        }
+        guard let kept = putBack(id + ".held", into: directory, as: name) else { return .held }
+        _ = unlinkat(holding, id + ".record", 0)
+        switch checked {
+        case .handed: return .handed(kept: kept)
+        case .skipped: return .skipped(kept: kept)
+        case .failed: return .failed
+        }
+    }
+
+    /// Back under its name, never replacing one made while it was held
+    /// (false); then next to it, so the account still finds it (true); nil
+    /// when both names are taken: it stays held for the next repair.
+    private func putBack(_ held: String, into directory: Int32, as name: String) -> Bool? {
+        let exclusive = UInt32(RENAME_EXCL)
+        if renameatx_np(holding, held, directory, name, exclusive) == 0 { return false }
+        if renameatx_np(holding, held, directory, name + Self.keptSuffix, exclusive) == 0 { return true }
+        return nil
+    }
+
+    /// The folder at components below root, reached without following a
+    /// link, on root's volume.
+    private func folder(_ components: ArraySlice<String>) -> Int32? {
+        guard root >= 0 else { return nil }
+        var current = dup(root)
+        for component in components {
+            guard current >= 0 else { return nil }
+            guard !component.isEmpty, component != ".", component != ".." else {
+                close(current)
+                return nil
+            }
+            let next = openat(current, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            close(current)
+            current = next
+        }
+        guard current >= 0 else { return nil }
+        var status = stat()
+        guard fstat(current, &status) == 0, status.st_dev == device else {
+            close(current)
+            return nil
+        }
+        return current
+    }
+
+    /// The holding folder, opened once per repair; nil (otherVolume) when
+    /// root is not on its volume.
+    private func openHolding() -> Int32? {
+        if holding >= 0 { return holding }
+        guard !tried else { return nil }
+        tried = true
+        guard let descriptor = Self.openHoldingFolder(create: true) else { return nil }
+        var status = stat()
+        guard fstat(descriptor, &status) == 0, status.st_dev == device else {
+            otherVolume = status.st_dev != device
+            close(descriptor)
+            return nil
+        }
+        holding = descriptor
+        return descriptor
+    }
+
+    /// The folder that holds the holding folder, opened by descriptor from /
+    /// the same way, or nil when a folder on the way is not trusted.
+    private static func openHoldingParent() -> Int32? {
+        var current = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        for component in holdingParent.split(separator: "/").map(String.init) {
+            guard current >= 0 else { return nil }
+            guard isTrustedParent(current) else {
+                close(current)
+                return nil
+            }
+            let next = openat(current, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            close(current)
+            current = next
+        }
+        guard current >= 0 else { return nil }
+        guard isTrustedParent(current) else {
+            close(current)
+            return nil
+        }
+        return current
+    }
+
+    /// Removes the holding folder when nothing is held in it, so a Mac
+    /// that never had a file held, or has had every one returned, keeps no
+    /// folder behind when DefenseClawMac is removed. A folder with a held
+    /// file or record (of any account) stays: rmdir refuses it.
+    @discardableResult
+    static func removeEmptyHoldingFolder() -> Bool {
+        guard let parent = openHoldingParent() else { return false }
+        defer { close(parent) }
+        return unlinkat(parent, holdingName, AT_REMOVEDIR) == 0
+    }
+
+    /// holdingPath by descriptor from /, never following a link: every folder
+    /// on the way is owned by root (or this process) and nobody else can
+    /// write it, and the holding folder is this process's own, mode 700, with
+    /// no access rules.
+    static func openHoldingFolder(create: Bool) -> Int32? {
+        guard let current = openHoldingParent() else { return nil }
+        defer { close(current) }
+        if create, mkdirat(current, holdingName, 0o700) != 0, errno != EEXIST { return nil }
+        let folder = openat(current, holdingName, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard folder >= 0 else { return nil }
+        var status = stat()
+        guard fstat(folder, &status) == 0, status.st_mode & S_IFMT == S_IFDIR, status.st_uid == geteuid(),
+              fchmod(folder, 0o700) == 0, clearAccessRules(folder),
+              (try? GatewayAdminTrust.rejectWriteACL(descriptor: folder)) != nil else {
+            close(folder)
+            return nil
+        }
+        return folder
+    }
+
+    private static func isTrustedParent(_ descriptor: Int32) -> Bool {
+        var status = stat()
+        return fstat(descriptor, &status) == 0 && status.st_mode & S_IFMT == S_IFDIR
+            && (status.st_uid == 0 || status.st_uid == geteuid()) && status.st_mode & 0o022 == 0
+            && (try? GatewayAdminTrust.rejectWriteACL(descriptor: descriptor)) != nil
+    }
+
+    private static func clearAccessRules(_ descriptor: Int32) -> Bool {
+        guard let empty = acl_init(0) else { return false }
+        defer { acl_free(UnsafeMutableRawPointer(empty)) }
+        return acl_set_fd_np(descriptor, empty, ACL_TYPE_EXTENDED) == 0 || errno == ENOTSUP
+    }
+
+    private static func scope(_ account: uid_t, _ root: stat) -> String {
+        "\(account).\(root.st_dev).\(root.st_ino)."
+    }
+
+    private static func randomName() -> String {
+        var random = [UInt8](repeating: 0, count: 16)
+        arc4random_buf(&random, random.count)
+        return random.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func writeRecord(_ record: Record, in folder: Int32, as name: String) -> Bool {
+        guard let data = try? JSONEncoder().encode(record) else { return false }
+        let file = openat(folder, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard file >= 0 else { return false }
+        let written = data.withUnsafeBytes { Darwin.write(file, $0.baseAddress, $0.count) }
+        let durable = written == data.count && fsync(file) == 0
+        close(file)
+        if !durable { _ = unlinkat(folder, name, 0) }
+        return durable
+    }
+
+    private static func readRecord(in folder: Int32, _ name: String) -> Record? {
+        let file = openat(folder, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard file >= 0 else { return nil }
+        defer { close(file) }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while data.count < 65_536 {
+            let count = Darwin.read(file, &buffer, buffer.count)
+            guard count > 0 else { break }
+            data.append(contentsOf: buffer[0..<count])
+        }
+        return try? JSONDecoder().decode(Record.self, from: data)
+    }
+}
+
 /// Return the root-owned folders and regular files a root-run gateway left in
 /// this account's DefenseClaw home to the account. Only DefenseClaw's own
 /// names directly in the home are considered (ownedNames), and the folders
 /// among them are walked. The walk is bound to descriptors reached from the
 /// verified home descriptor: no symlink is ever followed (O_NOFOLLOW at every
-/// step), a file is changed only through its own open descriptor and only
-/// while it has a single link (a hard link to a file elsewhere is skipped),
+/// step), a file is handed over only by GatewayAdminHandover (moved into a
+/// root-only holding folder, then changed through its own descriptor while it
+/// has a single link, so a hard link to a file elsewhere is never changed),
 /// special files and other volumes are skipped, and the walk is bounded.
 /// Modes are kept; only the owner and group change.
 enum GatewayAdminOwnershipRepair {
@@ -607,11 +957,46 @@ enum GatewayAdminOwnershipRepair {
         var restored: [String] = []
         var skipped: [String] = []
         var incomplete = false
+        /// Put back next to a file made at their name during the repair, by
+        /// the name they have now (also in restored or skipped).
+        var kept: [String] = []
+        /// Still in the holding folder: the next repair returns them.
+        var held: [String] = []
+        /// Not on the holding folder's volume, so not handed over.
+        var refused: [String] = []
+        /// The walk reached its deadline and stopped where it was, so the
+        /// helper could answer inside the app's reply budget (GAP-2003).
+        var unfinished = false
 
         mutating func merge(_ other: Outcome) {
             restored += other.restored
             skipped += other.skipped
             incomplete = incomplete || other.incomplete
+            kept += other.kept
+            held += other.held
+            refused += other.refused
+            unfinished = unfinished || other.unfinished
+        }
+
+        /// Records one handover of shown; false when the file is not settled.
+        @discardableResult
+        mutating func add(_ result: GatewayAdminHandover.Result, _ shown: String) -> Bool {
+            switch result {
+            case .handed(let next), .skipped(let next):
+                let now = next ? shown + GatewayAdminHandover.keptSuffix : shown
+                if case .handed = result { restored.append(now) } else { skipped.append(now) }
+                if next { kept.append(now) }
+                return true
+            case .failed:
+                incomplete = true
+            case .held:
+                held.append(shown)
+                incomplete = true
+            case .refused:
+                refused.append(shown)
+                incomplete = true
+            }
+            return false
         }
 
         var summary: String {
@@ -629,7 +1014,26 @@ enum GatewayAdminOwnershipRepair {
                     + "setgid files, and items other accounts can write): "
                     + skipped.prefix(GatewayAdminOwnershipRepair.listedPaths).joined(separator: ", ") + ".")
             }
-            if incomplete {
+            let listed = GatewayAdminOwnershipRepair.listedPaths
+            if !kept.isEmpty {
+                lines.append("Put \(kept.count) back under a new name, because a file was made at their name during the "
+                    + "repair: " + kept.prefix(listed).joined(separator: ", ") + ".")
+            }
+            if !held.isEmpty {
+                lines.append("Kept \(held.count) files in \(GatewayAdminHandover.holdingPath), where only the repair can "
+                    + "reach them, because a file was made at their name and at their \(GatewayAdminHandover.keptSuffix) "
+                    + "name, or their folder moved: " + held.prefix(listed).joined(separator: ", ")
+                    + ". Free one of those names or put the folder back, then repair again to get them back.")
+            }
+            if !refused.isEmpty {
+                lines.append("Left \(refused.count) root-owned files unchanged because they are not on the volume of "
+                    + "\(GatewayAdminHandover.holdingParent), where the repair holds a file while it hands it over: "
+                    + refused.prefix(listed).joined(separator: ", ") + ".")
+            }
+            if unfinished {
+                lines.append("The repair stopped before it reached every file so that it could answer in time; "
+                    + "repair again to return the rest.")
+            } else if incomplete {
                 lines.append("Part of the home was left root-owned because it could not be inspected or other accounts can "
                     + "write it; run `defenseclaw doctor` to see what is still root-owned and how to fix it.")
             }
@@ -649,18 +1053,34 @@ enum GatewayAdminOwnershipRepair {
     /// connector.RootOwnedAgentConfigPaths instead of returning it with
     /// unlisted root-owned children. The DefenseClaw home walk keeps the
     /// account's access first: each folder is returned before its contents.
+    /// `base` is root's path below the root of a shared handover (`given`).
+    /// Past `deadline` the walk stops where it is and reports itself
+    /// unfinished: every file it handed over is settled, and the next repair
+    /// returns the rest (GAP-2003).
     static func restore(home root: Int32, from owner: uid_t = 0, to account: (uid: uid_t, gid: gid_t),
                         names allowed: Set<String>? = GatewayAdminOwnershipRepair.ownedNames,
                         privateOnly: Bool = false,
                         maximumEntries: Int = GatewayAdminOwnershipRepair.maximumEntries,
+                        until deadline: ContinuousClock.Instant? = nil,
+                        handover given: GatewayAdminHandover? = nil,
+                        at base: String = "",
                         change: ((Int32, String) -> Int32)? = nil) throws -> Outcome {
         let apply = change ?? { descriptor, _ in fchown(descriptor, account.uid, account.gid) }
         var metadata = stat()
         guard fstat(root, &metadata) == 0, metadata.st_mode & S_IFMT == S_IFDIR else {
             throw GatewayAdminFailure.refused("The DefenseClaw home is not a folder.")
         }
+        let handover = given ?? GatewayAdminHandover(root: root, account: account.uid)
+        defer { if given == nil { handover.finish() } }
         var outcome = Outcome()
         var visited = 0
+
+        func late() -> Bool {
+            guard let deadline, ContinuousClock.now >= deadline else { return false }
+            outcome.incomplete = true
+            outcome.unfinished = true
+            return true
+        }
 
         func give(_ descriptor: Int32, _ relative: String) -> Bool {
             if apply(descriptor, relative) == 0 {
@@ -713,6 +1133,7 @@ enum GatewayAdminOwnershipRepair {
                     outcome.incomplete = true
                     return false
                 }
+                if late() { return false }
                 let relative = prefix.isEmpty ? name : prefix + "/" + name
                 var entry = stat()
                 guard fstatat(directory, name, &entry, AT_SYMLINK_NOFOLLOW) == 0 else { continue }
@@ -740,11 +1161,10 @@ enum GatewayAdminOwnershipRepair {
                     if !folder(child, opened, relative, relative, depth + 1) { complete = false }
                 case S_IFREG:
                     guard entry.st_uid == owner else { continue }
-                    // One link when inspected, and the opened file is that
-                    // inode: a hard link to a file elsewhere (another link
-                    // count) opened and then unlinked before the fstat, or a
-                    // file swapped in after the fstatat, is never changed.
-                    guard entry.st_nlink == 1 else {
+                    // A hard link (two links when inspected) is reported and
+                    // never moved; one link read here proves nothing yet, so
+                    // the file is handed over only through the holding folder.
+                    guard entry.st_nlink == 1, !privateOnly || entry.st_mode & 0o6022 == 0 else {
                         outcome.skipped.append(relative)
                         continue
                     }
@@ -752,22 +1172,10 @@ enum GatewayAdminOwnershipRepair {
                     // Declared by Tests/GatewayAdminHelperTests.swift.
                     GatewayAdminOwnershipRepair.walkFileCheckedForTesting?(relative)
                     #endif
-                    let file = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC)
-                    guard file >= 0 else {
-                        outcome.incomplete = true
+                    if !outcome.add(handover.handOver(directory, name, inspected: entry, path: base + relative,
+                                                      shown: relative, change: { apply($0, relative) }), relative) {
                         complete = false
-                        continue
                     }
-                    defer { close(file) }
-                    var opened = stat()
-                    guard fstat(file, &opened) == 0, opened.st_ino == entry.st_ino, opened.st_dev == entry.st_dev,
-                          opened.st_mode & S_IFMT == S_IFREG,
-                          opened.st_uid == owner, opened.st_dev == metadata.st_dev, opened.st_nlink == 1,
-                          !privateOnly || opened.st_mode & 0o6022 == 0 else {
-                        outcome.skipped.append(relative)
-                        continue
-                    }
-                    if !give(file, relative) { complete = false }
                 case S_IFLNK:
                     // Never followed or changed; the account owns the folder
                     // holding it and can remove it.
@@ -778,7 +1186,8 @@ enum GatewayAdminOwnershipRepair {
             }
             return complete
         }
-        _ = folder(root, metadata, ".", "", 0)
+        if !late() { _ = folder(root, metadata, ".", "", 0) }
+        if given == nil { outcome.merge(handover.recover(change: apply)) }
         return outcome
     }
 }
@@ -795,9 +1204,9 @@ enum GatewayAdminOwnershipRepair {
 /// DefenseClaw home under the same file rules (`privateOnly`), and only once
 /// all of it was inspected (Go lists the outermost one); the file itself is changed
 /// only when it is a root-owned regular file with one link, on the home's
-/// volume, with no setuid, setgid, group or other write bit, pinned by inode
-/// through its own descriptor. Links, other owners and anything else stay as
-/// they are.
+/// volume, with no setuid, setgid, group or other write bit, handed over by
+/// GatewayAdminHandover (held outside every folder the account can write).
+/// Links, other owners and anything else stay as they are.
 enum GatewayAdminAgentConfigRepair {
     // BEGIN agentConfigPaths: the macOS default candidates of
     // connector.RootOwnedAgentConfigPaths, relative to the account home
@@ -845,24 +1254,24 @@ enum GatewayAdminAgentConfigRepair {
         return current
     }
 
-    static func restore(accountHome home: String, from owner: uid_t = 0,
-                        to account: (uid: uid_t, gid: gid_t)) -> GatewayAdminOwnershipRepair.Outcome {
-        guard let descriptor = try? openAccountHome(home, uid: account.uid) else {
-            return GatewayAdminOwnershipRepair.Outcome(incomplete: true)
-        }
-        defer { close(descriptor) }
-        return restore(home: descriptor, from: owner, to: account)
-    }
-
     static func restore(home: Int32, from owner: uid_t = 0, to account: (uid: uid_t, gid: gid_t),
                         paths: [String] = GatewayAdminAgentConfigRepair.relativePaths,
+                        until deadline: ContinuousClock.Instant? = nil,
                         change: ((Int32, String) -> Int32)? = nil) -> GatewayAdminOwnershipRepair.Outcome {
         let apply = change ?? { descriptor, _ in fchown(descriptor, account.uid, account.gid) }
         var outcome = GatewayAdminOwnershipRepair.Outcome()
         var homeStatus = stat()
         guard fstat(home, &homeStatus) == 0 else { return GatewayAdminOwnershipRepair.Outcome(incomplete: true) }
+        let handover = GatewayAdminHandover(root: home, account: account.uid, shownPrefix: "~/")
+        defer { handover.finish() }
         var returnedFolders: [String] = []
         for path in paths {
+            if let deadline, ContinuousClock.now >= deadline {
+                // GAP-2003: answer in time; the next repair returns the rest.
+                outcome.incomplete = true
+                outcome.unfinished = true
+                break
+            }
             if returnedFolders.contains(where: { path.hasPrefix($0 + "/") }) { continue }
             let components = path.split(separator: "/").map(String.init)
             var parent = dup(home)
@@ -900,14 +1309,17 @@ enum GatewayAdminAgentConfigRepair {
                         continue
                     }
                     if opened.st_uid == owner {
+                        let inside = { (inner: String) in inner == "." ? shown : shown + "/" + inner }
                         let folder = (try? GatewayAdminOwnershipRepair.restore(
-                            home: child, from: owner, to: account, names: nil, privateOnly: true,
-                            change: { descriptor, inner in apply(descriptor, inner == "." ? shown : shown + "/" + inner) }))
+                            home: child, from: owner, to: account, names: nil, privateOnly: true, until: deadline,
+                            handover: handover,
+                            at: relative + "/", change: { descriptor, inner in apply(descriptor, inside(inner)) }))
                             ?? GatewayAdminOwnershipRepair.Outcome(incomplete: true)
                         outcome.merge(GatewayAdminOwnershipRepair.Outcome(
-                            restored: folder.restored.map { $0 == "." ? shown : shown + "/" + $0 },
-                            skipped: folder.skipped.map { $0 == "." ? shown : shown + "/" + $0 },
-                            incomplete: folder.incomplete))
+                            restored: folder.restored.map(inside), skipped: folder.skipped.map(inside),
+                            incomplete: folder.incomplete, kept: folder.kept.map(inside),
+                            held: folder.held.map(inside), refused: folder.refused.map(inside),
+                            unfinished: folder.unfinished))
                         returnedFolders.append(relative)
                     }
                     close(child)
@@ -922,19 +1334,12 @@ enum GatewayAdminAgentConfigRepair {
                 // Declared by Tests/GatewayAdminHelperTests.swift.
                 Self.fileCheckedForTesting?(shown)
                 #endif
-                let file = openat(parent, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC)
-                guard file >= 0 else { outcome.incomplete = true; break }
-                defer { close(file) }
-                var opened = stat()
-                guard fstat(file, &opened) == 0, opened.st_ino == entry.st_ino, opened.st_dev == entry.st_dev,
-                      opened.st_uid == owner, opened.st_mode == entry.st_mode, opened.st_nlink == 1 else {
-                    outcome.skipped.append(shown)
-                    break
-                }
-                if apply(file, shown) == 0 { outcome.restored.append(shown) } else { outcome.incomplete = true }
+                outcome.add(handover.handOver(parent, name, inspected: entry, path: relative, shown: shown,
+                                              change: { apply($0, shown) }), shown)
             }
             close(parent)
         }
+        outcome.merge(handover.recover(change: apply))
         return outcome
     }
 }
@@ -970,7 +1375,8 @@ enum GatewayAdminRepair {
         let outcome = try restoreOwnership()
         try removeStagedGateway()
         output += outcome.summary
-        return (outcome.incomplete ? 1 : 0, output)
+        let code: Int32 = outcome.unfinished ? GatewayAdminPolicy.repairUnfinishedExitCode : outcome.incomplete ? 1 : 0
+        return (code, output)
     }
 }
 
@@ -1142,6 +1548,9 @@ private final class GatewayAdminSession: NSObject, GatewayAdminProtocol {
             reply(64, "Unsupported administrator gateway action. This helper only repairs a gateway an earlier DefenseClawMac version ran as administrator; it never starts one.")
             return
         }
+        // The walks stop in time for the reply to reach the app inside its
+        // budget (GAP-2003), counted from the request, as the app counts.
+        let walkDeadline = ContinuousClock.now.advanced(by: .seconds(GatewayAdminPolicy.repairWalkSeconds))
         lifetime.operationStarted()
         queue.async { [uid, lifetime] in
             defer { lifetime.operationFinished() }
@@ -1163,9 +1572,21 @@ private final class GatewayAdminSession: NSObject, GatewayAdminProtocol {
                         },
                         restoreOwnership: {
                             var outcome = try GatewayAdminOwnershipRepair.restore(
-                                home: installation.descriptor, to: (account.uid, account.gid))
+                                home: installation.descriptor, to: (account.uid, account.gid), until: walkDeadline)
+                            guard let accountHome = try? GatewayAdminAgentConfigRepair.openAccountHome(
+                                account.home, uid: account.uid) else {
+                                outcome.incomplete = true
+                                return outcome
+                            }
+                            defer { close(accountHome) }
                             outcome.merge(GatewayAdminAgentConfigRepair.restore(
-                                accountHome: account.home, to: (account.uid, account.gid)))
+                                home: accountHome, to: (account.uid, account.gid), until: walkDeadline))
+                            // Held by an earlier repair of a folder neither walk reached now.
+                            let unclaimed = GatewayAdminHandover.unclaimed(
+                                account: account.uid, roots: [installation.descriptor, accountHome])
+                            outcome.merge(GatewayAdminOwnershipRepair.Outcome(incomplete: !unclaimed.isEmpty, held: unclaimed))
+                            // Nothing left held: the holding folder goes too.
+                            if outcome.held.isEmpty, !outcome.incomplete { _ = GatewayAdminHandover.removeEmptyHoldingFolder() }
                             return outcome
                         },
                         removeStagedGateway: { try GatewayAdminTrust.removeStagedGateway(account: account) }

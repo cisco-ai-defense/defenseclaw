@@ -201,6 +201,22 @@ func profileExplainUnresolved(name string, lookupErr error) (profileSubject, err
 // of those facts, as a hook call records it, so explain by name during a
 // later outage serves what the hooks keep (profileExplainCachedSubject,
 // GAP-0529).
+// profileExplainAccountName names the account that holds the uid id now, the
+// name the gateway checks a guardian record against before it merges it
+// (readIdentitySpoolFactsForAccount). false when the account database names
+// no account for it. Tests replace it.
+var profileExplainAccountName = func(id string) (string, bool) {
+	uid, err := strconv.Atoi(id)
+	if err != nil || uid < 0 || strconv.Itoa(uid) != id {
+		return "", false
+	}
+	account, ok := managedHookPeerHomes.account(uid)
+	if !ok || account.Name == "" {
+		return "", false
+	}
+	return account.Name, true
+}
+
 var profileExplainDirectoryFacts = func(id string) (useridentity.DirectoryFacts, error) {
 	if uid, err := strconv.Atoi(id); err == nil && uid >= 0 && strconv.Itoa(uid) == id {
 		return managedHookPeerHomes.explainDirectory(uid)

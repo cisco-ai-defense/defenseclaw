@@ -47,7 +47,7 @@ func TestGAP0429DoctorFailsWhenStageBundlesNoLongerVerify(t *testing.T) {
 		{
 			name: "every stage verifies",
 			body: `{"stages":{"canary":{},"all":{}},"receipts":[]}`,
-			want: []string{"ok    policy_bundles", "each of 2 stage(s) verifies", "ready for agents"},
+			want: []string{"ok    policy_bundles", "each of 2 stage(s) verifies", "the cluster components were not checked"},
 		},
 		{
 			name: "no bundle applied",
@@ -57,12 +57,12 @@ func TestGAP0429DoctorFailsWhenStageBundlesNoLongerVerify(t *testing.T) {
 		{
 			name: "no anchors and nothing applied",
 			body: `{"stages":{},"anchors_error":"bundle anchor_missing: no trust anchor file"}`,
-			want: []string{"warn  policy_bundles", "cannot read its bundle trust anchors", "ready for agents"},
+			want: []string{"warn  policy_bundles", "cannot read its bundle trust anchors", "the cluster components were not checked"},
 		},
 		{name: "not an administrator", status: 403, notWant: []string{"policy_bundles"}},
 		{name: "bundles off", status: 501, notWant: []string{"policy_bundles"}},
 		{name: "older cluster", status: 404, notWant: []string{"policy_bundles"}},
-		{name: "store unavailable", status: 503, want: []string{"warn  policy_bundles", "could not be read", "ready for agents"}},
+		{name: "store unavailable", status: 503, want: []string{"warn  policy_bundles", "could not be read", "the cluster components were not checked"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

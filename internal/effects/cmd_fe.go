@@ -4,7 +4,11 @@
 
 package effects
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
+)
 
 // parseCMD lowers a cmd.exe command line into the neutral IR: the operators
 // & && || |, double quotes, ^ escaping, redirections (spaced or attached), and
@@ -70,6 +74,7 @@ func parseCMD(command string, o Options) *Script {
 		if len(c.Words) == 0 && len(c.Redirs) == 0 {
 			continue
 		}
+		c.CmdBody, c.CmdBodySet = cmdSlashCBody(seg, c.Words)
 		s.Stmts = append(s.Stmts, &Stmt{Cmds: []*Cmd{c}, Op: op, Cond: cond, Link: link, Span: c.Span})
 	}
 	return s
@@ -79,6 +84,22 @@ type cmdSeg struct {
 	text  string
 	start int
 	op    Op
+}
+
+// CmdStatements returns the statements of a cmd.exe command line, each
+// trimmed, empty ones left out: the text is split at & && || and | outside
+// double quotes and not after a ^ escape, and a >& or <& stream dup is not a
+// split. It is the one cmd statement splitter: parseCMD lowers the same
+// statements, and a reader of a cmd /c body (the hookpaths archive reading)
+// reads each of them rather than the body as one call (rel-1-0-10:GAP-1667).
+func CmdStatements(command string) []string {
+	var statements []string
+	for _, seg := range splitCMDStatements(command) {
+		if text := strings.TrimSpace(seg.text); text != "" {
+			statements = append(statements, text)
+		}
+	}
+	return statements
 }
 
 func splitCMDStatements(command string) []cmdSeg {
@@ -357,7 +378,7 @@ loop:
 			rest = r
 			pending = true
 		case hasCmdKeyword(rest, "for"):
-			low := strings.ToLower(rest)
+			low := asciifold.Lower(rest)
 			i := strings.Index(low, " do ")
 			if i < 0 {
 				return "", true, true
@@ -434,4 +455,42 @@ func stripCmdIfCondition(s string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// cmdSlashCBody is the text a `cmd [switches] /c BODY` (or /k) segment hands
+// its child, verbatim: everything after the switch, with the first and the
+// last double quote removed when BODY starts with one (cmd's rule without
+// /s). ok is false when the segment is not such a call.
+func cmdSlashCBody(seg string, words []Word) (string, bool) {
+	if len(words) < 2 || !words[0].Static {
+		return "", false
+	}
+	if p := strings.ToLower(programBasename(words[0].Value, FlavorWindows)); p != "cmd" && p != "cmd.exe" {
+		return "", false
+	}
+	lower := strings.ToLower(seg)
+	idx := -1
+	for i := 0; i+2 <= len(lower); i++ {
+		if lower[i] != '/' || (lower[i+1] != 'c' && lower[i+1] != 'k') {
+			continue
+		}
+		if i > 0 && lower[i-1] != ' ' && lower[i-1] != '\t' {
+			continue
+		}
+		if i+2 < len(lower) && lower[i+2] != ' ' && lower[i+2] != '\t' && lower[i+2] != '"' {
+			continue
+		}
+		idx = i
+		break
+	}
+	if idx < 0 || strings.Count(seg[:idx], `"`)%2 != 0 {
+		return "", false
+	}
+	body := strings.TrimLeft(seg[idx+2:], " \t")
+	if strings.HasPrefix(body, `"`) {
+		if last := strings.LastIndex(body, `"`); last > 0 {
+			body = body[1:last] + body[last+1:]
+		}
+	}
+	return body, true
 }

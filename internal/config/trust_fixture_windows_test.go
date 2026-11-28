@@ -6,6 +6,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -65,5 +66,14 @@ func grantUntrustedWriterForTest(t *testing.T, path string) {
 }
 
 // configTrustAccepted reports whether a managed load passed the config trust
-// check.
-func configTrustAccepted(err error) bool { return err == nil }
+// check. The fixture data_dir is the test's own temp folder. Elevated (as
+// Windows Native CI runs) it is owned by Administrators and the whole load
+// must pass. A standard user owns it, and the strict data_dir verdict that
+// follows the accepted config refuses that owner (GAP-0627), as on macOS.
+func configTrustAccepted(err error) bool {
+	if err == nil {
+		return true
+	}
+	return !windows.GetCurrentProcessToken().IsElevated() &&
+		strings.Contains(err.Error(), "data_dir trust check failed")
+}

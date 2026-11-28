@@ -865,7 +865,7 @@ func TestWindowsManagedRuntimeGenerationEqualityRejectsEveryAuthenticatedContrac
 func TestWindowsManagedRuntimeGenerationGCRecoversSetupRelaxedHooks(t *testing.T) {
 	fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
 	hookDir := filepath.Join(fixture.options.DataDir, "hooks")
-	createWindowsManagedRuntimeTestHooksWithDACL(t, hookDir, fixture.target, windowsSetupRelaxedDirectorySDDL)
+	createWindowsManagedRuntimeTestHooksWithDACL(t, hookDir, fixture.target, managed.WindowsSetupRelaxedDirectorySDDL)
 	if err := validateWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); err == nil {
 		t.Fatal("relaxed hooks directory validated as canonical")
 	}
@@ -906,7 +906,7 @@ func TestWindowsManagedRuntimeResolverAcceptsTheRunningGuardiansLongSetupRelax(t
 		windowsManagedRuntimeSetupRelaxWait, windowsSetupRelaxByLiveGuardian = previousWait, previousLive
 	})
 	fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
-	createWindowsManagedRuntimeTestHooksWithDACL(t, filepath.Join(fixture.options.DataDir, "hooks"), fixture.target, windowsSetupRelaxedDirectorySDDL)
+	createWindowsManagedRuntimeTestHooksWithDACL(t, filepath.Join(fixture.options.DataDir, "hooks"), fixture.target, managed.WindowsSetupRelaxedDirectorySDDL)
 	windowsSetupRelaxByLiveGuardian = func(string, *windows.SID) bool { return false }
 	if err := settledWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); !errors.Is(err, ErrWindowsManagedRuntimeGenerationDirectoryUntrusted) {
 		t.Fatalf("a relax no running guardian made: err=%v, want untrusted", err)
@@ -924,6 +924,7 @@ func TestWindowsManagedRuntimeResolverAcceptsTheRunningGuardiansLongSetupRelax(t
 // /repair failed 1603. The retire waits that exact shape out and then
 // restores the canonical DACL; another shape stays refused.
 func TestWindowsManagedRuntimeGenerationGCRecoversASetupRelaxedDataDirectory(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	previousWait := windowsManagedRuntimeSetupRelaxWait
 	windowsManagedRuntimeSetupRelaxWait = 100 * time.Millisecond
 	t.Cleanup(func() { windowsManagedRuntimeSetupRelaxWait = previousWait })
@@ -955,7 +956,7 @@ func TestWindowsManagedRuntimeGenerationGCRecoversASetupRelaxedDataDirectory(t *
 		return validateWindowsUserPathElement(fixture.options.DataDir, fixture.target, true, true, true)
 	}
 
-	setDACL(t, windowsSetupRelaxedDirectorySDDL)
+	setDACL(t, managed.WindowsSetupRelaxedDirectorySDDL)
 	if err := validate(); err == nil {
 		t.Fatal("relaxed data directory validated as canonical")
 	}
@@ -996,6 +997,7 @@ func TestWindowsManagedRuntimeGenerationGCRecoversASetupRelaxedDataDirectory(t *
 // refuses the same bundle and repairs nothing; any other shape stays
 // untrusted and is left to that retire.
 func TestWindowsManagedRuntimeClassifyRefusesABundleInASetupRelaxedRoot(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	setDACL := func(t *testing.T, path, sddl string) {
 		t.Helper()
 		sd, err := windows.SecurityDescriptorFromString(sddl)
@@ -1058,7 +1060,7 @@ func TestWindowsManagedRuntimeClassifyRefusesABundleInASetupRelaxedRoot(t *testi
 				t.Fatalf("classify over canonical roots: err=%v, want the bundle refused", err)
 			}
 			relaxed := tc.relax(fixture.options.DataDir, hookDir)
-			sddl := windowsSetupRelaxedDirectorySDDL
+			sddl := managed.WindowsSetupRelaxedDirectorySDDL
 			if !tc.refused {
 				sddl += "(A;OICI;FR;;;WD)"
 			}
@@ -1476,6 +1478,7 @@ func TestWindowsManagedRuntimeGCOpenRetryIsBounded(t *testing.T) {
 // bundles are collected, nothing behind the link is read or changed, and a
 // collection that is not the uninstall's still leaves them alone.
 func TestWindowsManagedRuntimeGenerationRetiredCollectionGoesOnBehindAKeptSelectorLink(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	base := t.TempDir()
 	dataDir := filepath.Join(base, ".defenseclaw")
 	hookDir := filepath.Join(dataDir, "hooks")

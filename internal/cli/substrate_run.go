@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/launcherpresence"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/signin"
 )
 
 // substrateAsks adapts the admin client to attach.AskSource for one person.
@@ -55,24 +57,40 @@ func (a substrateAsks) Pending(ctx context.Context, t attach.Target) ([]attach.A
 	}
 	// Only an ask that names this exact agent is shown here: a bare name or
 	// an empty actor could be another of the person's agents (GAP-0112).
+	// The gateway lists an ask's atespace and actor name apart, so the
+	// agent is atespace/name (GAP-0483: matching the bare name against
+	// atespace/name showed no ask on the pane, ever).
 	var out []attach.Ask
 	for _, k := range asks {
-		if k.Actor != t.Atespace+"/"+t.Name {
+		ref := substrateAskActor(k)
+		if ref == "" || ref != t.Atespace+"/"+t.Name {
 			continue
 		}
-		out = append(out, attach.Ask{ID: k.ID, Actor: k.Actor, Tool: k.Tool, Summary: k.Summary, Reason: k.Reason, Severity: k.Severity, Created: k.Created})
+		out = append(out, attach.Ask{ID: k.ID, Actor: ref, Tool: k.Tool, Summary: k.Summary, Reason: k.Reason, Severity: k.Severity, Created: k.Created})
 	}
 	return out, nil
 }
 
+// substrateAskActor is the atespace/name of the agent that raised an ask,
+// or "" when the gateway named no atespace (never matched by name alone).
+func substrateAskActor(k api.Ask) string {
+	if k.Atespace == "" || k.Actor == "" || strings.Contains(k.Actor, "/") {
+		return ""
+	}
+	return k.Atespace + "/" + k.Actor
+}
+
 func (a substrateAsks) Decide(ctx context.Context, id string, d attach.Decision) error {
+	var err error
 	switch d {
 	case attach.Decision("once"):
-		return a.cl.Decide(ctx, id, "approve", false, "")
+		_, err = a.cl.Decide(ctx, id, "approve", false, "")
 	case attach.Decision("always"):
-		return a.cl.Decide(ctx, id, "approve", true, "")
+		_, err = a.cl.Decide(ctx, id, "approve", true, "")
+	default:
+		_, err = a.cl.Decide(ctx, id, "deny", false, "")
 	}
-	return a.cl.Decide(ctx, id, "deny", false, "")
+	return err
 }
 
 func substrateTransport(v string) (string, error) {
@@ -117,15 +135,19 @@ func substrateBanner(ctx context.Context, cl *api.Client, a api.Actor) attach.Ba
 	return b
 }
 
-func substrateAttachOptions(cmd *cobra.Command, s *substrateSession, a api.Actor, transport string, noAsks bool) (attach.Options, error) {
+func substrateAttachOptions(cmd *cobra.Command, s *substrateSession, a api.Actor, transport string, noAsks bool, keyReplay string) (attach.Options, error) {
 	tr, err := substrateTransport(transport)
+	if err != nil {
+		return attach.Options{}, err
+	}
+	replay, err := substrateKeyReplay(cmd, s, keyReplay)
 	if err != nil {
 		return attach.Options{}, err
 	}
 	o := attach.Options{
 		Target:  attach.Target{Atespace: a.Atespace, Name: a.Name},
 		Gateway: attach.Gateway{BaseURL: s.Ctx.AdminURL, CAFile: s.Ctx.AdminCAFile}, Bearer: s.Bearer, In: os.Stdin, Out: cmd.OutOrStdout(), Err: cmd.ErrOrStderr(),
-		Transport: tr, NoAsks: noAsks,
+		Transport: tr, NoAsks: noAsks, KeyReplay: replay,
 	}
 	// The agent starts in the copy of the project, so what it writes where
 	// it starts comes back with pull (GAP-0163). A computer that did not
@@ -166,12 +188,17 @@ const substrateStateCrashed = "crashed"
 // --- connect ----------------------------------------------------------------
 
 func runSubstrateConnect(cmd *cobra.Command, f *substrateAttachFlags, ref string) error {
+	specs, err := substrateMCPSpecs(f.mcp, false, false)
+	if err != nil {
+		return err
+	}
 	s, err := substrateOpen(cmd, &f.com)
 	if err != nil {
 		return err
 	}
 	ctx, stop := substrateContext(cmd)
 	defer stop()
+	egress := substrateEgressAhead(ctx, s)
 	a, err := resolveSubstrateActor(ctx, s.Client, ref)
 	if err != nil {
 		return substrateFail(err)
@@ -179,11 +206,20 @@ func runSubstrateConnect(cmd *cobra.Command, f *substrateAttachFlags, ref string
 	if a.State == substrateStateCrashed {
 		return substrateFail(substrateCrashedErr(a))
 	}
-	o, err := substrateAttachOptions(cmd, s, a, f.transport, f.noAsks)
+	o, err := substrateAttachOptions(cmd, s, a, f.transport, f.noAsks, f.keyReplay)
 	if err != nil {
 		return err
 	}
 	o.Banner = substrateBanner(ctx, s.Client, a)
+	mcp, err := startSubstrateMCP(ctx, cmd, s, a, specs, true)
+	if err != nil {
+		return err
+	}
+	defer mcp.Close()
+	o.Notices = mcp.Notices()
+	// GAP-0505: the person learns here, not from a DNS error in the agent,
+	// that another callout holds Substrate's egress slot.
+	egress(cmd.ErrOrStderr())
 	return substrateAttachAndReport(ctx, cmd, o, a)
 }
 
@@ -192,14 +228,18 @@ func runSubstrateConnect(cmd *cobra.Command, f *substrateAttachFlags, ref string
 // snapshots keep no command line). The record holds the command, the
 // connector and the context name only. It returns the cleanup.
 func substratePresence(cmd *cobra.Command, a api.Actor) func() {
+	remove, _ := launcherpresence.Write(auth.StateDir(), substrateRecord(cmd, a))
+	return remove
+}
+
+// substrateRecord is the presence record of this launcher: the command, the
+// connector and the context name.
+func substrateRecord(cmd *cobra.Command, a api.Actor) launcherpresence.Record {
 	ctxName := ""
 	if name, _, err := auth.ResolveContext(""); err == nil {
 		ctxName = name
 	}
-	remove, _ := launcherpresence.Write(auth.StateDir(), launcherpresence.Record{
-		Command: cmd.Name(), Connector: strings.ToLower(a.Connector), Context: strings.ToLower(ctxName),
-	})
-	return remove
+	return launcherpresence.Record{Command: cmd.Name(), Connector: strings.ToLower(a.Connector), Context: strings.ToLower(ctxName)}
 }
 
 // substrateAttachAndReport attaches and says how the session ended.
@@ -298,10 +338,13 @@ func newSubstrateID(n int) string {
 //     Bedrock model (lane A10, TST-0125, TST-0184).
 //   - cursor, devin, amp: vendor sign-in connectors (PLAN E9, lane A11, J41
 //     TST-0286 to TST-0299). The gateway decides at create with
-//     signin.Evaluate: open source runs the agent and the create answer
-//     carries the warning that the sign-in token sits in the actor and its
-//     snapshots, which run prints; a managed deployment refuses it with
-//     subscription_signin_refused before any actor exists. Kiro and
+//     signin.Evaluate: open source answers a create 428
+//     signin_ack_required with the warning that the sign-in token sits in
+//     the actor and its snapshots, before any actor exists; run shows it,
+//     asks for a yes (or takes --yes) and creates again with the
+//     acknowledgement, which the gateway audits (GAP-0482). A managed
+//     deployment refuses it with subscription_signin_refused before any
+//     actor exists. Kiro and
 //     Antigravity are verified harnesses with no entry here; the same rule
 //     applies to them.
 var substrateProven = map[string]string{
@@ -317,6 +360,15 @@ type substrateRunTarget struct {
 	connName string
 	profile  string
 	template string
+	// loginTemplate marks a template taken from the login's default
+	// (GAP-0469); agentTemplate is the named agent's own template, used when
+	// the cluster says the login default is another agent's.
+	loginTemplate bool
+	agentTemplate string
+	// loginProfile marks a profile taken from the login's default
+	// (GAP-0527): when the cluster says it is not the person's, the run
+	// lets the cluster pick the person's own instead.
+	loginProfile bool
 	// note is the substrateProven note, printed when the agent starts.
 	note string
 }
@@ -334,7 +386,10 @@ func resolveSubstrateRunTarget(s *substrateSession, f *substrateRunFlags, agent 
 	// No profile named: the cluster gives the person the profile their
 	// groups map to (GAP-0166); --profile is only for someone with several.
 	t.profile = substrateFirst(f.profile, os.Getenv("DEFENSECLAW_SUBSTRATE_PROFILE"), s.Ctx.Profile)
-	t.template = substrateFirst(f.template, os.Getenv("DEFENSECLAW_SUBSTRATE_TEMPLATE"), s.Ctx.Template, sandboxcli.HarnessArg(spec))
+	t.loginProfile = substrateFirst(f.profile, os.Getenv("DEFENSECLAW_SUBSTRATE_PROFILE")) == "" && strings.TrimSpace(s.Ctx.Profile) != ""
+	t.agentTemplate = sandboxcli.HarnessArg(spec)
+	t.template = substrateFirst(f.template, os.Getenv("DEFENSECLAW_SUBSTRATE_TEMPLATE"), s.Ctx.Template, t.agentTemplate)
+	t.loginTemplate = substrateFirst(f.template, os.Getenv("DEFENSECLAW_SUBSTRATE_TEMPLATE")) == "" && strings.TrimSpace(s.Ctx.Template) != ""
 	return t, nil
 }
 
@@ -442,34 +497,94 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 	// (GAP-0133). Every actor gets a name nobody had before.
 	req.Name = uniqueSubstrateActorName(req.Name, t.spec.Command)
 	req.Secrets = f.secrets
+	var prepared *workspace.PreparedUpload
+	if project != "" {
+		prepared, err = substratePreflight(ctx, cmd, s, f, project)
+		if err != nil {
+			return a, err
+		}
+		defer prepared.Close()
+	}
+	// GAP-0505: read during the create, printed after "Started". A batch
+	// prints it once for all of its tasks (runSubstrateBatch).
+	egress := func(io.Writer) {}
+	if req.BatchID == "" {
+		egress = substrateEgressAhead(ctx, s)
+	}
 	a, err = s.Client.Create(ctx, req)
+	// GAP-0527: the profile login saved (--default-profile) is a preference,
+	// not the person's assignment. Refused (a contractor whose login saved
+	// eng), the run asks again with no profile, so the cluster gives the
+	// person the profile their groups map to, as policy show reports it. A
+	// profile the person named (--profile or the environment) is not
+	// replaced.
+	if e, ok := api.AsError(err); ok && e.Status == http.StatusForbidden && e.Reason == "profile_not_allowed" && t.loginProfile && req.Profile != "" {
+		fmt.Fprintf(w, "The default profile %s from login is not one you may use; using the profile the cluster gives you.\n", req.Profile)
+		req.Profile = ""
+		a, err = s.Client.Create(ctx, req)
+	}
+	// GAP-0469: the template login saved is the default for its own agent.
+	// Named another agent (run codex after a claude login), the cluster
+	// answers connector_mismatch: run that agent's own template instead.
+	if e, ok := api.AsError(err); ok && e.Status == 400 && e.Reason == "connector_mismatch" {
+		if t.loginTemplate && t.agentTemplate != "" && t.agentTemplate != req.Template {
+			fmt.Fprintf(w, "The default template %s from login is not a %s template; using %s.\n", req.Template, t.spec.DisplayName, t.agentTemplate)
+			req.Template = t.agentTemplate
+			a, err = s.Client.Create(ctx, req)
+		}
+		if e, ok := api.AsError(err); ok && e.Status == 400 && e.Reason == "connector_mismatch" {
+			return a, cliusage.WithExitCode(fmt.Errorf("template %s is not a %s template; name one with --template TEMPLATE, for example --template %s", req.Template, t.spec.DisplayName, t.agentTemplate), 2)
+		}
+	}
+	// GAP-0482: an open-source cluster warns about a vendor sign-in before
+	// it creates anything; the person's yes (or --yes) sends the create
+	// again, and the cluster audits it.
+	acked := ""
+	if e, ok := api.AsError(err); ok && e.Status == http.StatusPreconditionRequired && e.Reason == signin.AckRequiredCode {
+		acked = substrateFirst(e.Message, "the cluster warns about this agent's vendor sign-in.")
+		if err = substrateAckSignin(cmd, t, f, req, acked); err != nil {
+			return a, err
+		}
+		req.AcknowledgeSignin = true
+		a, err = s.Client.Create(ctx, req)
+	}
 	if err != nil {
 		if e, ok := api.AsError(err); ok && e.Status == 503 && e.Reason == "no_free_worker" {
 			return a, cliusage.WithExitCode(substrateNoWorkerError{substrateNoWorkerMessage(ctx, s)}, substrateAPIExit(e))
 		}
+		if e, ok := api.AsError(err); ok && e.Status == http.StatusForbidden && e.Reason == "profile_not_allowed" && req.Profile == "" {
+			// No profile was sent, so "leave --profile out" is no fix: the
+			// cluster has no profile that runs agents for this person.
+			return a, cliusage.WithExitCode(errors.New("no profile that runs agents is assigned to you on this cluster; nothing was started. See yours with: defenseclaw substrate policy show, and ask your administrator to assign you one"), substrateAPIExit(e))
+		}
 		return a, substrateFail(err)
 	}
-	fmt.Fprintf(w, "Started %s/%s (%s, profile %s).\n", a.Atespace, a.Name, t.spec.DisplayName, substrateDash(substrateFirst(a.Profile, t.profile)))
-	// E9: in open source the cluster says what a vendor sign-in costs.
+	fmt.Fprintf(w, "Started %s/%s (%s, profile %s).\n", a.Atespace, a.Name, t.spec.DisplayName, substrateDash(substrateFirst(a.Profile, req.Profile)))
+	// E9: in open source the cluster says what a vendor sign-in costs; the
+	// warning the person just acknowledged is not printed twice.
 	for _, warn := range a.Warnings {
-		fmt.Fprintf(w, "Warning: %s\n", warn)
+		if warn != acked {
+			fmt.Fprintf(w, "Warning: %s\n", warn)
+		}
 	}
 	if t.note != "" {
 		fmt.Fprintf(w, "Note: %s\n", t.note)
 	}
+	egress(w)
 	defer func() {
 		if err != nil {
 			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
-			if derr := s.Client.Delete(cctx, a.Atespace, a.Name); derr == nil {
+			if _, derr := s.Client.Delete(cctx, a.Atespace, a.Name); derr == nil {
 				fmt.Fprintf(w, "Removed the half-made agent %s/%s.\n", a.Atespace, a.Name)
 			} else {
 				fmt.Fprintf(w, "Could not remove %s/%s (%v); delete it with: defenseclaw substrate delete %s\n", a.Atespace, a.Name, substrateFail(derr), a.Name)
 			}
 		}
 	}()
-	if project != "" {
-		if err = substrateUploadFolder(ctx, cmd, s, a, f, project); err != nil {
+	substrateGitRewriteAtStart(ctx, cmd, s, a, f)
+	if prepared != nil {
+		if err = substrateUploadFolder(ctx, cmd, s, a, prepared); err != nil {
 			return a, err
 		}
 	}
@@ -478,7 +593,36 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 			return a, err
 		}
 	}
+	// Before the agent starts (attach or the task does that): the registry
+	// placeholders of the bindings in its policy (B1 2.6, S7).
+	substrateRegistryFiles(ctx, cmd, s, a)
 	return a, nil
+}
+
+// substrateAckSignin shows the cluster's sign-in warning and takes the
+// person's yes before anything is created or uploaded (GAP-0482). --yes
+// answers it; a batch, or a run with no terminal, needs --yes. No is a run
+// that started nothing.
+func substrateAckSignin(cmd *cobra.Command, t substrateRunTarget, f *substrateRunFlags, req api.CreateRequest, warning string) error {
+	w := cmd.ErrOrStderr()
+	switch {
+	case f.yes:
+		fmt.Fprintf(w, "Warning: %s\nAcknowledged with --yes.\n", warning)
+		return nil
+	case req.BatchID != "":
+		return cliusage.WithExitCode(fmt.Errorf("%s signs in to a vendor account, and the cluster asks for a yes first; nothing was started. Run the batch again with --yes to acknowledge it", t.spec.DisplayName), 2)
+	case !substrateInteractive():
+		return cliusage.WithExitCode(fmt.Errorf("%s Nothing was started: run it again with --yes to acknowledge this warning", warning), 2)
+	}
+	fmt.Fprintf(w, "Warning: %s\n", warning)
+	ok, err := substrateConfirm(cmd, "Start "+t.spec.DisplayName+" anyway?")
+	if err != nil {
+		return cliusage.WithExitCode(err, 2)
+	}
+	if !ok {
+		return cliusage.WithExitCode(errors.New("not started: the warning was not acknowledged, so nothing was created or uploaded"), 1)
+	}
+	return nil
 }
 
 // substrateCloneInActor clones --clone into the actor through the relay
@@ -492,11 +636,18 @@ func substrateCloneInActor(ctx context.Context, cmd *cobra.Command, s *substrate
 	}
 	defer rel.Close()
 	fmt.Fprintf(cmd.ErrOrStderr(), "Cloning %s in the agent...\n", safetext.Line(f.clone))
-	res, err := workspace.Clone(ctx, rel.Client, auth.StateDir(), substrateCopyName(a), f.clone, f.ref)
+	g := substrateGitSettings(ctx, s, f)
+	res, err := substrateCloneOnce(ctx, cmd, s.Client, a, f, func() (*workspace.CloneResult, error) {
+		return workspace.Clone(ctx, rel.Client, auth.StateDir(), substrateCopyName(a), f.clone, f.ref,
+			workspace.CloneOptions{Submodules: g.Submodules, LFS: g.LFS})
+	})
 	if err != nil {
 		return cliusage.WithExitCode(err, 1)
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "Cloned into %s.\n", safetext.Line(res.Dir))
+	for _, warn := range res.Warnings {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s.\n", safetext.Line(warn))
+	}
 	if res.Note != "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Note: %s.\n", safetext.Line(res.Note))
 	}
@@ -517,8 +668,10 @@ func runSubstrateRun(cmd *cobra.Command, f *substrateRunFlags, args []string) er
 		return cliusage.WithExitCode(errors.New("--parallel goes with --batch"), 2)
 	case f.clone != "" && f.noUpload:
 		return cliusage.WithExitCode(errors.New("--clone and --no-upload both say what the agent starts with; use one"), 2)
-	case f.clone != "" && workspace.CheckCloneURL(f.clone) != nil:
+	case f.clone != "" && !substrateCloneHere(f.clone) && workspace.CheckCloneURL(f.clone) != nil:
 		return cliusage.WithExitCode(workspace.CheckCloneURL(f.clone), 2)
+	case f.ref != "" && f.clone != "" && substrateCloneHere(f.clone):
+		return cliusage.WithExitCode(errors.New("--ref goes with --clone URL; --clone . starts at this checkout's HEAD"), 2)
 	case workspace.CheckCloneRef(f.ref) != nil:
 		return cliusage.WithExitCode(workspace.CheckCloneRef(f.ref), 2)
 	case f.ref != "" && f.clone == "":
@@ -526,6 +679,9 @@ func runSubstrateRun(cmd *cobra.Command, f *substrateRunFlags, args []string) er
 	}
 	if _, err := substrateTransport(f.transport); err != nil {
 		return cliusage.WithExitCode(err, 2)
+	}
+	if f.mcpSpecs, err = substrateMCPSpecs(f.mcp, f.detach, f.batch != ""); err != nil {
+		return err
 	}
 	s, err := substrateOpen(cmd, &f.com)
 	if err != nil {
@@ -540,7 +696,12 @@ func runSubstrateRun(cmd *cobra.Command, f *substrateRunFlags, args []string) er
 		agentArgs = args[dash:]
 	}
 	project := ""
-	if f.clone == "" && !f.noUpload {
+	if f.clone != "" && substrateCloneHere(f.clone) {
+		if project, err = substratePrepareCloneHere(cmd, s, f); err != nil {
+			return err
+		}
+	}
+	if f.clone == "" && !f.noUpload && project == "" {
 		project, err = os.Getwd()
 		if err != nil {
 			return err
@@ -569,11 +730,17 @@ func runSubstrateRun(cmd *cobra.Command, f *substrateRunFlags, args []string) er
 	if err != nil {
 		return err
 	}
-	o, err := substrateAttachOptions(cmd, s, a, f.transport, f.noAsks)
+	o, err := substrateAttachOptions(cmd, s, a, f.transport, f.noAsks, f.keyReplay)
 	if err != nil {
 		return err
 	}
 	o.Banner = substrateBanner(ctx, s.Client, a)
+	mcp, err := startSubstrateMCP(ctx, cmd, s, a, f.mcpSpecs, true)
+	if err != nil {
+		return err
+	}
+	defer mcp.Close()
+	o.Notices = mcp.Notices()
 	return substrateAttachAndReport(ctx, cmd, o, a)
 }
 
@@ -596,25 +763,32 @@ func runSubstrateOneTask(ctx context.Context, cmd *cobra.Command, s *substrateSe
 	if err != nil {
 		return -1, err
 	}
-	o, err := substrateAttachOptions(cmd, s, a, f.transport, true)
+	o, err := substrateAttachOptions(cmd, s, a, f.transport, true, attach.KeyReplayOff)
 	if err != nil {
 		return -1, err
 	}
+	mcp, err := startSubstrateMCP(ctx, cmd, s, a, f.mcpSpecs, false)
+	if err != nil {
+		return -1, err
+	}
+	defer mcp.Close()
 	w := cmd.OutOrStdout()
+	// GAP-0420: what undo needs to start the task again after a crash.
+	rec := substrateTaskRecord{Prompt: task, Clone: f.clone, Ref: f.ref, RemoteDir: f.remoteDir, Exclude: f.exclude,
+		Unmask: f.unmask, MaxUploadMB: f.maxUploadMB, Transport: f.transport, Started: time.Now().UTC()}
+	if project != "" {
+		if abs, aerr := filepath.Abs(project); aerr == nil {
+			rec.Project = abs
+		}
+	}
+	if serr := saveSubstrateTaskRecord(auth.StateDir(), a, rec); serr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Note: could not keep a record of the task on this computer (%v); after a crash it cannot be started again from here.\n", serr)
+	}
 	if f.detach {
 		// The first event is the task's start; once it is seen the task
 		// runs on its own.
-		dctx, cancel := context.WithCancel(ctx)
-		started := false
-		_, rerr := attach.RunTask(dctx, attach.TaskOptions{Options: o, Prompt: task, Args: agentArgs, Emit: func(e relay.TaskEvent) {
-			if e.Type == "start" {
-				started = true
-				cancel()
-			}
-		}})
-		cancel()
-		if !started {
-			return -1, substrateFail(substrateFirstErr(rerr, errors.New("the task did not start")))
+		if serr := substrateStartDetached(ctx, o, task, agentArgs); serr != nil {
+			return -1, substrateFail(serr)
 		}
 		if asJSON {
 			return -1, writeSubstrateJSON(w, map[string]any{"atespace": a.Atespace, "name": a.Name, "batch_id": batchID, "state": "started"})
@@ -637,9 +811,17 @@ func runSubstrateOneTask(ctx context.Context, cmd *cobra.Command, s *substrateSe
 	if err != nil {
 		return -1, substrateFail(err)
 	}
+	info := substrateTaskEndInfo(ctx, s)
+	// GAP-0505: a task whose other hosts were refused because another
+	// callout holds Substrate's egress slot says so where it ends.
+	if info != nil {
+		if line := substrateEgressLine(info.EgressCallout); line != "" {
+			fmt.Fprintln(cmd.ErrOrStderr(), line)
+		}
+	}
 	// A task whose hook and model calls the gateway refused may still end
 	// with exit 0; it did not finish (GAP-0194).
-	if msg, refused := substrateTokenRefusal(ctx, s, started); refused {
+	if msg, refused := substrateTokenRefusal(info, started); refused {
 		fmt.Fprintf(cmd.ErrOrStderr(), "%s\nReview it with: defenseclaw substrate logs %s\n", msg, a.Name)
 		return 1, cliusage.WithExitCode(errors.New("the task did not run: the cluster refused its calls"), 1)
 	}
@@ -648,16 +830,26 @@ func runSubstrateOneTask(ctx context.Context, cmd *cobra.Command, s *substrateSe
 		return code, cliusage.WithExitCode(fmt.Errorf("the task failed (exit %d)", code), 1)
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "The task finished. Bring changes home with: defenseclaw substrate pull %s\n", a.Name)
-	return code, nil
+	return code, substrateMCPNone(mcp, f.mcpSpecs)
 }
 
-// substrateTokenRefusal asks the cluster whether it refused every agent's
-// token since start, and says so in words a person can act on.
-func substrateTokenRefusal(ctx context.Context, s *substrateSession, start time.Time) (string, bool) {
+// substrateTaskEndInfo is the one /info read made when a task ends (the
+// token refusal and the egress callout), nil when it failed.
+func substrateTaskEndInfo(ctx context.Context, s *substrateSession) *api.Info {
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	info, err := s.Client.Info(cctx)
-	if err != nil || !info.ActorTokens.Refusing(start) {
+	if err != nil {
+		return nil
+	}
+	return &info
+}
+
+// substrateTokenRefusal says whether the cluster (its /info, nil when the
+// read failed) refused every agent's token since start, in words a person
+// can act on.
+func substrateTokenRefusal(info *api.Info, start time.Time) (string, bool) {
+	if info == nil || !info.ActorTokens.Refusing(start) {
 		return "", false
 	}
 	why := "the agent's identity could not be checked"
@@ -707,6 +899,10 @@ func runSubstrateBatch(ctx context.Context, cmd *cobra.Command, s *substrateSess
 	batchID := "b-" + newSubstrateID(4)
 	w := cmd.ErrOrStderr()
 	fmt.Fprintf(w, "Batch %s: %d task(s), %d at a time.\n", batchID, len(tasks), par)
+	// GAP-0505: the tasks' own output is not shown, so the batch says once
+	// at its start and once at its end that another callout holds
+	// Substrate's egress slot.
+	substrateEgressAhead(ctx, s)(w)
 	type result struct {
 		Task   string `json:"task"`
 		Name   string `json:"name,omitempty"`
@@ -762,6 +958,7 @@ func runSubstrateBatch(ctx context.Context, cmd *cobra.Command, s *substrateSess
 		}()
 	}
 	wg.Wait()
+	substrateEgressAhead(ctx, s)(w)
 	out := cmd.OutOrStdout()
 	failed := 0
 	for _, r := range results {
@@ -835,4 +1032,26 @@ func uniqueSubstrateActorName(label, agent string) string {
 		base = strings.Trim(base[:40], "-")
 	}
 	return base + "-" + newSubstrateID(4)
+}
+
+// substrateKeyReplay is what happens to keys typed while the terminal link
+// is down (B3.1): the tighter of the cluster's substrate.launcher.key_replay
+// and the --key-replay flag, which can only tighten it. A gateway that does
+// not report it (older than this launcher) leaves the default, ask.
+func substrateKeyReplay(cmd *cobra.Command, s *substrateSession, flag string) (string, error) {
+	if flag != "" && !attach.ValidKeyReplay(flag) {
+		return "", cliusage.WithExitCode(fmt.Errorf("--key-replay %q: use ask, on or off", flag), 2)
+	}
+	if flag == attach.KeyReplayOff || s == nil || s.Client == nil {
+		return attach.TightestKeyReplay("", flag), nil
+	}
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	settings, err := s.Client.Launcher(ctx)
+	if err != nil {
+		return attach.TightestKeyReplay("", flag), nil
+	}
+	return attach.TightestKeyReplay(settings.KeyReplay, flag), nil
 }

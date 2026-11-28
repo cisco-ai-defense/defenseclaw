@@ -144,13 +144,14 @@ func windowsTrustedFolderMarker(path string) (string, bool) {
 // windowsManagedFolderRecorded is the administrator-only record decision of
 // WindowsDefenseClawFolderMarker, or "".
 func windowsManagedFolderRecorded(dir string) string {
-	ledger := ""
-	if configured := strings.TrimSpace(os.Getenv(HookGuardianAuthorizationDirEnv)); configured != "" {
-		ledger = filepath.Join(filepath.Clean(configured), HookGuardianAuthorizationFile)
-	}
 	layout, layoutErr := windowsManagedFolderLayout()
-	if ledger == "" && layoutErr == nil && strings.TrimSpace(layout.GuardianAuthDir) != "" {
-		ledger = filepath.Join(layout.GuardianAuthDir, HookGuardianAuthorizationFile)
+	authorizationLayout := layout
+	if layoutErr != nil {
+		authorizationLayout = StandaloneLayout{}
+	}
+	ledger := ""
+	if dir := HookGuardianAuthorizationDirForLayout(authorizationLayout); dir != "" {
+		ledger = filepath.Join(dir, HookGuardianAuthorizationFile)
 	}
 	if ledger != "" && windowsAdminOnlyRecord(ledger) && windowsLedgerNamesFolder(ledger, dir) {
 		return "folder (the hook guardian ledger " + ledger + " protects a target in it)"

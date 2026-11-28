@@ -21,6 +21,7 @@ import (
 )
 
 func TestCopilotManagedDropInPreservesIndependentHandlers(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	opts.CopilotCLIPolicyOnly = true
 	path, err := copilotDropInPath(opts)
@@ -217,6 +218,7 @@ func TestCopilotManagedReconcileRepairsOwnHandler(t *testing.T) {
 }
 
 func TestCopilotManagedCorruptDropInSelfHeals(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	cases := []struct {
 		name    string
 		current string
@@ -308,6 +310,7 @@ func TestCopilotManagedCorruptDropInSelfHeals(t *testing.T) {
 }
 
 func TestCopilotMalformedEventDoesNotClaimCoverage(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	opts.CopilotCLIPolicyOnly = true
 	path, err := copilotDropInPath(opts)
@@ -339,6 +342,7 @@ func TestCopilotMalformedEventDoesNotClaimCoverage(t *testing.T) {
 }
 
 func TestCopilotForeignMalformedEventIsNotRepairDrift(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	opts.CopilotCLIPolicyOnly = true
 	target := copilotTarget{}
@@ -383,6 +387,7 @@ func TestCopilotForeignMalformedEventIsNotRepairDrift(t *testing.T) {
 }
 
 func TestCopilotExtraFieldVerifyAndReconcileAgree(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := testOptions(t)
 	opts.CopilotCLIPolicyOnly = true
 	path, err := copilotDropInPath(opts)
@@ -437,6 +442,7 @@ func TestCopilotExtraFieldVerifyAndReconcileAgree(t *testing.T) {
 }
 
 func TestCopilotManagedNullHooksAreInert(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, goos := range []string{"linux", "darwin", "windows"} {
 		t.Run(goos, func(t *testing.T) {
 			opts := Options{GOOS: goos, HookBinary: "/opt/defenseclaw/bin/defenseclaw-hook"}

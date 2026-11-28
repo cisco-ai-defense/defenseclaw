@@ -797,6 +797,11 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 }
 
 func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCodeHookRequest, _ []string, rawPayload []byte) {
+	if req.HookEventName != "MessageDisplay" {
+		// Any other event of the session ends the messages it displayed:
+		// write them before this event's own records (GAP-0511).
+		a.flushClaudeCodeDisplays(ctx, req.SessionID)
+	}
 	meta := hookLLMEventMeta(ctx, "claudecode", req.SessionID, req.TurnID, req.Model, req.Source, req.AgentID, payloadString(req.Payload, "agent_name"), req.AgentType, req.Payload)
 	meta.ToolID = req.ToolUseID
 	meta.ToolName = claudeCodeToolName(req)
@@ -845,17 +850,17 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 		captureHookPrompt(ctx, meta)
 		a.rememberHookSessionState(ctx, meta)
 	case "MessageDisplay":
-		if strings.TrimSpace(req.Delta) == "" {
+		// Whitespace-only chunks are kept: they separate the words around them.
+		if req.Delta == "" && !req.DisplayFinal {
 			return
 		}
 		meta.PromptID = a.lastHookPromptID(ctx, "claudecode", req.SessionID)
 		meta.ResponseID = firstNonEmpty(req.MessageID, stableLLMEventID("response", "claudecode", req.SessionID, req.TurnID))
 		meta.ResponseIDReported = strings.TrimSpace(req.MessageID) != ""
-		finish := "streaming"
-		if req.DisplayFinal {
-			finish = "stop"
-		}
-		a.emitLLMResponseEventV8(ctx, meta, req.Delta, string(rawPayload), []string{finish})
+		// One row per message, not per chunk: redaction runs per record,
+		// so a secret streamed across chunks was stored in undetected
+		// pieces (GAP-0511).
+		a.bufferClaudeCodeDisplay(ctx, meta, req.DisplayIndex, req.Delta, req.DisplayFinal)
 	case "SubagentStart":
 		prompt := claudeCodeSubagentPrompt(req, hookLifecycleContent(meta, "subagent_input_not_reported"))
 		meta.PromptID = hookPromptID("claudecode", req.SessionID, "", prompt, rawPayload)

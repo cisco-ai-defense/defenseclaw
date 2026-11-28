@@ -336,10 +336,14 @@ t_install_passes_guardian_auth_dir_to_cli() {
   # Regression guard: the plist sets DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR
   # to ${SUPPORT_DIR}/hook-guardian-state so the running daemon uses the
   # installer-created dir. The `enterprise hooks install` CLI invocation
-  # inside install.sh MUST inherit that same env var — otherwise the
-  # CLI falls back to `${data_dir}-hook-guardian` (= runtime-hook-guardian)
-  # which doesn't exist, and every per-connector hook wiring call fails
-  # the authorization-directory trust check.
+  # inside install.sh MUST inherit that same env var, so the CLI and the
+  # daemon read one directory by contract. Without the variable the CLI
+  # also resolves the standalone data directory to hook-guardian-state
+  # (managed.HookGuardianAuthorizationDir, rel-1-0-10:GAP-1541); a CLI
+  # without that pairing fell back to `${data_dir}-hook-guardian`
+  # (= runtime-hook-guardian), which does not exist, and every
+  # per-connector hook wiring call failed the authorization-directory
+  # trust check.
   #
   # This test locks in the contract by checking that every line that
   # invokes `enterprise hooks install` in install.sh has

@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // discoveryDirLimit bounds passive nested-root discovery in attacker-controlled
@@ -73,7 +75,10 @@ func ProjectSkillDirs(launchDir string) []string {
 // SkillDirs resolves the immediate skill-name entries Claude Code loads from
 // one skills root. Claude v2.1.203+ follows directory symlinks and de-duplicates
 // aliases to the same target, so this resolver intentionally follows only that
-// documented component boundary and returns canonical target directories.
+// documented component boundary and returns canonical target directories. On
+// Windows a directory junction is followed as a symbolic link is: Claude Code
+// (Node) loads a skill through one, and Lstat reports it as irregular, not as
+// a link (rel-1-0-10:GAP-2193).
 func SkillDirs(root string) []string {
 	root = absoluteClean(root)
 	if root == "" {
@@ -94,8 +99,8 @@ func SkillDirs(root string) []string {
 			continue
 		}
 		resolved := path
-		if info.Mode()&os.ModeSymlink != 0 {
-			resolved, err = filepath.EvalSymlinks(path)
+		if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			resolved, err = winpath.EvalLinks(path)
 			if err != nil {
 				continue
 			}
@@ -176,6 +181,17 @@ func AgentFiles(root string) []string {
 		return nil
 	})
 	return uniquePaths(files)
+}
+
+// ProjectDirs returns launchDir and its ancestors up to the nearest
+// repository root (a .git folder or file), or launchDir alone outside a
+// repository. OpenCode resolves its project folders the same way.
+func ProjectDirs(launchDir string) []string {
+	start := absoluteClean(launchDir)
+	if start == "" {
+		return nil
+	}
+	return projectAncestorDirs(start)
 }
 
 func projectAncestorDirs(start string) []string {

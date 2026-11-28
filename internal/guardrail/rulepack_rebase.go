@@ -37,6 +37,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
@@ -365,7 +366,7 @@ func RebaseLoadedRulePack(dir string, source *RulePack) (*RulePack, error) {
 		return nil, fmt.Errorf("source rule pack changed while rebasing in memory")
 	}
 	// The loader records each rule file under the pack's resolved folder.
-	absDir, err := filepath.EvalSymlinks(dir)
+	absDir, err := winpath.EvalLinks(dir)
 	if err == nil {
 		absDir, err = filepath.Abs(absDir)
 	}
@@ -530,7 +531,7 @@ func mergeDuplicateCategories(files map[string][]byte, plan *RulePackRebase) err
 // fails the rebase: its copy would miss rules 0.8.x enforced. linked names
 // each link and its target.
 func readRulePackTree(dir string) (files map[string][]byte, linked []string, err error) {
-	root, err := filepath.EvalSymlinks(dir)
+	root, err := winpath.EvalLinks(dir)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -589,7 +590,7 @@ func readRulePackTree(dir string) (files map[string][]byte, linked []string, err
 				continue // a socket, pipe or device is no rule file
 			}
 			// A link (or a Windows junction).
-			target, err := filepath.EvalSymlinks(full)
+			target, err := winpath.EvalLinks(full)
 			if err != nil {
 				return fmt.Errorf("%s is a link that does not resolve (its target is missing, or the links loop): "+
 					"point it at the file, or remove it, then run the upgrade again", name)

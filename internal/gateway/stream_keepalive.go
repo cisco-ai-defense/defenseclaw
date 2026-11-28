@@ -40,13 +40,11 @@ import (
 //     ping event.
 //   - (b) where the framing has no content-free event, it checks the held
 //     text, then releases the held events with the bytes of the open run
-//     masked ('*' for each letter and digit), never raw: Bedrock
-//     ConverseStream, InvokeModelWithResponseStream for another model, and
-//     an Anthropic invoke stream before its first event went out (a ping
-//     before message_start breaks the SDK). Only when rel would have sent
-//     those events (past the initial buffer). The run stays open: what
-//     follows it is held again, and the check reads it whole with the rest.
-//     An event that cannot be rewritten keeps everything held, as before.
+//     masked ('*' for each letter and digit), never raw, only for
+//     unsigned providers. Signed Bedrock reasoning remains queued intact.
+//     Only when rel would have sent those events (past the initial buffer).
+//     The run stays open: what follows it is held again, and the check reads
+//     it whole with the rest. An event that cannot be rewritten stays held.
 //
 // An open private-key block keeps its own TRUNCATED idle bound (GAP-0429).
 
@@ -127,6 +125,18 @@ func (r *responseText) OpenRuns() []openRun {
 	return out
 }
 
+// ParkedReasoningRuns returns only unresolved runs in reasoning lanes. The
+// wire hold may mask these runs while releasing answer events (GAP-2170).
+func (r *responseText) ParkedReasoningRuns() []openRun {
+	var out []openRun
+	for _, run := range r.OpenRuns() {
+		if run.key.field == responseFieldReasoning && r.secret[run.lane].parked {
+			out = append(out, run)
+		}
+	}
+	return out
+}
+
 // maskRunText masks every letter and digit of s.
 func maskRunText(s string) string {
 	var b strings.Builder
@@ -145,13 +155,13 @@ func maskRunText(s string) string {
 // Bedrock event take (bedrockStreamDelta, bedrockInvokeChunkPieces:
 // anthropicStreamPieces, chatChoicesPieces, Mistral outputs; generation,
 // outputText, completion, text). A run in a typed lane is looked for only
-// in those; a run in the walker's lane (responseFieldOther) only in the
+// in those; delta covers OpenAI Responses reasoning deltas. A run in the walker's lane (responseFieldOther) only in the
 // other strings the walker reads. The padding of a frame ("p"), its event
 // type or other metadata never holds a typed run: when a padding value
 // ended like the run, it took the match and the start of the run went out
 // raw (rel-1-0-10:GAP-1320).
 var runTextKeys = map[string]bool{"text": true, "thinking": true, "partial_json": true, "input": true,
-	"generation": true, "outputText": true, "completion": true, "content": true, "reasoning_content": true,
+	"generation": true, "outputText": true, "completion": true, "content": true, "reasoning_content": true, "delta": true,
 	"refusal": true, "arguments": true}
 
 // runMask is the part of each open run not yet found in the events read
@@ -281,6 +291,33 @@ func (m *runMask) maskJSON(b []byte, chunk bool) ([]byte, bool) {
 	return out, true
 }
 
+// maskSSEEvent masks a single complete SSE or NDJSON event. Events whose
+// data spans multiple wire lines stay held: replacing them could change
+// the provider grammar, so the caller fails closed.
+func (m *runMask) maskSSEEvent(raw []byte, ndjson bool) ([]byte, bool) {
+	f := &sseFramer{ndjson: ndjson}
+	events := f.Write(raw, false)
+	if len(events) != 1 || len(f.Held()) != 0 || events[0].Unread {
+		return nil, false
+	}
+	ev := events[0]
+	if !ev.HasData || ev.Data == "[DONE]" {
+		return raw, true
+	}
+	data := []byte(ev.Data)
+	if !json.Valid(data) || bytes.Count(raw, data) != 1 {
+		return nil, false
+	}
+	masked, ok := m.maskJSON(data, false)
+	if !ok {
+		return nil, false
+	}
+	if bytes.Equal(masked, data) {
+		return raw, true
+	}
+	return bytes.Replace(raw, data, masked, 1), true
+}
+
 // maskBedrockFrames masks the open runs in the whole eventstream frames
 // raw, back to front. False: a frame is not one or its payload not JSON.
 func (m *runMask) maskBedrockFrames(raw []byte) ([]byte, bool) {
@@ -330,19 +367,25 @@ func (m *runMask) maskBedrockFrames(raw []byte) ([]byte, bool) {
 }
 
 // maskHeld returns the first n events of the queue with the bytes of the
-// open runs masked (option b; Bedrock framing only). Every run must be
+// open runs masked. Every run must be
 // found whole in the queue, or its start in what an earlier masked release
 // sent (masked: lane to the run start and end it covered), and the stream's
 // own reader must read the masked events as the held ones with only the
 // runs masked (maskedAsRead); else false and nothing may go out.
 func (s *passthroughStream) maskHeld(queue [][]byte, n int, runs []openRun, masked map[int][2]int) ([][]byte, bool) {
-	if s.bedrock == nil || len(runs) == 0 {
+	if len(runs) == 0 {
 		return nil, false
 	}
 	m := newRunMask(runs)
 	out := make([][]byte, len(queue))
 	for i := len(queue) - 1; i >= 0; i-- {
-		ev, ok := m.maskBedrockFrames(queue[i])
+		var ev []byte
+		var ok bool
+		if s.bedrock != nil {
+			ev, ok = m.maskBedrockFrames(queue[i])
+		} else {
+			ev, ok = m.maskSSEEvent(queue[i], s.ndjson)
+		}
 		if !ok {
 			return nil, false
 		}
@@ -391,6 +434,36 @@ func (s *passthroughStream) bedrockLaneText(frames [][]byte) (map[responseLane]s
 	return out, true
 }
 
+// sseLaneText reads complete SSE or NDJSON events with the same typed
+// reader used by passthrough_stream.go, for mask validation.
+func (s *passthroughStream) sseLaneText(frames [][]byte) (map[responseLane]string, bool) {
+	f := &sseFramer{ndjson: s.ndjson}
+	calls := newSSEToolCalls(s.p.maxBodyValues())
+	var acc responseText
+	model := ""
+	for _, raw := range frames {
+		events := f.Write(raw, false)
+		if len(events) != 1 || events[0].Unread || s.eventContent(events[0], calls, &acc, &model) != "" {
+			return nil, false
+		}
+	}
+	if len(f.Held()) != 0 {
+		return nil, false
+	}
+	out := make(map[responseLane]string, len(acc.index))
+	for lane, i := range acc.index {
+		out[lane] = acc.lanes[i].String()
+	}
+	return out, true
+}
+
+func (s *passthroughStream) laneTextForMask(frames [][]byte) (map[responseLane]string, bool) {
+	if s.bedrock != nil {
+		return s.bedrockLaneText(frames)
+	}
+	return s.sseLaneText(frames)
+}
+
 // maskedAsRead reports that the stream's reader takes from the masked
 // frames out the same text as from the held ones, lane by lane, except the
 // part of each open run they hold, which it reads with no letter or digit
@@ -401,14 +474,20 @@ func (s *passthroughStream) bedrockLaneText(frames [][]byte) (map[responseLane]s
 // otherwise (runMask.mask), but which of its strings a typed field holds,
 // and so leaves out of it, changes when that field is masked.
 func (s *passthroughStream) maskedAsRead(held, out [][]byte, runs []openRun, prior map[int][2]int) bool {
-	want, ok := s.bedrockLaneText(held)
+	want, ok := s.laneTextForMask(held)
 	if !ok {
 		return false
 	}
-	got, ok := s.bedrockLaneText(out)
+	got, ok := s.laneTextForMask(out)
 	if !ok {
 		return false
 	}
+	return maskedLaneTextAsRead(want, got, runs, prior)
+}
+
+// maskedLaneTextAsRead checks that only the selected run changed, using
+// the provider reader that produced each map.
+func maskedLaneTextAsRead(want, got map[responseLane]string, runs []openRun, prior map[int][2]int) bool {
 	for k := range got {
 		if _, ok := want[k]; !ok && k.field != responseFieldOther {
 			return false
@@ -454,4 +533,54 @@ func (s *passthroughStream) maskedAsRead(held, out [][]byte, runs []openRun, pri
 		}
 	}
 	return true
+}
+
+// rawForwardLaneText reads OpenAI chat frames as raw-forward does, with
+// one lane per choice and field, for safe masking of a parked reasoning run.
+func rawForwardLaneText(frames [][]byte) map[responseLane]string {
+	var acc responseText
+	for _, frame := range frames {
+		for _, payload := range rawForwardSSEDataPayloads(frame) {
+			if payload == "[DONE]" {
+				continue
+			}
+			pieces, _, _ := parseRawForwardSSEPayload(payload)
+			acc.AddAll(pieces)
+		}
+	}
+	out := make(map[responseLane]string, len(acc.index))
+	for lane, i := range acc.index {
+		out[lane] = acc.lanes[i].String()
+	}
+	return out
+}
+
+// maskRawForwardReasoning masks only unresolved reasoning bytes in queued
+// OpenAI chat frames. The raw-forward reader must see no other text change.
+func maskRawForwardReasoning(frames [][]byte, runs []openRun, prior map[int][2]int) ([][]byte, bool) {
+	if len(runs) == 0 {
+		return nil, false
+	}
+	m := newRunMask(runs)
+	out := make([][]byte, len(frames))
+	for i := len(frames) - 1; i >= 0; i-- {
+		ev, ok := m.maskSSEEvent(frames[i], false)
+		if !ok {
+			return nil, false
+		}
+		out[i] = ev
+	}
+	for i, left := range m.left {
+		if left == "" {
+			continue
+		}
+		prev, ok := prior[runs[i].lane]
+		if !ok || prev[0] != runs[i].start || runs[i].start+len(left) > prev[1] {
+			return nil, false
+		}
+	}
+	if !maskedLaneTextAsRead(rawForwardLaneText(frames), rawForwardLaneText(out), runs, prior) {
+		return nil, false
+	}
+	return out, true
 }

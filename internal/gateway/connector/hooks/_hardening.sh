@@ -355,9 +355,12 @@ defenseclaw_harden_env() {
   export HOME="$DEFENSECLAW_HOOK_HOME"
   # A managed hook's exit handler maps unexpected exits to the fail mode and
   # runs this cleanup itself; replacing it here would let bash's own exit
-  # status decide the outcome.
+  # status decide the outcome. So does the exit guard of a per-user or
+  # standalone managed hook (_dc_hook_on_exit, GAP-1734).
   if declare -F _dc_managed_on_exit >/dev/null 2>&1; then
     trap '_dc_managed_on_exit' EXIT
+  elif declare -F _dc_hook_on_exit >/dev/null 2>&1; then
+    trap '_dc_hook_on_exit' EXIT
   else
     trap '_defenseclaw_hook_cleanup' EXIT
   fi
@@ -4032,7 +4035,6 @@ _dc_gateway_post_once() {
     _dc_hook_elapsed_ms
     [ "$_DC_ELAPSED_MS" -ge 0 ] || _DC_ELAPSED_MS=0
     local _dc_post_remaining=$(( _dc_post_max_time - (_DC_ELAPSED_MS + 999) / 1000 ))
-    [ "$_dc_post_remaining" -gt 0 ] || return 28
     # The same bound in milliseconds, for the helper (GAP-2279): the whole
     # seconds above round the shell's own time up, so a call that spent
     # 0.4 s reading a large body gave the helper only 2 s of its available
@@ -4043,8 +4045,17 @@ _dc_gateway_post_once() {
     if [ "$_dc_post_max_time" -le 4 ]; then
       _dc_post_remaining_ms=$(( _dc_post_remaining_ms - 250 ))
     fi
-    if [ "$_dc_post_remaining_ms" -lt $(( _dc_post_remaining * 1000 )) ]; then
-      _dc_post_remaining_ms=$(( _dc_post_remaining * 1000 ))
+    if [ "$_dc_post_remaining" -gt 0 ]; then
+      if [ "$_dc_post_remaining_ms" -lt $(( _dc_post_remaining * 1000 )) ]; then
+        _dc_post_remaining_ms=$(( _dc_post_remaining * 1000 ))
+      fi
+    else
+      # Less than a whole second is left (a resend after a 429's Retry-After
+      # on a loaded host): the helper still gets the milliseconds after its
+      # startup reserve, with --max-time 1 for its flag check, instead of the
+      # call failing as a timeout with most of a second unused (GAP-1460).
+      [ "$_dc_post_remaining_ms" -gt 0 ] || return 28
+      _dc_post_remaining=1
     fi
     # The executable that receives the bearer is the gateway setup recorded
     # beside this hook (.gateway-helper, defenseclaw_gateway_binary, which

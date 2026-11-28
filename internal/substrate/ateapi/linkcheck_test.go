@@ -22,7 +22,7 @@ import (
 	// The OpenShell SDK options the gateway links. Both registering
 	// extension 50000 on the descriptor options made this test binary, and
 	// every gateway, panic at init (GAP-0014).
-	_ "github.com/NVIDIA/OpenShell/sdk/go/proto/optionsv1"
+	_ "github.com/ai-openshell/sdk-go/proto/optionsv1"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
 

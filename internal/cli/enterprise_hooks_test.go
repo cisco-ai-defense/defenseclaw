@@ -27,14 +27,12 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 var testEnterpriseHookManifestSHA256 = strings.Repeat("a", sha256.Size*2)
 
 func TestWriteEnterpriseHookGuardianState(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("enterprise hook guardian persistence is unsupported on native Windows; lifecycle gate coverage remains active")
-	}
 	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	dir := t.TempDir()
 	authorizationDir := t.TempDir()
@@ -76,13 +74,14 @@ func TestWriteEnterpriseHookGuardianState(t *testing.T) {
 	}
 	if info, statErr := os.Stat(authorizationDir); statErr != nil {
 		t.Fatalf("stat authorization dir: %v", statErr)
-	} else if got := info.Mode().Perm(); got != 0o750 {
+	} else if got := info.Mode().Perm(); runtime.GOOS != "windows" && got != 0o750 {
+		// Windows mode bits do not represent the folder's DACL.
 		t.Fatalf("authorization dir mode = %o, want 750", got)
 	}
 	authorizationPath := filepath.Join(authorizationDir, hookGuardianAuthorizationFile)
 	if info, statErr := os.Stat(authorizationPath); statErr != nil {
 		t.Fatalf("stat authorization file: %v", statErr)
-	} else if got := info.Mode().Perm(); got != 0o640 {
+	} else if got := info.Mode().Perm(); runtime.GOOS != "windows" && got != 0o640 {
 		t.Fatalf("authorization file mode = %o, want 640", got)
 	}
 	var authorization enterpriseHookGuardianAuthorization
@@ -144,9 +143,6 @@ func TestWriteEnterpriseHookGuardianState(t *testing.T) {
 }
 
 func TestWriteEnterpriseHookGuardianStateAcceptsExplicitPendingTarget(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("enterprise hook guardian persistence is unsupported on native Windows; lifecycle gate coverage remains active")
-	}
 	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	dataDir := t.TempDir()
 	authorizationDir := t.TempDir()
@@ -442,9 +438,6 @@ func TestEnterpriseHookGuardianFailureIssuesExposeTargetCause(t *testing.T) {
 }
 
 func TestWriteEnterpriseHookGuardianStateDoesNotAuthorizeFailedEnrollmentPublication(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("enterprise hook guardian persistence is unsupported on native Windows; lifecycle gate coverage remains active")
-	}
 	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	dataDir := t.TempDir()
 	authorizationDir := t.TempDir()
@@ -881,9 +874,6 @@ func TestCompareEnterpriseHookGuardianRecordsRequiresExactActivationIdentity(t *
 }
 
 func TestWriteEnterpriseHookGuardianStateRefusesSymlink(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("enterprise hook guardian symlink writer is unreachable on native Windows; lifecycle gate coverage remains active")
-	}
 	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	dir := t.TempDir()
 	t.Setenv(hookGuardianAuthorizationDirEnv, t.TempDir())
@@ -891,9 +881,7 @@ func TestWriteEnterpriseHookGuardianStateRefusesSymlink(t *testing.T) {
 	if err := os.WriteFile(outside, []byte("{}"), 0o600); err != nil {
 		t.Fatalf("write outside: %v", err)
 	}
-	if err := os.Symlink(outside, filepath.Join(dir, hookGuardianStateFile)); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
+	testenv.Symlink(t, outside, filepath.Join(dir, hookGuardianStateFile))
 	err := writeEnterpriseHookGuardianState(
 		dir,
 		"manifest.yaml",
@@ -902,8 +890,14 @@ func TestWriteEnterpriseHookGuardianStateRefusesSymlink(t *testing.T) {
 		0,
 		true,
 	)
-	if err == nil || !strings.Contains(err.Error(), "refusing to write through symlink") {
-		t.Fatalf("writeEnterpriseHookGuardianState error = %v, want symlink refusal", err)
+	// Native Windows refuses the link through the protected-machine-file check
+	// (a link is not a regular file); the other hosts refuse it by name.
+	want := "refusing to write through symlink"
+	if runtime.GOOS == "windows" {
+		want = "protected machine file is not a regular non-link file"
+	}
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("writeEnterpriseHookGuardianState error = %v, want %q", err, want)
 	}
 }
 
@@ -911,11 +905,19 @@ func stubEnterpriseHookAuthorizationTrustForTempDir(t *testing.T) {
 	t.Helper()
 	originalDirTrust := enterpriseHookAuthorizationDirTrustCheck
 	originalFileTrust := enterpriseHookAuthorizationFileTrustCheck
+	originalOwnershipSetter := enterpriseHookAuthorizationOwnershipSetter
 	enterpriseHookAuthorizationDirTrustCheck = func(string) error { return nil }
 	enterpriseHookAuthorizationFileTrustCheck = func(string) error { return nil }
+	if runtime.GOOS == "windows" {
+		// The Windows setter hands the folder to the pinned gateway NT SERVICE
+		// account, which a test account does not have; the ownership step has
+		// its own native tests.
+		enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
+	}
 	t.Cleanup(func() {
 		enterpriseHookAuthorizationDirTrustCheck = originalDirTrust
 		enterpriseHookAuthorizationFileTrustCheck = originalFileTrust
+		enterpriseHookAuthorizationOwnershipSetter = originalOwnershipSetter
 	})
 }
 
@@ -1280,14 +1282,10 @@ func TestEnterpriseHookAuthorizationRejectsSparseOversizedInput(t *testing.T) {
 	}
 }
 
+// rel-1-0-10:GAP-1515: on Windows the custody is the protected DACL the
+// gateway service reads (enterprise_hooks_token_fixture_windows_test.go).
 func TestEnterpriseHookScopedTokenUsesManagedDataDir(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("enterprise hook scoped tokens are unsupported on native Windows; lifecycle gate coverage remains active")
-	}
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatalf("chmod managed data dir: %v", err)
-	}
+	dir := enterpriseHookTokenTestDataDir(t)
 	token, err := enterpriseHookScopedToken(dir, "codex")
 	if err != nil {
 		t.Fatalf("enterpriseHookScopedToken: %v", err)
@@ -1306,21 +1304,11 @@ func TestEnterpriseHookScopedTokenUsesManagedDataDir(t *testing.T) {
 	if strings.TrimSpace(string(data)) != token {
 		t.Fatalf("token file = %q, want generated token", strings.TrimSpace(string(data)))
 	}
-	if info, err := os.Stat(path); err != nil {
-		t.Fatalf("stat scoped token: %v", err)
-	} else if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("scoped token mode = %o, want 600", got)
-	}
+	assertEnterpriseHookSecretCustody(t, dir, path, "hook token")
 }
 
 func TestEnterpriseHookScopedOTLPTokenUsesManagedDataDir(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("enterprise OTLP scoped tokens are unsupported on native Windows; lifecycle gate coverage remains active")
-	}
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatalf("chmod managed data dir: %v", err)
-	}
+	dir := enterpriseHookTokenTestDataDir(t)
 	token, err := enterpriseHookScopedOTLPToken(dir, "codex")
 	if err != nil {
 		t.Fatalf("enterpriseHookScopedOTLPToken: %v", err)
@@ -1339,11 +1327,7 @@ func TestEnterpriseHookScopedOTLPTokenUsesManagedDataDir(t *testing.T) {
 	if strings.TrimSpace(string(data)) != token {
 		t.Fatalf("token file does not contain the returned token")
 	}
-	if info, err := os.Stat(path); err != nil {
-		t.Fatalf("stat scoped OTLP token: %v", err)
-	} else if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("scoped OTLP token mode = %o, want 600", got)
-	}
+	assertEnterpriseHookSecretCustody(t, dir, path, "OTLP token")
 	if token, err := enterpriseHookScopedOTLPToken(dir, "cursor"); err != nil || token != "" {
 		t.Fatalf("non-OTLP connector token = %q, %v; want empty", token, err)
 	}

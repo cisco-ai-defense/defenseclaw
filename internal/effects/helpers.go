@@ -6,44 +6,6 @@ package effects
 
 import "strings"
 
-// wrapperSpec says how to skip a launcher's own options so the inner program is
-// found correctly (review PX-7): which flags consume a value, how many leading
-// positionals to skip (timeout DURATION, ssh host, chroot dir), and whether
-// NAME=val assignments precede the program (env).
-type wrapperSpec struct {
-	kind      wrapperKind
-	valFlags  map[string]bool
-	posSkip   int
-	envAssign bool
-	// shorts lists the single-letter switches the wrapper accepts. Any other
-	// short flag may take a value we cannot see, so it is unaccounted (the
-	// wrapper allowlist is closed, round 8 G).
-	shorts string
-}
-
-// The wrapper table is an allowlist: a launcher not listed here is the inner
-// program itself and, being unmodeled, is not fully known. A listed wrapper is
-// transparent only for the options named here.
-var wrapperSpecs = map[string]wrapperSpec{
-	"sudo":    {kind: wrapIdentity, valFlags: set("-u", "-g", "-C", "-h", "-p", "-r", "-t", "-U", "-D", "--user", "--group", "--chdir"), shorts: "AbEeHiKklnPSsVvB"},
-	"doas":    {kind: wrapIdentity, valFlags: set("-u", "-C"), shorts: "nsL"},
-	"env":     {kind: wrapPlain, valFlags: set("-u", "-C", "--unset", "--chdir"), envAssign: true, shorts: "i0v"},
-	"nohup":   {kind: wrapPlain},
-	"setsid":  {kind: wrapPlain, shorts: "cfw"},
-	"nice":    {kind: wrapPlain, valFlags: set("-n", "--adjustment")},
-	"ionice":  {kind: wrapPlain, valFlags: set("-c", "-n", "-p"), shorts: "t"},
-	"timeout": {kind: wrapPlain, valFlags: set("-s", "-k", "--signal", "--kill-after"), posSkip: 1, shorts: "fpv"},
-	"stdbuf":  {kind: wrapPlain, valFlags: set("-i", "-o", "-e")},
-	"command": {kind: wrapPlain, shorts: "pvV"},
-	"builtin": {kind: wrapPlain},
-	"exec":    {kind: wrapPlain, valFlags: set("-a"), shorts: "cl"},
-	"time":    {kind: wrapPlain, shorts: "pv"},
-	"xargs":   {kind: wrapInput, valFlags: set("-n", "-I", "-i", "-P", "-a", "-s", "-L", "-d", "-E", "--max-args", "--replace", "--max-procs"), shorts: "0rtpxo"},
-	"chroot":  {kind: wrapForeign, posSkip: 1},
-	"ssh":     {kind: wrapForeign, valFlags: set("-i", "-p", "-o", "-l", "-F", "-L", "-R", "-D", "-b", "-c", "-m", "-O", "-Q", "-w", "-e", "-J", "-W"), posSkip: 1, shorts: "46AaCfGgKkMNnqsTtVvXxYy"},
-	"wsl":     {kind: wrapForeign, valFlags: set("-u", "-d", "--user", "--distribution"), envAssign: false},
-}
-
 func set(xs ...string) map[string]bool {
 	m := make(map[string]bool, len(xs))
 	for _, x := range xs {
@@ -52,14 +14,24 @@ func set(xs ...string) map[string]bool {
 	return m
 }
 
-// stripWrappers peels known launchers off the front, returning the inner argv,
-// the stripped wrapper names, and whether the inner command runs in a foreign
-// context or takes its operands from input. It also records on w.spec the
-// environment and working-directory changes the wrappers apply to the child
-// they start (env -i / -u / NAME=val, sudo's environment reset, sudo -i), so
-// nested code is walked with the child's environment, not the shell's
-// (round 8 E, G).
+// wrapperOutput is a file a wrapper itself writes (time -o FILE, the script
+// typescript), emitted with the command's own effects.
+type wrapperOutput struct {
+	word Word
+	role Role
+}
+
+// stripWrappers peels the wrapper rows of the program table off the front
+// (DESIGN D2), returning the inner argv, the stripped wrapper names, and
+// whether the inner command runs in a foreign context or takes its operands
+// from input. It also records on w.spec the environment and working-folder
+// changes the wrappers apply to the child they start (env -i / -u / NAME=val,
+// sudo's environment reset, sudo -i, env -C, sudo -D, a login shell through
+// exec -a), and on w.wrapOuts the files a wrapper writes itself. A wrapper
+// whose child is shell text (script -c, flock -c, watch) hands back the
+// child as `sh -c TEXT`, so the shell row reads it like any nested body.
 func (w *walker) stripWrappers(words []Word) (inner []Word, wrappers []string, foreign, fromInput, unaccounted bool) {
+	w.wrapOuts = w.wrapOuts[:0]
 	i := 0
 	for i < len(words) {
 		wd := words[i]
@@ -67,162 +39,419 @@ func (w *walker) stripWrappers(words []Word) (inner []Word, wrappers []string, f
 			break
 		}
 		name := programBasename(wd.Value, w.o.flavor())
-		spec, ok := wrapperSpecs[name]
-		if !ok {
+		row, ok := wrapperTable[name]
+		if !ok || !row.applies(words[i+1:]) {
 			break
 		}
+		if row.userOperand {
+			p := wrapperParse{w: w, row: row, name: name}
+			user := p.options(words, i+1)
+			if user < len(words) && words[user].Static && (words[user].Value == "root" || words[user].Value == "0") {
+				break // keep the root su form at its existing program-row floor
+			}
+		}
+		start := i
 		wrappers = append(wrappers, name)
-		switch spec.kind {
+		switch row.kind {
 		case wrapForeign:
 			foreign = true
 		case wrapInput:
 			fromInput = true
 		case wrapIdentity:
-			// sudo / doas reset the environment (HOME becomes the target user's):
-			// nothing the shell knows reaches the child, unless -E keeps it (and
-			// even then HOME is not trusted). The flags below refine this.
+			// sudo / doas / runuser reset the environment (HOME becomes the target
+			// user's): nothing the shell knows reaches the child, unless -E keeps
+			// it (and even then HOME is not trusted). The options refine this.
 			w.spec.clear = true
 		}
 		i++
-		// consume this wrapper's own flags and env assignments.
-		for i < len(words) {
-			nw := words[i]
-			if !nw.Static {
-				break
-			}
-			v := nw.Value
-			if v == "--" {
-				i++
-				break
-			}
-			if spec.envAssign && strings.Contains(v, "=") && !strings.HasPrefix(v, "-") {
-				// env NAME=val sets the child's environment; CDPATH also changes how
-				// a relative cd inside it resolves -> dynamic (review 6 B, V4).
-				eq := strings.IndexByte(v, '=')
-				if v[:eq] == "CDPATH" {
-					w.cdpathMaybeSet = true
-				}
-				w.spec.set(v[:eq], v[eq+1:], true)
-				i++
-				continue
-			}
-			if strings.HasPrefix(v, "-") && v != "-" {
-				fn := v
-				inline := ""
-				hasInline := false
-				if eq := strings.IndexByte(v, '='); eq > 0 {
-					fn = v[:eq]
-					inline = v[eq+1:]
-					hasInline = true
-				}
-				w.wrapperFlag(name, fn, v, spec, &unaccounted)
-				chdirFlag := (name == "env" && (fn == "-C" || fn == "--chdir")) || (name == "sudo" && (fn == "-D" || fn == "--chdir"))
-				if hasInline {
-					if name == "env" && fn == "--unset" {
-						w.spec.set(inline, "", false)
-					}
-					if chdirFlag {
-						w.spec.chdir, w.spec.chdirSet = inline, true
-					}
-					i++
-					continue
-				}
-				i++
-				if spec.valFlags[fn] && i < len(words) {
-					if name == "env" && (fn == "-u" || fn == "--unset") && words[i].Static {
-						w.spec.set(words[i].Value, "", false)
-					}
-					if chdirFlag {
-						if words[i].Static {
-							w.spec.chdir, w.spec.chdirSet = words[i].Value, true
-						} else {
-							w.spec.cwdDyn = true
-						}
-					}
-					i++ // consume the flag's value
-				}
-				continue
-			}
-			if v == "-" && name == "env" {
-				w.spec.clear = true // env - is env -i
-				i++
-				continue
-			}
-			break
+		if row.sub != "" {
+			i++ // uv run: the subcommand word
 		}
-		// skip leading positionals (DURATION, host, dir).
-		for s := 0; s < spec.posSkip && i < len(words); s++ {
-			i++
+		p := wrapperParse{w: w, row: row, name: name}
+		i = p.options(words, i)
+		if row.userOperand && i < len(words) {
+			if words[i].Static && words[i].Value != "" && !strings.HasPrefix(words[i].Value, "-") {
+				p.markForeignUser(words[i])
+				i++
+				i = p.options(words, i)
+			} else if !words[i].Static {
+				p.unaccounted = true // an unknown account cannot be graded as a named foreign user
+			}
+		}
+		foreign = foreign || p.foreignUser
+		unaccounted = unaccounted || p.unaccounted
+		var child []Word
+		child, i = p.child(words, i)
+		unaccounted = unaccounted || p.unaccounted
+		if p.login && i < len(words) && words[i].Static && shellPrograms[programBasename(words[i].Value, w.o.flavor())] {
+			w.spec.cwdDyn = true // a login shell reads profile files that may change its folder
+		}
+		if child != nil {
+			if len(child) == 0 {
+				// no child we can read (script with no -c, watch with no command):
+				// the launcher is the program, unmodeled, so never clean.
+				w.wrapOuts = w.wrapOuts[:0]
+				return words[start:], wrappers[:len(wrappers)-1], foreign, fromInput, true
+			}
+			return child, wrappers, foreign, fromInput, unaccounted
+		}
+		if p.replace != "" {
+			words = append(words[:i:i], replacedWords(words[i:], p.replace)...)
 		}
 	}
 	return words[i:], wrappers, foreign, fromInput, unaccounted
 }
 
-// wrapperFlag accounts for one wrapper option token (v) with name fn: it marks
-// the command unaccounted when the option is outside the wrapper's allowlist
-// and applies the options that change the child's environment or directory.
-func (w *walker) wrapperFlag(wrapper, fn, v string, spec wrapperSpec, unaccounted *bool) {
-	if strings.HasPrefix(fn, "--") {
-		if !spec.valFlags[fn] {
-			// An unmodeled long wrapper option may change the command's behaviour
-			// (cwd, identity, environment): not fully known (review R5-1), except
-			// the few switches whose meaning is modeled below.
-			switch {
-			case wrapper == "env" && fn == "--ignore-environment":
-				w.spec.clear = true
-			case wrapper == "sudo" && (fn == "--preserve-env" || fn == "--login" || fn == "--set-home" || fn == "--shell" || fn == "--background" || fn == "--non-interactive" || fn == "--reset-timestamp" || fn == "--remove-timestamp" || fn == "--stdin" || fn == "--askpass"):
-				w.sudoFlag(fn)
-			case wrapper == "xargs" && (fn == "--null" || fn == "--no-run-if-empty" || fn == "--verbose" || fn == "--interactive" || fn == "--exit"):
-			case wrapper == "timeout" && (fn == "--foreground" || fn == "--preserve-status" || fn == "--verbose"):
-			default:
-				*unaccounted = true
+// wrapperParse reads one wrapper's own words against its row.
+type wrapperParse struct {
+	w           *walker
+	row         Wrapper
+	name        string
+	unaccounted bool
+	login       bool
+	appendOut   bool
+	foreignUser bool
+	shellText   *Word  // the value of a shell-text option (script -c, flock -c)
+	execMode    bool   // watch -x: the child words are an argv, not shell text
+	replace     string // xargs -I STR: the child words holding STR get a name from input
+	outs        []wrapperOutput
+}
+
+// options consumes the wrapper's options from words[i:] and returns the index
+// of the first word after them. Options end at the first operand: every
+// wrapper row reads its child from there (getopt "+" or a builtin).
+func (p *wrapperParse) options(words []Word, i int) int {
+	row := p.row
+	for i < len(words) {
+		nw := words[i]
+		if !nw.Static {
+			// env NAME=$V: the child gets NAME with a value we cannot see; the
+			// child word after it is still read (GAP-0972).
+			if row.envAssign {
+				if n, ok := dynamicAssignName(nw); ok {
+					if n == "CDPATH" {
+						p.w.cdpathMaybeSet = true
+					}
+					p.w.spec.set(n, "", false)
+					i++
+					continue
+				}
 			}
+			break
 		}
-		return
-	}
-	// short option(s)
-	body := v[1:]
-	if len(body) == 0 {
-		return
-	}
-	if spec.valFlags[v[:2]] && len(v) == 2 {
-		return // a valued option; the caller consumes its value
-	}
-	if wrapper == "env" && v[:2] == "-C" {
-		w.spec.chdir, w.spec.chdirSet = v[2:], true // fused -Cdir
-		return
-	}
-	for _, ch := range body {
-		if wrapper == "nice" && ch >= '0' && ch <= '9' {
-			continue // the legacy `nice -5` adjustment
+		v := nw.Value
+		if v == "--" {
+			return i + 1
 		}
-		if !strings.ContainsRune(spec.shorts, ch) {
-			if spec.valFlags["-"+string(ch)] && len(body) == 1 {
-				continue
+		if row.envAssign && strings.Contains(v, "=") && !strings.HasPrefix(v, "-") {
+			// env NAME=val sets the child's environment; CDPATH also changes how
+			// a relative cd inside it resolves -> dynamic (review 6 B, V4).
+			eq := strings.IndexByte(v, '=')
+			if v[:eq] == "CDPATH" {
+				p.w.cdpathMaybeSet = true
 			}
-			*unaccounted = true
+			if row.kind == wrapIdentity {
+				// sudo NAME=val: the security policy decides whether the child
+				// gets val (env_reset, env_check, SETENV) or the target user's
+				// value, so the name is set to a value we cannot see, as for
+				// env NAME=$V (rel-1-0-10:GAP-1478).
+				p.w.spec.set(v[:eq], "", false)
+			} else {
+				p.w.spec.set(v[:eq], v[eq+1:], true)
+			}
+			i++
 			continue
 		}
-		switch {
-		case wrapper == "env" && ch == 'i':
-			w.spec.clear = true
-		case wrapper == "exec" && ch == 'c':
-			w.spec.clear = true // exec -c runs the program with an empty environment
-		case wrapper == "sudo":
-			w.sudoFlag("-" + string(ch))
+		if v == "-" && p.name == "env" {
+			p.w.spec.clear = true // env - is env -i
+			i++
+			continue
 		}
+		if len(v) < 2 || v[0] != '-' {
+			break
+		}
+		if strings.HasPrefix(v, "--") {
+			i = p.long(words, i)
+			continue
+		}
+		i = p.shorts(words, i)
+	}
+	return i
+}
+
+// long reads one --name or --name=value option.
+func (p *wrapperParse) long(words []Word, i int) int {
+	v := words[i].Value
+	fn, inline, hasInline := v, "", false
+	if eq := strings.IndexByte(v, '='); eq > 0 {
+		fn, inline, hasInline = v[:eq], v[eq+1:], true
+	}
+	if full, ok := p.row.longName(fn); ok {
+		fn = full
+	} else {
+		// An unlisted long wrapper option may change the command's behaviour
+		// (cwd, identity, environment): not fully known (review R5-1).
+		p.unaccounted = true
+		return i + 1
+	}
+	if !p.row.isValued(fn) {
+		if hasInline && !p.row.optionalLong(fn) {
+			p.unaccounted = true // a switch given a value
+		}
+		p.apply(fn, Word{Value: inline, Static: true}, hasInline)
+		return i + 1
+	}
+	if hasInline {
+		p.apply(fn, Word{Value: inline, Static: true}, true)
+		return i + 1
+	}
+	if i+1 < len(words) {
+		p.apply(fn, words[i+1], true)
+		return i + 2
+	}
+	p.unaccounted = true // a valued option with no value
+	return i + 1
+}
+
+// shorts reads one cluster of short options (-abc, -oL, -n5, -u USER).
+func (p *wrapperParse) shorts(words []Word, i int) int {
+	v := words[i].Value
+	body := v[1:]
+	for j := 0; j < len(body); j++ {
+		ch := body[j]
+		if p.name == "nice" && ch >= '0' && ch <= '9' {
+			continue // the legacy `nice -5` adjustment
+		}
+		fn := "-" + string(ch)
+		switch {
+		case p.row.isValued(fn):
+			if j+1 < len(body) {
+				p.apply(fn, Word{Value: body[j+1:], Static: true}, true)
+				return i + 1
+			}
+			if i+1 < len(words) {
+				p.apply(fn, words[i+1], true)
+				return i + 2
+			}
+			p.unaccounted = true
+			return i + 1
+		case strings.IndexByte(p.row.optional, ch) >= 0:
+			// an optional value is attached only (xargs -iR, nsenter -mFILE).
+			p.apply(fn, Word{Value: body[j+1:], Static: true}, j+1 < len(body))
+			return i + 1
+		case strings.IndexByte(p.row.shorts, ch) >= 0:
+			p.apply(fn, Word{}, false)
+		default:
+			// Any other short option may take a value we cannot see, so it is
+			// unaccounted (the wrapper allowlist is closed, round 8 G).
+			p.unaccounted = true
+		}
+	}
+	return i + 1
+}
+
+// apply records what one option does to the child.
+func (p *wrapperParse) apply(fn string, val Word, has bool) {
+	row := p.row
+	switch {
+	case has && hasName(row.userOptions, fn):
+		p.markForeignUser(val)
+	case has && hasName(row.chdir, fn):
+		if val.Static {
+			p.w.spec.chdir, p.w.spec.chdirSet = val.Value, true
+		} else {
+			p.w.spec.cwdDyn = true
+		}
+	case hasName(row.login, fn):
+		p.w.spec.cwdDyn = true
+	case hasName(row.clear, fn):
+		p.w.spec.clear = true
+	case hasName(row.keepEnv, fn):
+		p.w.spec.clear = false
+		p.w.spec.dropHome = true
+	case has && hasName(row.unset, fn):
+		if val.Static {
+			p.w.spec.set(val.Value, "", false)
+		}
+	case has && hasName(row.argv0, fn):
+		if !val.Static || strings.HasPrefix(val.Value, "-") {
+			p.login = true // exec -a -bash: a login shell (GAP-1274)
+		}
+	case hasName(row.loginShell, fn):
+		p.login = true
+	case hasName(row.appendOpt, fn):
+		p.appendOut = true
+	case has && hasName(row.shellOpt, fn):
+		vv := val
+		p.shellText = &vv
+	case hasName(row.execOpt, fn):
+		p.execMode = true
+	case hasName(row.replaceOpt, fn):
+		p.replace = "{}"
+		if has && val.Static && val.Value != "" {
+			p.replace = val.Value
+		} else if has && !val.Static {
+			p.replace = "\x00dynamic" // any word may be replaced
+		}
+	}
+	if role, ok := row.outputs[fn]; ok && has {
+		p.outs = append(p.outs, wrapperOutput{word: val, role: role})
 	}
 }
 
-// sudoFlag records the effect of a sudo option on the child it starts.
-func (w *walker) sudoFlag(fn string) {
-	switch fn {
-	case "-E", "--preserve-env":
-		w.spec.clear = false
-		w.spec.dropHome = true
-	case "-i", "--login":
-		w.spec.cwdDyn = true
+func (p *wrapperParse) markForeignUser(user Word) {
+	if !user.Static {
+		p.unaccounted = true
+		return
 	}
+	if user.Value != "root" && user.Value != "0" {
+		p.foreignUser = true
+	}
+}
+
+// child returns the child argv when the wrapper builds it (shell text), or nil
+// with the index of the child word when the child is the next word.
+func (p *wrapperParse) child(words []Word, i int) ([]Word, int) {
+	row := p.row
+	flushOuts := func() {
+		for _, o := range p.outs {
+			if o.role == RoleWrite && p.appendOut {
+				o.role = RoleAppend
+			}
+			p.w.wrapOuts = append(p.w.wrapOuts, o)
+		}
+	}
+	// skip leading positionals (DURATION, host, dir, mask, priority, lock file).
+	for s := 0; s < row.posSkip && i < len(words); s++ {
+		if p.name == "chroot" && s == 0 {
+			// chroot NEWROOT starts the command in / of the new root: the real
+			// / when NEWROOT is /, else a folder the walk cannot place
+			// (rel-1-0-10:GAP-1483: chroot / sh <<E wrote in the caller folder).
+			if words[i].Static && cleanPOSIX(words[i].Value) == "/" {
+				p.w.spec.chdir, p.w.spec.chdirSet = "/", true
+			} else {
+				p.w.spec.cwdDyn = true
+			}
+		}
+		i++
+	}
+	if row.shellAfterSkip && i+1 < len(words) && words[i].Static && (words[i].Value == "-c" || words[i].Value == "--command") {
+		vv := words[i+1]
+		p.shellText = &vv
+		i += 2
+		if i < len(words) {
+			p.unaccounted = true // flock FILE -c TEXT takes nothing after the text
+		}
+	}
+	if row.operandOut != "" {
+		// script [options] [file]: the rest are options or the one file operand
+		// (script permutes its options); the child is the -c text.
+		var operands []Word
+		for i < len(words) {
+			if words[i].Static && len(words[i].Value) > 1 && words[i].Value[0] == '-' {
+				if strings.HasPrefix(words[i].Value, "--") {
+					i = p.long(words, i)
+				} else {
+					i = p.shorts(words, i)
+				}
+				continue
+			}
+			operands = append(operands, words[i])
+			i++
+		}
+		if len(operands) > 1 {
+			p.unaccounted = true
+		}
+		if p.shellText == nil {
+			p.unaccounted = true // an interactive shell: no child we can read
+		}
+		out := Word{Value: row.operandOut, Static: true}
+		if len(operands) > 0 {
+			out = operands[0]
+		}
+		p.outs = append(p.outs, wrapperOutput{word: out, role: RoleWrite})
+		flushOuts()
+		if p.shellText == nil {
+			return []Word{}, len(words)
+		}
+		return shellChild(*p.shellText), len(words)
+	}
+	flushOuts()
+	if p.shellText != nil {
+		return shellChild(*p.shellText), len(words)
+	}
+	if row.joinShell && !p.execMode {
+		// watch CMD ARGS: the words are joined with spaces and run by sh -c.
+		rest := words[i:]
+		if len(rest) == 0 {
+			if row.kind == wrapForeign {
+				return nil, i // ssh HOST: an interactive login, no child word
+			}
+			return []Word{}, len(words)
+		}
+		parts := make([]string, 0, len(rest))
+		static := true
+		for _, r := range rest {
+			if !r.Static {
+				static = false
+				break
+			}
+			parts = append(parts, r.Value)
+		}
+		code := Word{Static: static, Reason: ReasonDynamicExpansion}
+		if static {
+			code = Word{Value: strings.Join(parts, " "), Static: true}
+		}
+		return shellChild(code), len(words)
+	}
+	return nil, i
+}
+
+// replacedWords marks the child words that hold the replace string of xargs -I
+// as dynamic: their value comes from input. The program word stays, and so
+// does the text of a shell child's -c: the shell row reads that body, where
+// the name is data (the redirections it names stay read).
+func replacedWords(in []Word, repl string) []Word {
+	out := make([]Word, len(in))
+	copy(out, in)
+	shell := len(in) > 0 && in[0].Static && shellPrograms[programBasename(in[0].Value, FlavorPOSIX)]
+	for k := 1; k < len(out); k++ {
+		if shell && out[k-1].Static && out[k-1].Value == "-c" {
+			continue
+		}
+		if repl == "\x00dynamic" || out[k].Static && strings.Contains(out[k].Value, repl) {
+			out[k] = Word{Reason: ReasonDynamicExpansion, Span: out[k].Span}
+		}
+	}
+	return out
+}
+
+// shellChild is the argv `sh -c TEXT` a wrapper runs its shell text with.
+func shellChild(text Word) []Word {
+	return []Word{{Value: "sh", Static: true}, {Value: "-c", Static: true}, text}
+}
+
+// dynamicAssignName returns NAME for a word NAME=<expansion> whose name part
+// is a literal (env FOO=$V).
+func dynamicAssignName(wd Word) (string, bool) {
+	if len(wd.Segs) == 0 || wd.Segs[0].Var != "" || wd.Segs[0].Quoted {
+		return "", false
+	}
+	lit := wd.Segs[0].Lit
+	eq := strings.IndexByte(lit, '=')
+	if eq <= 0 || !plainIdent(lit[:eq]) {
+		return "", false
+	}
+	return lit[:eq], true
+}
+
+func hasName(xs []string, x string) bool {
+	for _, y := range xs {
+		if y == x {
+			return true
+		}
+	}
+	return false
 }
 
 // programBasename takes the basename of a program path and folds case for
@@ -272,8 +501,27 @@ func flagLookup(p Program, name string, dialect Dialect) (Flag, bool) {
 		}
 		return Flag{}, false
 	}
-	fl, ok := p.Flags[key]
+	_, fl, ok := flagResolve(p, key)
 	return fl, ok
+}
+
+// flagResolve finds a POSIX flag in a row: the exact name, or for a GNU tool a
+// long option it is an unambiguous prefix of (getopt_long), returned with its
+// full name. The prefix must be unambiguous among all the tool's long options,
+// not only the row's (a prefix of two is an error in the tool).
+func flagResolve(p Program, key string) (string, Flag, bool) {
+	if fl, ok := p.Flags[key]; ok {
+		return key, fl, true
+	}
+	if len(p.Longs) == 0 || !strings.HasPrefix(key, "--") {
+		return key, Flag{}, false
+	}
+	full, ok := resolveLong(key, p.Longs)
+	if !ok {
+		return key, Flag{}, false
+	}
+	fl, ok := p.Flags[full]
+	return full, fl, ok
 }
 
 func collectExecArgv(words []Word) []Word {

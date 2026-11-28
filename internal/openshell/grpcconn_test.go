@@ -27,8 +27,8 @@ import (
 	"testing"
 	"time"
 
-	dm "github.com/NVIDIA/OpenShell/sdk/go/proto/datamodelv1"
-	pb "github.com/NVIDIA/OpenShell/sdk/go/proto/openshellv1"
+	dm "github.com/ai-openshell/sdk-go/proto/datamodelv1"
+	pb "github.com/ai-openshell/sdk-go/proto/openshellv1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -162,7 +162,11 @@ func TestProbeClientAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	closedEndpoint := "https://" + closed.Addr().String()
-	_ = closed.Close()
+	// Hold the port while the table below starts its servers: the kernel
+	// hands a freed port out again, and a gateway that answers on it would
+	// make "nothing listening" report an exposed gateway. The case closes it
+	// right before its probe.
+	t.Cleanup(func() { _ = closed.Close() })
 
 	refusing := apiServer{requireCert: true}
 	cases := []struct {
@@ -173,6 +177,8 @@ func TestProbeClientAuth(t *testing.T) {
 		// in the error.
 		ok, exposed bool
 		want        string
+		// before runs after the registration is read and just before the probe.
+		before func()
 	}{
 		{name: "TLS 1.3 gateway requires a certificate", endpoint: startGateway(t, pki, tls.RequireAndVerifyClientCert, 0, false), ok: true},
 		{name: "TLS 1.2 gateway requires a certificate", endpoint: startGateway(t, pki, tls.RequireAndVerifyClientCert, tls.VersionTLS12, false), ok: true},
@@ -185,12 +191,16 @@ func TestProbeClientAuth(t *testing.T) {
 		{name: "certificate not requested", endpoint: startGateway(t, pki, tls.NoClientCert, 0, false), exposed: true},
 		{name: "silent server without client auth", endpoint: startSilentTLS(t, pki), exposed: true},
 		{name: "plaintext gateway", endpoint: startGateway(t, pki, 0, 0, true)},
-		{name: "nothing listening", endpoint: closedEndpoint},
+		{name: "nothing listening", endpoint: closedEndpoint, before: func() { _ = closed.Close() }},
 		{name: "server certificate from another CA", endpoint: startGateway(t, newPKI(t), tls.RequireAndVerifyClientCert, 0, false)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := openshell.ProbeClientAuth(context.Background(), probeRegistration(t, tc.endpoint, pki))
+			reg := probeRegistration(t, tc.endpoint, pki)
+			if tc.before != nil {
+				tc.before()
+			}
+			err := openshell.ProbeClientAuth(context.Background(), reg)
 			if tc.ok != (err == nil) || tc.exposed != errors.Is(err, openshell.ErrGatewayExposed) || err != nil && !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("ProbeClientAuth = %v, want ok=%v exposed=%v %q", err, tc.ok, tc.exposed, tc.want)
 			}

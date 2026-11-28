@@ -20,9 +20,9 @@ import (
 // the accept queue shortly before the deadline. A slow read (the record
 // lookup of a busy host) is not cut by the deadline: the own frozen gateway
 // of the account stays an outage and is not blamed on another process. A
-// lookup that outlasts the grace has shown neither the own gateway nor another
-// process, and nothing was sent: it is the same outage, and the outage mode of
-// the account decides (errPerUserOwnerScanUnfinished).
+// lookup that outlasts the grace has not tied the listener to the gateway and
+// is refused (TestOwnerScanOutlastingTheGraceBeforeTheRecordedHolderIsShownIsRefused,
+// GAP-1534).
 func TestSlowOwnerReadOfTheOwnFrozenGatewayStaysAnOutage(t *testing.T) {
 	addr := frozenListener(t)
 	dataDir := recordGateway(t, os.Getpid(), nil)
@@ -34,7 +34,6 @@ func TestSlowOwnerReadOfTheOwnFrozenGatewayStaysAnOutage(t *testing.T) {
 		{"prompt lookup", 0, false},
 		{"first read finds no record", 0, true},
 		{"lookup past the connect deadline", 1200 * time.Millisecond, false},
-		{"lookup that outlasts the grace", ownerScanGrace + 600*time.Millisecond, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var reads atomic.Int32

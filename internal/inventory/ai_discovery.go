@@ -590,6 +590,10 @@ const (
 // sidecar-scoped so CLI/TUI/API callers all see the same state and OTel fanout.
 type ContinuousDiscoveryService struct {
 	opts AIDiscoveryOptions
+	// agentHomes is the last agent folder variables each user was seen to
+	// save (ai_agent_homes_state.go).
+	agentHomesMu sync.Mutex
+	agentHomes   map[string]map[string]string
 	// homeOwnersMu guards opts.homeOwners against EnrolledAccounts, which
 	// the runtime planes call from their own goroutine while a scan renames
 	// the owners (refreshHomeOwnerNames).
@@ -626,12 +630,23 @@ type ContinuousDiscoveryService struct {
 	// runtime remains the sole owner of signal records.
 	managedInventoryEmitMu sync.RWMutex
 	managedInventoryEmit   func(context.Context)
+	// skillInventoryEmit publishes the endpoint inventory after each full
+	// scan where managedInventoryEmit is not installed (a gateway outside
+	// managed_enterprise).
+	// Unlike that hook it changes neither the scan cadence nor what a scan
+	// saves.
+	skillInventoryEmit func(context.Context)
 	// skillFactsSeen keeps one skill scan's folder facts by path: a shared
 	// folder such as ~/.agents/skills is walked once per agent reading it.
 	skillFactsMu   sync.Mutex
 	skillFactsSeen map[string]AISkillFacts
 	skillBytesRead int64
 	skillManifests map[string]string // SKILL.md hash -> exact root manifest leaf path
+	// skillHashCache keeps each skill folder's hash across scans while the
+	// folder is unchanged (GAP-1816).
+	skillHashCache map[string]skillHashCacheEntry
+	// skillClock replaces time.Now for the skill hash cache in a test.
+	skillClock func() time.Time
 	// modelAPIProbeCursor rotates origins and catalogs across bounded passes so
 	// a stalled or over-cap loopback provider cannot starve later providers.
 	modelAPIProbeCursor  atomic.Uint64
@@ -1499,7 +1514,7 @@ func (s *ContinuousDiscoveryService) fanoutReport(ctx context.Context, report AI
 	// the hook without an aiRestart. Hook-presence is the same
 	// live-mode indicator the hook-fire path below uses.
 	s.managedInventoryEmitMu.RLock()
-	emit := s.managedInventoryEmit
+	emit, skillEmit := s.managedInventoryEmit, s.skillInventoryEmit
 	s.managedInventoryEmitMu.RUnlock()
 	// managed_enterprise (live: hook installed) ships the endpoint
 	// inventory to AI Defense on the FULL-scan cadence
@@ -1553,6 +1568,8 @@ func (s *ContinuousDiscoveryService) fanoutReport(ctx context.Context, report AI
 	// the hook fire to disagree within one fanout.
 	if emit != nil {
 		emit(ctx)
+	} else if full && skillEmit != nil {
+		skillEmit(ctx)
 	}
 }
 
@@ -1574,6 +1591,19 @@ func (s *ContinuousDiscoveryService) SetManagedInventoryEmitHook(fn func(context
 	}
 	s.managedInventoryEmitMu.Lock()
 	s.managedInventoryEmit = fn
+	s.managedInventoryEmitMu.Unlock()
+}
+
+// SetSkillInventoryEmitHook installs the sidecar callback that publishes the
+// endpoint inventory (connectors, MCP servers and tools, skills, plugins)
+// after each full scan of a gateway outside managed_enterprise. A nil
+// callback clears it.
+func (s *ContinuousDiscoveryService) SetSkillInventoryEmitHook(fn func(context.Context)) {
+	if s == nil {
+		return
+	}
+	s.managedInventoryEmitMu.Lock()
+	s.skillInventoryEmit = fn
 	s.managedInventoryEmitMu.Unlock()
 }
 
@@ -2801,14 +2831,6 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildrenIdentity(sig AIS
 				break
 			}
 			for _, entry := range entries {
-				if len(evidence) >= maxEvidencePerSignal {
-					// Cap hit before we processed every child.
-					// Downstream must render "N of M" and must not
-					// treat this as authoritative.
-					partial = true
-					coverageReason = CoverageReasonCapExceeded
-					break
-				}
 				name := sanitizeBasenameValue(entry.Name())
 				if name == "" {
 					continue
@@ -2821,6 +2843,19 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildrenIdentity(sig AIS
 				}
 				if _, synced := claudeSyncedSkills(path); detector == "skill" && synced && entry.Name() == "synced" {
 					continue // scanned per account by detectSkills
+				}
+				// A hidden folder beside the plugins is the agent's own working
+				// state (Codex .remote-plugin-install-staging), not a plugin.
+				if detector == "plugin" && strings.HasPrefix(entry.Name(), ".") {
+					continue
+				}
+				if len(evidence) >= maxEvidencePerSignal {
+					// Cap hit with a child left to keep (skipped entries
+					// above never count). Downstream must render "N of M"
+					// and must not treat this as authoritative.
+					partial = true
+					coverageReason = CoverageReasonCapExceeded
+					break
 				}
 				// Codex uses `.system` as a one-level skill container. Expand
 				// its children instead of presenting the container as a skill.
@@ -2857,11 +2892,6 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildrenIdentity(sig AIS
 	}
 	out := s.signalFromEvidence(sig, category, detector, identityEvidence)
 	out.Evidence = evidence
-	if identityPath != path {
-		// Preserve change detection for updated content while the fingerprint
-		// remains tied to the stable install and its child identities.
-		out.EvidenceHash = hashEvidence(evidence)
-	}
 	s.stampHomeOwner(&out, path)
 	out.Partial = partial
 	out.CoverageReason = coverageReason
@@ -2875,6 +2905,17 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildrenIdentity(sig AIS
 // directoryChildEvidence is the evidence row of the child entry (named name
 // once sanitized) of the skills / rules / plugins folder at parent.
 func (s *ContinuousDiscoveryService) directoryChildEvidence(detector, parent, entry, name string) AIEvidence {
+	ev := s.childEvidenceRow(detector, parent, entry, name)
+	if detector == "skill" {
+		ev.Skill = s.skillFacts(filepath.Join(parent, entry), false)
+	}
+	return ev
+}
+
+// childEvidenceRow is directoryChildEvidence without the skill folder facts.
+// A brokered home's row uses it: the gateway never opens a file in a home
+// the sensor helper reads for it (brokered_homes.go).
+func (s *ContinuousDiscoveryService) childEvidenceRow(detector, parent, entry, name string) AIEvidence {
 	child := filepath.Join(parent, entry)
 	ev := AIEvidence{
 		Type:     detector + "_entry",
@@ -2887,7 +2928,6 @@ func (s *ContinuousDiscoveryService) directoryChildEvidence(detector, parent, en
 		// apart from "walker didn't stamp an origin"
 		// (latter must fail-safe).
 		ev.Origin = "user"
-		ev.Skill = s.skillFacts(child, false)
 	}
 	if s.keepEvidencePath() {
 		ev.RawPath = child
@@ -5466,7 +5506,30 @@ func hashHex(value string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// hashEvidence leaves out the skill folder facts: they describe a skill's
+// content, not which signal it is, so editing a skill or a scan that cannot
+// read its folder (a brokered home) keeps the signal's fingerprint and id.
 func hashEvidence(evidence []AIEvidence) string {
+	rows, cloned := evidence, false
+	for i := range rows {
+		if rows[i].Skill == nil {
+			continue
+		}
+		if !cloned {
+			rows, cloned = slices.Clone(evidence), true
+		}
+		rows[i].Skill = nil
+	}
+	raw, _ := json.Marshal(rows)
+	return hashValue(string(raw))
+}
+
+// hashObservedEvidence hashes the evidence with its skill folder facts. A
+// plugin skill signal uses it as its EvidenceHash, so a content, version or
+// enabled-state change of the plugin reads as changed while the fingerprint
+// and id, built with hashEvidence, stay the same. The facts are digests and
+// bounded metadata lines; no file text goes into the hash input.
+func hashObservedEvidence(evidence []AIEvidence) string {
 	raw, _ := json.Marshal(evidence)
 	return hashValue(string(raw))
 }

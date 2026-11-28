@@ -50,7 +50,7 @@ func TestSkillTurnoverFitsTheManagedLimitAndRetriesOnlyPendingRemovals(t *testin
 			}
 			capture := &removalBatchCapture{failFirst: fail}
 			publish := endpointInventoryCycle{scanID: "turnover", cycle: cycle}
-			rows, err := prepareManagedSkillSnapshot(t.Context(), capture, rows, true, publish)
+			rows, err := prepareManagedSkillSnapshot(t.Context(), capture, rows, true, publish, config.ObservabilityV8ManagedSkillInventoryAction)
 			if (err != nil) != fail {
 				t.Fatalf("batch failure=%v", err)
 			}
@@ -114,7 +114,7 @@ func TestManifestRecoveryOversizedRowsPreserveReceiptHistory(t *testing.T) {
 		rows[i].id = fmt.Sprint(i)
 	}
 	rows[len(rows)-1].skillState = skillStateRemoved
-	rows, err := prepareManagedSkillSnapshot(t.Context(), &removalBatchCapture{failFirst: true}, rows, true, endpointInventoryCycle{scanID: "oversized", cycle: cycle})
+	rows, err := prepareManagedSkillSnapshot(t.Context(), &removalBatchCapture{failFirst: true}, rows, true, endpointInventoryCycle{scanID: "oversized", cycle: cycle}, config.ObservabilityV8ManagedSkillInventoryAction)
 	if err == nil || len(rows) != 513 {
 		t.Fatal("refused removal did not retain the ineligible collection")
 	}

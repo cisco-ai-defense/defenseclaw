@@ -32,6 +32,17 @@ type Effect struct {
 	// Cond is true when this effect runs only on some execution paths (an
 	// if/case/loop/function body, a || alternative, after an unresolved cd).
 	Cond bool `json:"cond,omitempty"`
+	// LinkTarget marks a KindLink effect that names the path a link points
+	// at (ln -s TARGET LINK, mklink LINK TARGET, New-Item -Target), not the
+	// path the link is placed at: the file itself is not changed, it gets a
+	// new name the call may later write or read through.
+	LinkTarget bool `json:"link_target,omitempty"`
+	// Shown marks a read whose bytes reach the call's own output, what the
+	// agent is shown: the last stage that carries them prints them on a
+	// stdout the call neither redirects nor captures in a substitution, and no
+	// program on the way prints only a count, a test or a digest (DET111
+	// GAP-1846: an own credential read raises only when its content flows).
+	Shown bool `json:"shown,omitempty"`
 }
 
 // Target is what an effect acts on.
@@ -45,6 +56,13 @@ type Target struct {
 	// Glob holds the unquoted glob pattern when the operand is a pattern; Path
 	// is then empty and a glob reason is present.
 	Glob string `json:"glob,omitempty"`
+	// Lexical is the lexical candidate of a spelling that is not canonical
+	// (a .. after a component that may be a link, an 8.3-looking name, a //):
+	// the absolute path the spelling names before any link or short name is
+	// resolved, with nothing collapsed. The target stays unknown (F1): only the
+	// resolver may turn it into a physical path, and the protected-set
+	// classifier reads it as a pattern otherwise (DET111 D3).
+	Lexical string `json:"lexical,omitempty"`
 	// Network fields.
 	URL    string `json:"url,omitempty"`
 	Scheme string `json:"scheme,omitempty"`

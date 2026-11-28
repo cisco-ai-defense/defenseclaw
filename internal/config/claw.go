@@ -33,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentpaths"
 	"github.com/defenseclaw/defenseclaw/internal/claudecodepath"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -42,6 +43,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	toml "github.com/pelletier/go-toml/v2"
 )
 
@@ -304,6 +306,15 @@ func (c *Config) ActiveConnectors() []string {
 	return c.activeConnectors()
 }
 
+// PrimaryConnector is the one connector the config names as primary
+// (guardrail.connector, else the roster's primary, else claw.mode), or ""
+// for an install with no connector configured. A command that has to name
+// one connector without being given one (`defenseclaw sandbox status`'s
+// reason sandboxes are off) asks a managed policy view for this one.
+func (c *Config) PrimaryConnector() string {
+	return c.activeConnector()
+}
+
 // ReadMCPServers returns the MCP servers for the active connector.
 // When guardrail.connector is set, it dispatches to the connector-specific
 // reader. An unconfigured install reads no agent state.
@@ -340,7 +351,7 @@ func (c *Config) LookupMCPServerForConnector(connector, workspaceDir, name strin
 	if workspaceDir == "" && c != nil {
 		workspaceDir = c.ConnectorWorkspaceDir()
 	}
-	entries, _ := c.readMCPServersForConnectorIn(connector, workspaceDir)
+	entries := c.readMCPServersForLookup(connector, workspaceDir)
 	for _, e := range entries {
 		if e.Name == name {
 			return e, true
@@ -389,7 +400,7 @@ func (c *Config) LookupMCPToolServerForConnector(connector, workspaceDir, name s
 	if workspaceDir == "" && c != nil {
 		workspaceDir = c.ConnectorWorkspaceDir()
 	}
-	entries, _ := c.readMCPServersForConnectorIn(connector, workspaceDir)
+	entries := c.readMCPServersForLookup(connector, workspaceDir)
 	if entry, ok := lookupMCPToolServer(connector, entries, name); ok {
 		return entry, true
 	}
@@ -408,8 +419,7 @@ func (c *Config) CodexMCPToolServerAmbiguous(workspaceDir, toolServer string) bo
 	if workspaceDir == "" && c != nil {
 		workspaceDir = c.ConnectorWorkspaceDir()
 	}
-	entries, _ := c.readMCPServersForConnectorIn("codex", workspaceDir)
-	return codexMCPToolServerAmbiguous(entries, toolServer)
+	return codexMCPToolServerAmbiguous(c.readMCPServersForLookup("codex", workspaceDir), toolServer)
 }
 
 // CodexMCPToolServerAmbiguousUnderHome uses the managed caller's Codex
@@ -496,6 +506,23 @@ func lookupMCPToolServer(connector string, entries []MCPServerEntry, name string
 		}
 	}
 	return found, found.Name != ""
+}
+
+// readMCPServersForLookup is the server list a per-call lookup reads. Codex
+// is read as a session runs it (readMCPServersCodexLayers effectiveOnly): a
+// project layer the user config does not trust is left out, so a planted
+// .codex/config.toml cannot shadow the user's server of that name, and a
+// trusted layer DefenseClaw cannot read (a symlink, too large, unstable)
+// ends the list, so a name it may define is unproven rather than resolved to
+// the user layer's server of that name (rel-1-0-10:GAP-1693). The reader's
+// error is dropped (GAP-1692). Secure Client keeps main (issue #1092).
+func (c *Config) readMCPServersForLookup(connector, workspaceDir string) []MCPServerEntry {
+	if normalizeConnectorKey(connector) == "codex" && (c == nil || !c.SecureClientIntegration()) {
+		entries, _ := readMCPServersCodexLayers(codexUserConfigPath(), workspaceDir, true)
+		return entries
+	}
+	entries, _ := c.readMCPServersForConnectorIn(connector, workspaceDir)
+	return entries
 }
 
 func (c *Config) readMCPServersForConnectorIn(connector, workspaceDir string) ([]MCPServerEntry, error) {
@@ -1362,143 +1389,92 @@ func SkillDirsForOpenClaw(homeDir string) []string {
 //
 // Used by callers that need to enumerate paths for a connector other than
 // the running one (e.g. multi-connector audits, doctor). Unknown connector
-// names return no paths. OpenClaw has its own explicit branch.
+// names return no paths. OpenClaw has its own explicit branch; every other
+// connector reads the one table in internal/agentpaths (GAP-0788), which the
+// actor kit and the gateway's skill-path regexes read too.
 func (c *Config) SkillDirsForConnector(connector string) []string {
-	home, _ := os.UserHomeDir()
-	cwd := c.ConnectorWorkspaceDir()
-
-	switch normalizeConnectorKey(connector) {
-	case "claudecode":
-		configDir := c.ConnectorHomeDir("claudecode")
-		dirs := []string{
-			filepath.Join(configDir, "skills"),
-			filepath.Join(configDir, "commands"),
-			workspaceJoin(cwd, ".claude", "commands"),
-		}
-		dirs = append(dirs, claudecodepath.ProjectSkillDirs(cwd)...)
-		return dedupNonEmpty(dirs)
-	case "codex":
-		dirs := make([]string, 0, 5)
-		for _, layer := range gatewayconnector.CodexProjectLayerDirs(cwd) {
-			dirs = append(dirs, filepath.Join(layer, ".agents", "skills"))
-		}
-		dirs = append(dirs, gatewayconnector.CodexPersonalSkillsPath())
-		dirs = append(dirs, filepath.Join(c.ConnectorHomeDir("codex"), "skills"))
-		if runtime.GOOS != "windows" {
-			dirs = append(dirs, filepath.FromSlash("/etc/codex/skills"))
-		}
-		return dedupNonEmpty(dirs)
-	case "zeptoclaw":
-		return dedupNonEmpty([]string{
-			filepath.Join(home, ".zeptoclaw", "skills"),
-			workspaceJoin(cwd, ".zeptoclaw", "skills"),
-		})
-	case "hermes":
-		return []string{filepath.Join(hermespath.HomeDir(), "skills")}
-	case "cursor":
-		return dedupNonEmpty([]string{
-			filepath.Join(home, ".cursor", "skills"),
-			filepath.Join(home, ".agents", "skills"),
-			workspaceJoin(cwd, ".cursor", "skills"),
-			workspaceJoin(cwd, ".agents", "skills"),
-		})
-	case "devin":
-		configHome, err := devinConfigHome()
-		if err != nil {
-			return nil
-		}
-		// Devin CLI and Devin Local share these roots; the pre-rename Devin
-		// Desktop locations the vendor still loads are read-only extras.
-		return dedupNonEmpty(append([]string{
-			filepath.Join(configHome, "skills"),
-			filepath.Join(home, ".agents", "skills"),
-			workspaceJoin(cwd, ".devin", "skills"),
-			workspaceJoin(cwd, ".agents", "skills"),
-		}, legacyconnector.DesktopLegacySkillPaths(home, cwd)...))
-	case "opencode", "kiro":
-		// These connectors have no documented local skills surface (Kiro's
-		// reusable context is steering docs and specs). Keep them isolated
-		// from OpenClaw's skill directories: the install watcher creates the
-		// folders it watches, so falling through would leave an empty
-		// ~/.openclaw tree behind.
-		return nil
-	case "amp":
-		return ampSkillDirs(home, cwd)
-	case "antigravity":
-		return dedupNonEmpty([]string{
-			filepath.Join(home, ".gemini", "config", "skills"),
-			workspaceJoin(cwd, ".agents", "skills"),
-			workspaceJoin(cwd, ".agent", "skills"),
-		})
-	case "copilot":
-		return dedupNonEmpty([]string{
-			filepath.Join(home, ".copilot", "skills"),
-			workspaceJoin(cwd, ".github", "skills"),
-			workspaceJoin(cwd, ".agents", "skills"),
-		})
-	case "openclaw":
+	key := normalizeConnectorKey(connector)
+	if key == "openclaw" {
 		return c.skillDirsOpenClaw()
-	default:
-		return nil
 	}
+	return agentpaths.Dirs(key, c.agentPathInputs(key), agentpaths.Skills, agentpaths.Commands)
 }
 
 // PluginDirsForConnector returns plugin directories for a specific connector,
 // independent of the config's active connector. Unknown and empty names
 // return no paths.
 func (c *Config) PluginDirsForConnector(connector string) []string {
+	key := normalizeConnectorKey(connector)
+	if key == "openclaw" {
+		return c.pluginDirsOpenClaw()
+	}
+	return agentpaths.Dirs(key, c.agentPathInputs(key), agentpaths.Plugins)
+}
+
+// agentPathInputs resolves the agentpaths table on the laptop: the home,
+// the pinned workspace, the connector's config home and the folders the
+// laptop finds by reading files (agentPathDynamic).
+func (c *Config) agentPathInputs(key string) agentpaths.Inputs {
 	home, _ := os.UserHomeDir()
 	cwd := c.ConnectorWorkspaceDir()
-
-	switch normalizeConnectorKey(connector) {
-	case "claudecode":
-		configDir := c.ConnectorHomeDir("claudecode")
-		pluginParent := strings.TrimSpace(os.Getenv("CLAUDE_CODE_PLUGIN_CACHE_DIR"))
-		if pluginParent == "" {
-			pluginParent = filepath.Join(configDir, "plugins")
-		} else {
-			pluginParent = expandPath(pluginParent)
-		}
-		dirs := []string{
-			filepath.Join(pluginParent, "cache"),
-			filepath.Join(configDir, "skills"),
-		}
-		dirs = append(dirs, claudecodepath.ProjectSkillDirs(cwd)...)
-		return dedupNonEmpty(dirs)
-	case "codex":
-		base := filepath.Join(c.ConnectorHomeDir("codex"), "plugins")
-		return dedupNonEmpty(append(
-			gatewayconnector.CodexPluginSourceDirs(cwd),
-			filepath.Join(base, "cache"),
-		))
-	case "zeptoclaw":
-		return []string{
-			filepath.Join(home, ".zeptoclaw", "plugins"),
-		}
-	case "hermes":
-		return dedupNonEmpty([]string{
-			filepath.Join(hermespath.HomeDir(), "plugins"),
-			workspaceJoin(cwd, ".hermes", "plugins"),
-		})
-	case "antigravity":
-		return dedupNonEmpty([]string{
-			filepath.Join(home, ".gemini", "config", "plugins"),
-			filepath.Join(home, ".gemini", "antigravity-cli", "plugins"),
-			workspaceJoin(cwd, ".agents", "plugins"),
-			workspaceJoin(cwd, "_agents", "plugins"),
-		})
-	case "amp":
-		return dedupNonEmpty([]string{
-			filepath.Join(home, ".config", "amp", "plugins"),
-			workspaceJoin(cwd, ".amp", "plugins"),
-		})
-	case "cursor", "devin", "copilot", "opencode", "kiro":
-		return nil
-	case "openclaw":
-		return c.pluginDirsOpenClaw()
-	default:
-		return nil
+	return agentpaths.Inputs{
+		Home:       home,
+		Cwd:        cwd,
+		ConfigHome: c.ConnectorHomeDir(key),
+		GOOS:       runtime.GOOS,
+		Dynamic:    func(dyn string) []string { return c.agentPathDynamic(dyn, home, cwd) },
 	}
+}
+
+// agentPathDynamic returns the laptop folders of a Dynamic table entry.
+func (c *Config) agentPathDynamic(key, home, cwd string) []string {
+	switch key {
+	case agentpaths.DynClaudeProjectSkills:
+		return claudecodepath.ProjectSkillDirs(cwd)
+	case agentpaths.DynClaudePluginCache:
+		parent := strings.TrimSpace(os.Getenv("CLAUDE_CODE_PLUGIN_CACHE_DIR"))
+		if parent == "" {
+			parent = filepath.Join(c.ConnectorHomeDir("claudecode"), "plugins")
+		} else {
+			parent = expandPath(parent)
+		}
+		return []string{filepath.Join(parent, "cache")}
+	case agentpaths.DynCodexProjectLayers:
+		var dirs []string
+		for _, layer := range gatewayconnector.CodexProjectLayerDirs(cwd) {
+			dirs = append(dirs, filepath.Join(layer, ".agents", "skills"))
+		}
+		return dirs
+	case agentpaths.DynCodexPersonalSkills:
+		return []string{gatewayconnector.CodexPersonalSkillsPath()}
+	case agentpaths.DynCodexPluginSources:
+		return gatewayconnector.CodexPluginSourceDirs(cwd)
+	case agentpaths.DynDevinLegacySkills:
+		// Devin CLI and Devin Local share the table's roots; the pre-rename
+		// Devin Desktop locations the vendor still loads are read-only extras.
+		return legacyconnector.DesktopLegacySkillPaths(home, cwd)
+	case agentpaths.DynAmpSkills:
+		return ampSkillDirs(home, cwd)
+	case agentpaths.DynOpenCodeProjectConfig:
+		// OpenCode resolves project folders upward to the repository root,
+		// like Claude Code (connector_paths._opencode_project_dirs).
+		var dirs []string
+		for _, dir := range claudecodepath.ProjectDirs(cwd) {
+			dirs = append(dirs, filepath.Join(dir, ".opencode", "skill"), filepath.Join(dir, ".opencode", "skills"))
+		}
+		return dirs
+	case agentpaths.DynOpenCodeProjectShared:
+		projects := claudecodepath.ProjectDirs(cwd)
+		dirs := make([]string, 0, 2*len(projects))
+		for _, dir := range projects {
+			dirs = append(dirs, filepath.Join(dir, ".claude", "skills"))
+		}
+		for _, dir := range projects {
+			dirs = append(dirs, filepath.Join(dir, ".agents", "skills"))
+		}
+		return dirs
+	}
+	return nil
 }
 
 // --- Connector-specific MCP readers ---
@@ -1676,7 +1652,12 @@ func ReadMCPFromClaudeJSONBothScopes(path string) ([]MCPServerEntry, error) {
 }
 
 func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {
-	return readMCPServersCodexAt(filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml"), workspaceDir)
+	return readMCPServersCodexAt(codexUserConfigPath(), workspaceDir)
+}
+
+// codexUserConfigPath is the user config.toml of this process's Codex.
+func codexUserConfigPath() string {
+	return filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml")
 }
 
 // readMCPServersCodexAt reads the Codex servers from the user config.toml at
@@ -1686,9 +1667,13 @@ func readMCPServersCodexAt(userPath, workspaceDir string) ([]MCPServerEntry, err
 }
 
 // readMCPServersCodexLayers reads the layers readMCPServersCodexAt lists.
-// With effectiveOnly, a project layer Codex does not activate (one the user
-// config does not trust) is left out, so the entries are the servers a
-// session runs rather than the ones discovery should scan.
+// With effectiveOnly the entries are the servers a session runs rather than
+// the ones discovery should scan: a project layer Codex does not activate
+// (one the user config does not trust) is left out, and a trusted layer that
+// exists but cannot be read ends the list there, since the servers it
+// defines take precedence over every layer after it, the user layer
+// included (rel-1-0-10:GAP-1693). The user config is read once, for its
+// servers and the trust of the projects.
 func readMCPServersCodexLayers(userPath, workspaceDir string, effectiveOnly bool) ([]MCPServerEntry, error) {
 	// Codex stores user and project MCP registries in config.toml
 	// [mcp_servers] tables. Candidate project layers are read closest-first so
@@ -1696,41 +1681,71 @@ func readMCPServersCodexLayers(userPath, workspaceDir string, effectiveOnly bool
 	// Filesystem presence is discovery only: project entries carry
 	// TrustRequired because Codex activates them only for trusted projects.
 	cwd := strings.TrimSpace(workspaceDir)
-	var trusted codexProjectTrust
-	if effectiveOnly {
-		trusted = readCodexProjectTrust(userPath)
-	}
 
 	var entries []MCPServerEntry
 	var firstErr error
-	read := func(path string, reader func(string) ([]MCPServerEntry, error)) []MCPServerEntry {
-		if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(path); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			return nil
-		}
-		if _, err := os.Lstat(path); err != nil {
-			if !errors.Is(err, fs.ErrNotExist) && firstErr == nil {
-				firstErr = err
-			}
-			return nil
-		}
-		found, err := reader(path)
-		if err != nil && firstErr == nil {
+	fail := func(err error) {
+		if firstErr == nil {
 			firstErr = err
 		}
-		return found
+	}
+	// exists reports a layer file to read; a refused or unreadable entry is
+	// recorded and reported as present.
+	exists := func(path string) (bool, bool) {
+		if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(path); err != nil {
+			fail(err)
+			return true, false
+		}
+		if _, err := os.Lstat(path); err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				fail(err)
+				return true, false
+			}
+			return false, false
+		}
+		return true, true
+	}
+	var userEntries []MCPServerEntry
+	var trusted codexProjectTrust
+	if present, readable := exists(userPath); readable {
+		data, ok := gatewayconnector.ReadStableInventoryFile(userPath, maxCodexInventoryConfigBytes)
+		if !ok {
+			fail(fmt.Errorf("Codex MCP config is unavailable, unstable, unsafe, or exceeds %d bytes: %s", maxCodexInventoryConfigBytes, userPath)) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+			trusted.unknown = true
+		} else {
+			found, err := ParseCodexUserMCPServers(data, userPath)
+			if err != nil {
+				fail(err)
+			}
+			userEntries = found
+			trusted = parseCodexProjectTrust(data)
+		}
+	} else if present {
+		trusted.unknown = true
 	}
 	for _, layer := range gatewayconnector.CodexProjectLayerDirs(cwd) {
 		if effectiveOnly && !trusted.covers(layer, cwd) {
 			continue
 		}
 		projectPath := filepath.Join(layer, ".codex", "config.toml")
-		e := read(projectPath, readMCPFromCodexConfigTOML)
-		entries = append(entries, annotateCodexMCPEntries(e, projectPath, "project", true)...)
+		present, readable := exists(projectPath)
+		if !present {
+			continue
+		}
+		failed := !readable
+		if readable {
+			found, err := readMCPFromCodexConfigTOML(projectPath)
+			if err != nil {
+				fail(err)
+				failed = true
+			}
+			entries = append(entries, annotateCodexMCPEntries(found, projectPath, "project", true)...)
+		}
+		if effectiveOnly && failed {
+			return dedupMCPEntries(entries), firstErr
+		}
 	}
-	entries = append(entries, read(userPath, ReadMCPFromCodexUserConfigTOML)...)
+	entries = append(entries, userEntries...)
 	return dedupMCPEntries(entries), firstErr
 }
 
@@ -1744,8 +1759,7 @@ func LookupEffectiveCodexMCPToolServer(workspaceDir, name string) (MCPServerEntr
 	if name == "" {
 		return MCPServerEntry{}, false
 	}
-	userPath := filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml")
-	entries, _ := readMCPServersCodexLayers(userPath, workspaceDir, true)
+	entries, _ := readMCPServersCodexLayers(codexUserConfigPath(), workspaceDir, true)
 	return lookupMCPToolServer("codex", entries, name)
 }
 
@@ -1964,8 +1978,8 @@ func readMCPServersKiroAt(home, workspaceDir string) []MCPServerEntry {
 	paths := []struct{ path, scope, project string }{}
 	if workspace := strings.TrimSpace(workspaceDir); workspace != "" {
 		projectPath := filepath.Join(workspace, ".kiro", "settings", "mcp.json")
-		if projectReal, err := filepath.EvalSymlinks(projectPath); err == nil {
-			if userReal, err := filepath.EvalSymlinks(userPath); err == nil && projectReal == userReal {
+		if projectReal, err := winpath.EvalLinks(projectPath); err == nil {
+			if userReal, err := winpath.EvalLinks(userPath); err == nil && projectReal == userReal {
 				projectPath = ""
 			}
 		} else if filepath.Clean(projectPath) == filepath.Clean(userPath) {

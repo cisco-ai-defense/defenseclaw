@@ -25,12 +25,39 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // TestConfigWriterRefusesAnUnloadableRuleReference: a rule ID the generation
 // build would refuse is refused by the writer, so it never reaches
 // config.yaml and blocks the reloads after it.
 func TestConfigWriterRefusesAnUnloadableRuleReference(t *testing.T) {
+	// <data_dir>/policies holds the built-in packs: linked to the repository
+	// packs, and, as an install seeds them, copied. A Limited Windows token
+	// cannot make the symbolic link; the copied layout runs on every token
+	// (GAP-2158). The gateway refuses a rule-pack folder reached through a
+	// junction, so a junction is no stand-in here.
+	t.Run("symbolic link", func(t *testing.T) {
+		checkConfigWriterRefusesAnUnloadableRuleReference(t, testenv.Symlink)
+	})
+	t.Run("copied folder", func(t *testing.T) {
+		checkConfigWriterRefusesAnUnloadableRuleReference(t, copyRulePackTree)
+	})
+}
+
+// copyRulePackTree copies the built-in pack folder target to link, the
+// layout an install seeds.
+func copyRulePackTree(t testing.TB, target, link string) {
+	t.Helper()
+	if err := os.CopyFS(link, os.DirFS(target)); err != nil {
+		t.Fatalf("copy the rule packs: %v", err)
+	}
+}
+
+// checkConfigWriterRefusesAnUnloadableRuleReference is
+// TestConfigWriterRefusesAnUnloadableRuleReference with the policies folder
+// linked by link.
+func checkConfigWriterRefusesAnUnloadableRuleReference(t *testing.T, link func(testing.TB, string, string)) {
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -39,9 +66,7 @@ func TestConfigWriterRefusesAnUnloadableRuleReference(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The installed layout: <data_dir>/policies holds the built-in packs.
-	if err := os.Symlink(policies, filepath.Join(dir, "policies")); err != nil {
-		t.Fatal(err)
-	}
+	link(t, policies, filepath.Join(dir, "policies"))
 	if err := os.WriteFile(path, []byte("config_version: 9\ndata_dir: "+dir+"\nobservability: {}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

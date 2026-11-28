@@ -86,6 +86,11 @@ _CONNECTORS: tuple[_Removed, ...] = (
 NAMES: tuple[str, ...] = tuple(c.name for c in _CONNECTORS)
 
 
+def label_of(name: str) -> str:
+    """The product name of a removed connector (OpenHands, OmniGent)."""
+    return next((c.label for c in _CONNECTORS if c.name == name), name)
+
+
 def is_removed(name: str | None) -> bool:
     """Recognize OpenHands or OmniGent, including the old OpenHands ID aliases."""
     return isinstance(name, str) and name.strip().casefold() in {*NAMES, "open-hands", "open_hands"}

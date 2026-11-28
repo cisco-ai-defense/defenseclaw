@@ -203,7 +203,8 @@ func publishCause(err error) error {
 
 func atomicFileAlreadyMatches(path string, data []byte, perm os.FileMode) bool {
 	var matched bool
-	_ = safefile.RetryTransientRead(func() error {
+	// A destination not written yet does not match: one confirming look.
+	_ = safefile.RetryOptionalRead(func() error {
 		file, err := winpath.OpenReadShared(path)
 		if err != nil {
 			return err
@@ -233,7 +234,7 @@ func atomicFileMatchesOpened(file *os.File, path string, data []byte, perm os.Fi
 	}
 	pathInfo, err := os.Lstat(path)
 	if err != nil {
-		return false, err
+		return false, safefile.NameVanished(err)
 	}
 	if pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(openedInfo, pathInfo) {
 		return false, nil
@@ -247,7 +248,7 @@ func atomicFileMatchesOpened(file *os.File, path string, data []byte, perm os.Fi
 	}
 	pathInfo, err = os.Lstat(path)
 	if err != nil {
-		return false, err
+		return false, safefile.NameVanished(err)
 	}
 	return pathInfo.Mode()&os.ModeSymlink == 0 && os.SameFile(openedInfo, pathInfo), nil
 }
@@ -256,7 +257,8 @@ func resolveAtomicWritePath(path string) (string, error) {
 	cur := path
 	for i := 0; i < 16; i++ {
 		var info os.FileInfo
-		err := safefile.RetryTransientRead(func() error {
+		// A missing component ends the walk: one confirming look (GAP-2149).
+		err := safefile.RetryOptionalRead(func() error {
 			var lookupErr error
 			info, lookupErr = os.Lstat(cur)
 			return lookupErr

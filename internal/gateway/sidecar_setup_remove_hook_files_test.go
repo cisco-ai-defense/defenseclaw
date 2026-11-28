@@ -71,7 +71,7 @@ func TestSetupRemoveClearsWrittenHookFilesForEveryBuiltin(t *testing.T) {
 			probe := setupRemoveFilesConnector{Connector: original}
 			reg := connector.NewRegistry()
 			reg.RegisterBuiltin(probe)
-			failed, _ := teardownRemovedConnectorsReport(reg, []string{name}, nil, opts, "", context.Background())
+			failed, _, _ := teardownRemovedConnectorsWhy(reg, []string{name}, nil, opts, "", context.Background())
 			if len(failed) != 0 {
 				t.Fatalf("remove failed: %v", failed)
 			}
@@ -100,7 +100,7 @@ func TestSetupRemovePreservesSharedHookFilesForConfiguredPeer(t *testing.T) {
 	reg := connector.NewRegistry()
 	reg.RegisterBuiltin(setupRemoveFilesConnector{Connector: removed})
 	reg.RegisterBuiltin(setupRemoveFilesConnector{Connector: peer})
-	failed, _ := teardownRemovedConnectorsReport(reg, []string{"devin", "kiro"}, []string{"kiro"}, opts, "", context.Background())
+	failed, _, _ := teardownRemovedConnectorsWhy(reg, []string{"devin", "kiro"}, []string{"kiro"}, opts, "", context.Background())
 	if len(failed) != 0 {
 		t.Fatalf("remove failed: %v", failed)
 	}
@@ -128,7 +128,7 @@ func TestSetupRemoveKeepsHookScriptNamedByConfiguredPeer(t *testing.T) {
 	reg := connector.NewRegistry()
 	reg.RegisterBuiltin(setupRemoveFilesConnector{Connector: removed})
 	reg.RegisterBuiltin(setupRemoveFilesConnector{Connector: peer, scriptNames: []string{"devin-hook.sh"}})
-	failed, _ := teardownRemovedConnectorsReport(reg, []string{"devin", "kiro"}, []string{"kiro"}, opts, "", context.Background())
+	failed, _, _ := teardownRemovedConnectorsWhy(reg, []string{"devin", "kiro"}, []string{"kiro"}, opts, "", context.Background())
 	if len(failed) != 0 {
 		t.Fatalf("remove failed: %v", failed)
 	}
@@ -155,7 +155,7 @@ func TestSetupRemoveTransactionalTeardownClearsWrittenHookFile(t *testing.T) {
 	}
 	reg := connector.NewRegistry()
 	reg.RegisterBuiltin(probe)
-	removed, failed := teardownRemovedConnectorCandidates([]multiConnectorSetupRollbackPoint{point}, context.Background(),
+	removed, failed, _ := teardownRemovedConnectorCandidates([]multiConnectorSetupRollbackPoint{point}, context.Background(),
 		func(conn connector.Connector, priorOpts connector.SetupOpts) error {
 			return removeTeardownHookFiles(reg, conn, nil, priorOpts)
 		})
@@ -178,7 +178,7 @@ func TestDisabledConnectorKeepsCachedHookPath(t *testing.T) {
 	}
 	reg := connector.NewRegistry()
 	reg.RegisterBuiltin(setupRemoveFilesConnector{Connector: original})
-	failed, _ := teardownRemovedConnectorsReport(reg, []string{"devin"}, nil, opts, "", context.Background(), []string{"devin"})
+	failed, _, _ := teardownRemovedConnectorsWhy(reg, []string{"devin"}, nil, opts, "", context.Background(), []string{"devin"})
 	if len(failed) != 0 {
 		t.Fatalf("disable failed: %v", failed)
 	}

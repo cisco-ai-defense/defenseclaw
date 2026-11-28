@@ -14,14 +14,15 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // homeGlobRow is one shell call made at the home folder of a per-user
 // action-mode gateway. alias adds keysdir, a link at the home to ~/.ssh
 // that a plain * does select.
 type homeGlobRow struct {
-	name, command string
-	block, alias  bool
+	name, command          string
+	block, alias, junction bool
 }
 
 // An unquoted * or ? in a POSIX shell (bash, Git Bash on Windows) skips a
@@ -48,17 +49,27 @@ func TestUnquotedGlobAtHomeMatchesAcrossOS(t *testing.T) {
 		{name: "K06 star selects a plain link to .ssh", command: `cp a.txt */authorized_keys`, block: true, alias: true},
 		{name: "K07 tilde keys file", command: `cp a.txt ~/.ssh/authorized_keys`, block: true},
 	}
+	if runtime.GOOS == "windows" {
+		// K06 needs a symbolic link, which a Limited token cannot make; the
+		// junction form of the same link runs on every token (GAP-2158).
+		rows = append(rows, homeGlobRow{name: "K06J star selects a junction to .ssh", command: `cp a.txt */authorized_keys`, block: true, junction: true})
+	}
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, header := range []bool{true, false} {
 			for _, row := range rows {
+				// Codex runs PowerShell on Windows, whose wildcards match a
+				// leading dot: a row that expects a POSIX glob to skip a dot
+				// name does not apply there, so it is not generated. A skipped
+				// row kept the whole name from ever being a pass on Windows
+				// (GAP-2168).
+				if connector == "codex" && codexShellRunsPowerShell && !row.block {
+					continue
+				}
 				name := connector + "/" + row.name
 				if !header {
 					name += "/no-header"
 				}
 				t.Run(name, func(t *testing.T) {
-					if connector == "codex" && codexShellRunsPowerShell && !row.block {
-						t.Skip("PowerShell wildcards match a leading dot")
-					}
 					home := t.TempDir()
 					keys := filepath.Join(home, ".ssh", "authorized_keys")
 					for _, dir := range []string{filepath.Dir(keys), filepath.Join(home, "project"), filepath.Join(home, "Documents")} {
@@ -73,9 +84,10 @@ func TestUnquotedGlobAtHomeMatchesAcrossOS(t *testing.T) {
 						}
 					}
 					if row.alias {
-						if err := os.Symlink(filepath.Dir(keys), filepath.Join(home, "keysdir")); err != nil {
-							t.Fatal(err)
-						}
+						testenv.Symlink(t, filepath.Dir(keys), filepath.Join(home, "keysdir"))
+					}
+					if row.junction {
+						testenv.Junction(t, filepath.Dir(keys), filepath.Join(home, "keysdir"))
 					}
 					t.Setenv("HOME", home)
 					t.Setenv("USERPROFILE", home)

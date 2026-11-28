@@ -62,7 +62,7 @@ func TestSSHPrivateKeyWriteIsSSHDirectoryFinding(t *testing.T) {
 			t.Errorf("%s: PATH-SSH-DIR = %t, want %t; findings=%v", test.command, got, test.want, FindingStrings(findings))
 		}
 		// A detection-only finding never reaches the alerts.
-		if finding != nil && finding.enforcement == findingEnforcementDetectionOnly {
+		if finding != nil && finding.Proof.Recorded() {
 			t.Errorf("%s: PATH-SSH-DIR is detection-only", test.command)
 		}
 	}
@@ -123,7 +123,7 @@ func TestWindowsHomeSSHPathsAreJudgedLikeSpelledOutPaths(t *testing.T) {
 			t.Errorf("%s %q: no %s; findings=%v", test.tool, test.command, test.rule, FindingStrings(findings))
 		case finding.contributesToEnforcement() != test.block:
 			t.Errorf("%s %q: %s blocks = %t, want %t", test.tool, test.command, test.rule, finding.contributesToEnforcement(), test.block)
-		case !test.block && finding.enforcement != findingEnforcementAlertOnly:
+		case !test.block && !finding.Proof.Advisory():
 			t.Errorf("%s %q: %s is not an alert", test.tool, test.command, test.rule)
 		}
 	}

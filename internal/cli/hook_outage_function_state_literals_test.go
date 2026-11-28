@@ -4,7 +4,7 @@
 package cli
 
 import (
-	"os"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,13 +23,9 @@ func outageUnquotedPath(path string) string { return filepath.ToSlash(path) }
 func TestOpenClawOutageLiteralBraceNameReachesAFunctionWhole(t *testing.T) {
 	root, protected, ordinary := outageR10Fixture(t, "home{one}")
 	braceLink := filepath.Join(ordinary, "config{link}")
-	if err := os.Symlink(protected, braceLink); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, protected, braceLink)
 	braceOrdinary := filepath.Join(ordinary, "notes{link}")
-	if err := os.Symlink(filepath.Join(ordinary, "notes.txt"), braceOrdinary); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, filepath.Join(ordinary, "notes.txt"), braceOrdinary)
 	escape := func(name string) string { return strings.NewReplacer("{", `\{`, "}", `\}`).Replace(name) }
 	base := filepath.Dir(filepath.Dir(root))
 	tail := outageUnquotedPath(strings.TrimPrefix(protected, base))
@@ -136,9 +132,7 @@ func TestOpenClawOutageUnclosedBraceNameIsLiteral(t *testing.T) {
 		ordinaryLink:  filepath.Join(ordinary, "notes.txt"),
 		protectedLink: protected,
 	} {
-		if err := os.Symlink(target, link); err != nil {
-			t.Fatal(err)
-		}
+		testenv.Symlink(t, target, link)
 	}
 	inherited := map[string]interface{}{"OUT": protected}
 	cases := []struct {

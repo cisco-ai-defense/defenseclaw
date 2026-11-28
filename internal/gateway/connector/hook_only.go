@@ -365,7 +365,7 @@ func NewCopilotConnector() *hookOnlyConnector {
 		name:        "copilot",
 		description: "user-global Copilot CLI hooks, with optional workspace .github/hooks override",
 		apiPath:     "/api/v1/copilot/hook",
-		scriptName:  "copilot-hook.sh",
+		scriptName:  copilotHookScriptName,
 		configPath:  copilotHooksPath,
 		capability: func(opts SetupOpts) HookCapability {
 			caps := HookCapability{
@@ -1625,6 +1625,26 @@ func ManagedPluginArtifactDrift(conn Connector, opts SetupOpts) (string, error) 
 	return plugin.managedPluginArtifactDrift(opts)
 }
 
+// requirePluginFolderOpenable refuses, before anything is written, a plugin
+// folder this account cannot open the way the plugin write opens it. A folder
+// whose inheritance is removed and whose access list is empty passes the
+// custody check (no other account can write it), but the write then failed
+// with a bare "Access is denied" that named no folder and read as a busy
+// file, so the gateway retried it (GAP-1965). The underlying error is quoted,
+// not wrapped, so the refusal is never retried as a busy file.
+func (c *hookOnlyConnector) requirePluginFolderOpenable(path string) error {
+	folder := filepath.Dir(path)
+	handle, err := openAtomicTransformBoundDirectoryPlatform(folder)
+	if err != nil {
+		fix := fmt.Sprintf("chmod u+rwx %q", folder)
+		if runtime.GOOS == "windows" {
+			fix = fmt.Sprintf("icacls %q /reset", folder)
+		}
+		return fmt.Errorf("%s plugin folder %s cannot be opened by this account (%v); give your account access to it again (for example: %s), then run setup again", c.name, folder, err, fix)
+	}
+	return handle.Close()
+}
+
 // setupPluginArtifact writes the rendered bridge plugin to the host agent's
 // auto-load directory at 0o600. Its scoped token stays in an owner-only
 // sidecar. The managed-file backup lets Teardown restore a prior file only
@@ -1662,6 +1682,9 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 	}
 	if err := validatePluginArtifactDestination(path); err != nil {
 		return fmt.Errorf("%s validate plugin destination: %w", c.name, err)
+	}
+	if err := c.requirePluginFolderOpenable(path); err != nil {
+		return err
 	}
 	if err := captureManagedFileBackup(opts.DataDir, c.name, "config", path); err != nil {
 		return rollback(fmt.Errorf("%s capture plugin backup: %w", c.name, err))
@@ -1753,7 +1776,7 @@ func validatePluginArtifactDestination(path string) error {
 func validatePluginArtifactDestinationFor(path, trustedOwnerSID string) error {
 	// A refusal names what to fix: every refused folder and the one command
 	// (GAP-0730, GAP-0731), not just the first element the walk met.
-	return explainPluginArtifactRefusal(path, checkPluginArtifactDestination(path, trustedOwnerSID))
+	return explainPluginArtifactRefusal(path, trustedOwnerSID, checkPluginArtifactDestination(path, trustedOwnerSID))
 }
 
 // checkPluginArtifactDestination is the custody check itself.
@@ -3832,17 +3855,25 @@ func workspaceRootOutsideDataDir(root, dataDir string) bool {
 	}
 	rootAbs = filepath.Clean(rootAbs)
 	dataAbs = filepath.Clean(dataAbs)
-	if realRoot, err := filepath.EvalSymlinks(rootAbs); err == nil {
-		rootAbs = filepath.Clean(realRoot)
+	// Inside the data folder in any spelling is inside: the drive letter
+	// the path was named through (winpath.EvalLinks) and the real final path
+	// (winpath.FinalPath). Before, a root named through a subst or mapped
+	// drive letter that maps into the data folder was compared across
+	// volumes, filepath.Rel failed, and the root read as outside
+	// (rel-1-0-10:GAP-2210).
+	for _, resolve := range winpath.DenySenseResolvers() {
+		root, data := rootAbs, dataAbs
+		if real, err := resolve(root); err == nil {
+			root = filepath.Clean(real)
+		}
+		if real, err := resolve(data); err == nil {
+			data = filepath.Clean(real)
+		}
+		if rel, err := filepath.Rel(data, root); err == nil && (rel == "." || rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+			return false
+		}
 	}
-	if realData, err := filepath.EvalSymlinks(dataAbs); err == nil {
-		dataAbs = filepath.Clean(realData)
-	}
-	rel, err := filepath.Rel(dataAbs, rootAbs)
-	if err != nil {
-		return true
-	}
-	return rel != "." && (rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+	return true
 }
 
 func homePath(parts ...string) string {
@@ -5169,6 +5200,9 @@ func hermesHookEntry(hookCommand, event, matcher string, opts SetupOpts) map[str
 }
 
 // hermesHookScriptName is the Hermes hook script Setup generates on Unix.
+// The removal passes match an edited or copied entry by this name on every
+// OS: on Windows the hook command is the native launcher, which names no
+// script (GAP-1942).
 const hermesHookScriptName = "hermes-hook.sh"
 
 // hermesHookEntryOwned is the one ownership predicate Setup, repair, teardown
@@ -5203,11 +5237,12 @@ func hermesHookEntryOwned(entry interface{}, hookScript string, recognizedComman
 	if hermesCommandSpellsTheHookScript(command, hookScript) {
 		return true
 	}
-	// The generated script at an edited path. Its matchers trim blanks, which
-	// would claim a command Setup did not write, so a command with a blank at
-	// either end is the user's.
+	// The generated script at an edited path, or a copy named by a Windows
+	// path (GAP-1923), on every OS: the name is the script's, not hookScript's
+	// (GAP-1942). Its matchers trim blanks, which would claim a command Setup
+	// did not write, so a command with a blank at either end is the user's.
 	return command == strings.TrimSpace(command) &&
-		editedDefenseClawHookCommand(command, hookScriptBaseName(hookScript))
+		editedDefenseClawHookCommandByAnyPath(command, hermesHookScriptName)
 }
 
 // hermesCommandSpellsTheHookScript reports whether command runs the generated
@@ -5965,8 +6000,29 @@ func copilotBoundEventOwnsHook(raw interface{}, hookScript string) bool {
 	return owned
 }
 
+// copilotWindowsPathCopyOwnsCommand claims a copy of copilot-hook.sh named by
+// a Windows path, alone or with the --event of a Copilot event, on every OS
+// (GAP-1923). It is read as written first: the POSIX split undoes the escapes
+// of a double-quoted word, which drops a Windows path's backslashes; then
+// after a shell or env wrapper.
+func copilotWindowsPathCopyOwnsCommand(command string) bool {
+	if bound, owned := editedDefenseClawHookScript(windowsHookScriptCommandAsPOSIX(command), copilotHookScriptName); owned &&
+		(bound == "" || copilotBoundEventArgument(bound)) {
+		return true
+	}
+	word, rest, ok := hookScriptWordAfterWrapper(strings.TrimSpace(command))
+	if !ok || (rest != "" && !copilotBoundEventArgument(rest)) {
+		return false
+	}
+	_, owned := editedDefenseClawHookScript(windowsHookScriptCommandAsPOSIX(posixHookCommandWord(word)+rest), copilotHookScriptName)
+	return owned
+}
+
 func copilotBoundEventOwnsCommand(key, command, hookScript string) bool {
-	if isCopilotPowerShellAdapterCommand(hookScript) {
+	// A bash entry is read by the script rules below under the PowerShell
+	// adapter too: the doctor reports a bash copy of copilot-hook.sh on a
+	// Windows host, and Setup kept it and refused the event (GAP-1980).
+	if isCopilotPowerShellAdapterCommand(hookScript) && key != "bash" {
 		if key != "powershell" && key != "command" {
 			return false
 		}
@@ -5997,9 +6053,14 @@ func copilotBoundEventOwnsCommand(key, command, hookScript string) bool {
 	if key != "bash" && key != "command" {
 		return false
 	}
+	if copilotWindowsPathCopyOwnsCommand(command) {
+		return true
+	}
 	word, rest, ok := hookScriptWordAfterWrapper(strings.TrimSpace(command))
-	if !ok || !filepath.IsAbs(word) || filepath.Clean(word) != word ||
-		(rest != "" && !copilotBoundEventArgument(rest)) {
+	if !ok || (rest != "" && !copilotBoundEventArgument(rest)) {
+		return false
+	}
+	if !copilotCleanAbsoluteScriptWord(word) {
 		return false
 	}
 	if copilotMarkedShellCopy(word) {
@@ -6007,12 +6068,20 @@ func copilotBoundEventOwnsCommand(key, command, hookScript string) bool {
 	}
 	// A deleted copy has no marker to read. The exact DefenseClaw script
 	// name with Copilot's event binding remains a repairable registration.
+	// On Windows a POSIX word (/dir/copilot-hook.sh) names the file Copilot's
+	// bash resolves under its own root (Git for Windows maps / to its install
+	// folder), not the drive-root file a native Lstat reaches, so whether it
+	// is deleted is unknown here and the text decides, as the doctor reads it
+	// on every OS (GAP-2284). Either way the result is the canonical hook.
 	if isCopilotShellHookScript(word) && copilotBoundEventArgument(rest) {
+		if copilotPOSIXOnlyScriptWord(word) {
+			return true
+		}
 		if _, err := os.Lstat(word); errors.Is(err, os.ErrNotExist) {
 			return true
 		}
 	}
-	_, owned := editedDefenseClawHookScript(word+rest, "copilot-hook.sh")
+	_, owned := editedDefenseClawHookScript(word+rest, copilotHookScriptName)
 	return owned
 }
 
@@ -6053,11 +6122,16 @@ func copilotBoundEventArgument(rest string) bool {
 	return false
 }
 
+// copilotHookScriptName is the Copilot hook script Setup generates on Unix.
+// The removal passes match an edited or copied entry by this name on every
+// OS: on Windows the hook command is the PowerShell adapter (GAP-1942).
+const copilotHookScriptName = "copilot-hook.sh"
+
 func copilotUnexpectedEventOwnsHook(raw interface{}, hookScript string) bool {
 	if copilotLiveOperatorLookalike(raw, hookScript) {
 		return false
 	}
-	if copilotBoundEventOwnsHook(raw, hookScript) || containsHookScript(raw, hookScript) || editedDefenseClawHookEntry(raw, hookScriptBaseName(hookScript)) || copilotOldManagedCopyEntry(raw) {
+	if copilotBoundEventOwnsHook(raw, hookScript) || containsHookScript(raw, hookScript) || editedDefenseClawHookEntry(raw, copilotHookScriptName) || copilotOldManagedCopyEntry(raw) {
 		return true
 	}
 	if !isCopilotPowerShellAdapterCommand(hookScript) {
@@ -6545,7 +6619,7 @@ func copilotOldManagedCopyEntry(raw interface{}) bool {
 	for _, key := range []string{"bash", "command"} {
 		command, _ := entry[key].(string)
 		word, rest, parsed := posixHookCommandSplit(strings.TrimSpace(command))
-		if !parsed || !filepath.IsAbs(word) || filepath.Clean(word) != word ||
+		if !parsed || !copilotCleanAbsoluteScriptWord(word) ||
 			(rest != "" && !strings.HasPrefix(rest, " --event ")) {
 			continue
 		}
@@ -6938,7 +7012,7 @@ func isCopilotNativeHookCommand(command string) bool {
 
 func isCopilotShellHookScript(command string) bool {
 	command = strings.Trim(strings.TrimSpace(command), `"'`)
-	return filepath.Base(filepath.FromSlash(command)) == "copilot-hook.sh"
+	return filepath.Base(filepath.FromSlash(command)) == copilotHookScriptName
 }
 
 func isCopilotEventBoundShellCommand(command, hookScript string) bool {

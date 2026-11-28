@@ -305,6 +305,41 @@ def test_fix_keeps_a_lock_an_interrupted_install_keeps(account):
     assert lock.exists()
 
 
+# GAP-1068: `defenseclaw upgrade` on Windows ends while its installer runs
+# for minutes and stops the gateway, so a doctor run then showed gateway and
+# watchdog failures with "start the gateway" as the next step. A live
+# installer's lock says an upgrade is in progress, and the rows after it
+# report a failure as a warning that names it.
+def test_doctor_says_an_upgrade_is_in_progress_and_reads_later_failures_as_its_work(account):
+    _live_owner(_lock(account.data, None))
+    r = cmd_doctor._DoctorResult(mode="check")
+    cmd_doctor._check_install_lock(account.cfg, r)
+    row = r.checks[-1]
+    assert row["reason_code"] == "install-in-progress", row
+    assert "an upgrade is in progress" in row["detail"], row
+    assert "defenseclaw doctor" in row["remediation"], row
+    assert r.install_running
+    cmd_doctor._emit("fail", "Gateway PID", "no gateway.pid", r=r, remediation="defenseclaw-gateway start")
+    row = r.checks[-1]
+    assert (row["status"], r.failed) == ("warn", 0), row
+    assert "an upgrade is in progress" in row["detail"], row
+    assert "gateway start" not in row["remediation"] and "wait for the installer" in row["remediation"], row
+    cmd_doctor._emit("pass", "Config", "ok", r=r)
+    assert r.checks[-1]["status"] == "pass"
+
+
+def test_a_lock_without_a_live_installer_does_not_soften_failures(account):
+    stale = _lock(account.data, f"{DEAD}\n")
+    unknown = _lock(account.home, None)
+    r = cmd_doctor._DoctorResult(mode="check")
+    cmd_doctor._check_install_lock(account.cfg, r)
+    assert {row["reason_code"] for row in r.checks} == {"install-lock-stale", "install-lock-held"}, r.checks
+    assert not r.install_running
+    cmd_doctor._emit("fail", "Gateway PID", "no gateway.pid", r=r)
+    assert (r.checks[-1]["status"], r.failed) == ("fail", 1)
+    assert stale.exists() and unknown.exists()
+
+
 def _live_owner(lock: Path) -> None:
     """A running installer's record: this test's parent pid and its identity."""
     (lock / "pid").write_text(f"{os.getppid()}\n", encoding="ascii")

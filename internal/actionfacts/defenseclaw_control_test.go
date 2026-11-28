@@ -39,6 +39,28 @@ func loadDefenseClawControlRows(t *testing.T) []defenseClawControlRow {
 	return rows
 }
 
+// TestDefenseClawControlCorpusIDsAreUnique keeps every row id of the control
+// corpus unique and non-empty, so a failure message names one row and a corpus
+// diff shows one row per id. Two substrate port rows once reused sub18b-45 and
+// sub18b-46 (GAP-1013); the loader keeps a list, so all four still ran and
+// nothing failed.
+func TestDefenseClawControlCorpusIDsAreUnique(t *testing.T) {
+	rows := loadDefenseClawControlRows(t)
+	seen := map[string]int{}
+	for i, row := range rows {
+		if row.ID == "" {
+			t.Errorf("control corpus row %d has no id (command %q)", i+1, row.Command)
+			continue
+		}
+		if first, dup := seen[row.ID]; dup {
+			t.Errorf("control corpus id %q is on rows %d and %d (commands %q, %q)", row.ID, first, i+1,
+				rows[first-1].Command, row.Command)
+			continue
+		}
+		seen[row.ID] = i + 1
+	}
+}
+
 func defenseClawControlInput(row defenseClawControlRow) Input {
 	input := Input{Tool: "Bash", Command: row.Command, CWD: "/home/u/proj", ActiveHome: "/home/u"}
 	switch row.Dialect {

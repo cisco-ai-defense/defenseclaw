@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -21,10 +22,13 @@ import (
 //
 // A repeat is answered from the memo only when a run of it would give the
 // same answer:
-//   - the request is the same in every field (reflect.DeepEqual), the shared
+//   - the request is the same in every field (reflect.DeepEqual; a Substrate
+//     actor's home places are compared as the set they point at), the shared
 //     state it points at is the same object (pointer identity: ctx, budget,
-//     cap floor, rule generation, readings), and it records into no
-//     function (record, recordTelemetry, recordEffectShadow);
+//     cap floor, rule generation, readings), it records into no function
+//     (record, recordTelemetry, recordEffectShadow) and asks for no
+//     out-parameter the memo does not replay (guestWriteClaimOnly,
+//     guestByNameOnly);
 //   - the first run left the hook call's own budgets and causes as it found
 //     them (hookpaths.HookCallState, the cap floor, the reach of the budget,
 //     the shared evaluations, the session's page), and the repeat finds
@@ -58,6 +62,9 @@ type trustedDispatchMemoRefs struct {
 	targetMemo        *hookpaths.TargetMemo
 	windowsTwinHosts  *windowsTwinHostReadings
 	windowsPowerShell *windowsHintedReading
+	// tiers is the pack tier table the tier gates read (one table per pack
+	// directory, packTable), compared by identity.
+	tiers *decide.Table
 	// outs records which out-parameters are asked for (non-nil): a nil one
 	// may change what the readers do.
 	outs [6]bool
@@ -110,8 +117,14 @@ func trustedDispatchMemoFrom(ctx context.Context) *trustedDispatchMemo {
 
 // dispatchTrustedAction judges request (dispatchTrustedActionOnce). The
 // outermost dispatch of a call begins its memo; the dispatches inside it,
-// its twins and simple-command passes, are judged through the memo.
+// its twins and simple-command passes, are judged through the memo. The
+// findings of a reading 1.0.10 did not have are marked as such
+// (withFloorRaiseOnlyMark).
 func dispatchTrustedAction(parent context.Context, request trustedActionRequest) []RuleFinding {
+	return withFloorRaiseOnlyMark(request, dispatchTrustedActionMemo(parent, request), 0)
+}
+
+func dispatchTrustedActionMemo(parent context.Context, request trustedActionRequest) []RuleFinding {
 	if trustedDispatchMemoOff.Load() {
 		return dispatchTrustedActionOnce(parent, request)
 	}
@@ -121,19 +134,41 @@ func dispatchTrustedAction(parent context.Context, request trustedActionRequest)
 			parent = context.Background()
 		}
 		memo = &trustedDispatchMemo{}
+		trustedDispatchRun(request)
 		return dispatchTrustedActionOnce(context.WithValue(parent, trustedDispatchMemoKey{}, memo), request)
 	}
 	return memo.dispatch(parent, request)
 }
 
+// trustedDispatchRunHook is a test-only seam: when non-nil it is told each
+// request the dispatch judges with the memo on (a repeat the memo answers is
+// not judged), so a test can count the dispatches one hook call costs
+// (rel-1-0-10:GAP-1593). Unlike trustedActionFaultHook it leaves the memo on.
+// Production never sets it.
+var trustedDispatchRunHook func(trustedActionRequest)
+
+func trustedDispatchRun(request trustedActionRequest) {
+	if trustedDispatchRunHook != nil {
+		trustedDispatchRunHook(request)
+	}
+}
+
 func (memo *trustedDispatchMemo) dispatch(ctx context.Context, request trustedActionRequest) []RuleFinding {
 	if request.record != nil || request.recordTelemetry != nil || request.recordEffectShadow != nil ||
+		request.aliasPending != nil || request.guestWriteClaimOnly != nil || request.guestByNameOnly != nil ||
 		trustedActionFaultHook != nil || trustedSimpleCommandsFaultHook != nil {
+		trustedDispatchRun(request)
 		return dispatchTrustedActionOnce(ctx, request)
 	}
 	bucket := request.Input.Tool + "\x00" + request.Input.Command + "\x00" + request.LegacyText
 	key, refs := trustedDispatchMemoKeyOf(request)
-	before := trustedDispatchStateOf(request)
+	// The goroutine's hook call is found once: the dispatch below runs in it
+	// (or begins and ends its own when none is open), so before and after
+	// read the same call (hookpaths.Call). A request of a dispatch on this
+	// goroutine carries the call that dispatch found (hookCall), which is
+	// not found again; the dispatch below joins it.
+	call := hookpaths.FoundHookCall(request.hookCall)
+	before := trustedDispatchStateOf(call, request)
 	if hit := memo.lookup(ctx, bucket, key, refs, before); hit != nil {
 		if request.budget != nil {
 			request.budget.consumed += hit.cost
@@ -151,10 +186,11 @@ func (memo *trustedDispatchMemo) dispatch(ctx context.Context, request trustedAc
 	if request.unprovenTarget != nil {
 		run.unprovenTarget = &outs.unprovenTarget
 	}
-	findings := dispatchTrustedActionOnce(ctx, run)
+	trustedDispatchRun(request)
+	findings := dispatchTrustedActionOnceIn(ctx, run, call)
 	outs.unprovenSet = outs.unprovenTarget != unprovenWrite{}
 	outs.replay(request)
-	after := trustedDispatchStateOf(request)
+	after := trustedDispatchStateOf(call, request)
 	if ctx.Err() == nil && !before.reached && before.same(after) && after.consumed >= before.consumed {
 		memo.store(bucket, &trustedDispatchMemoEntry{
 			ctx: ctx, key: key, refs: refs, state: before,
@@ -203,7 +239,7 @@ func trustedDispatchMemoKeyOf(request trustedActionRequest) (trustedActionReques
 	refs := trustedDispatchMemoRefs{
 		budget: request.budget, capFloor: request.capFloor, generation: request.generation,
 		targetMemo: request.targetMemo, windowsTwinHosts: request.windowsTwinHosts,
-		windowsPowerShell: request.windowsPowerShellReading,
+		windowsPowerShell: request.windowsPowerShellReading, tiers: request.Tiers,
 		outs: [6]bool{
 			request.overBudgetOmission != nil, request.unresolvedTarget != nil, request.resolvedTarget != nil,
 			request.nonWriteMention != nil, request.unprovenTarget != nil, request.unknownMention != nil,
@@ -211,14 +247,18 @@ func trustedDispatchMemoKeyOf(request trustedActionRequest) (trustedActionReques
 	}
 	key := request
 	key.budget, key.capFloor, key.generation, key.targetMemo = nil, nil, nil, nil
-	key.windowsTwinHosts, key.windowsPowerShellReading, key.simpleMemo = nil, nil, nil
+	key.Input.CredentialWalkBudget = nil
+	key.windowsTwinHosts, key.windowsPowerShellReading, key.simpleMemo, key.Tiers = nil, nil, nil, nil
 	key.overBudgetOmission, key.unresolvedTarget, key.resolvedTarget, key.nonWriteMention = nil, nil, nil, nil
 	key.unprovenTarget, key.unknownMention = nil, nil
+	// The hook call is the goroutine's, the same for every request of the
+	// call; it is how a run finds it, not what it judges.
+	key.hookCall = hookpaths.Call{}
 	return key, refs
 }
 
-func trustedDispatchStateOf(request trustedActionRequest) trustedDispatchState {
-	state := trustedDispatchState{call: hookpaths.HookCallState()}
+func trustedDispatchStateOf(call hookpaths.Call, request trustedActionRequest) trustedDispatchState {
+	state := trustedDispatchState{call: call.State()}
 	if request.sessionID != "" {
 		state.page = pageOrigins.get(pageOriginKey(request.Connector, request.sessionID))
 	}

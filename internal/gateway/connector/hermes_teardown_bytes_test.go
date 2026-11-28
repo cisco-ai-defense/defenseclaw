@@ -6,7 +6,6 @@ package connector
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -19,9 +18,6 @@ import (
 // an unedited file is that copy again; a hooks field of the account's own
 // stays (GAP-0262).
 func TestHermesTeardownPutsBackTheCapturedBytesAroundAnEdit(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows registers the native hook launcher, not a hook script")
-	}
 	const template = "# Hermes template\nmodel:\n  default: \"x\"   # quoted\n\n# trailing note\n"
 	crlf := strings.ReplaceAll(template, "\n", "\r\n")
 	appendText := func(text string) func(string) string {
@@ -47,9 +43,9 @@ func TestHermesTeardownPutsBackTheCapturedBytesAroundAnEdit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := testenv.PrivateTempDir(t)
 			dataDir := filepath.Join(root, ".defenseclaw")
-			script := filepath.Join(dataDir, "hooks", "hermes-hook.sh")
+			script, executable := hermesHookRegistrationForTest(dataDir)
 			path := filepath.Join(root, "hermes", "config.yaml")
-			setupHermesConfigForTeardownTest(t, dataDir, path, script, tc.pristine)
+			setupHermesConfigForTeardownTest(t, dataDir, path, script, executable, tc.pristine)
 			if tc.edit != nil {
 				current := readHookFileForTest(t, path)
 				if err := os.WriteFile(path, []byte(tc.edit(current)), 0o600); err != nil {
@@ -74,7 +70,7 @@ func TestHermesTeardownPutsBackTheCapturedBytesAroundAnEdit(t *testing.T) {
 	t.Run("captured copy holds only DefenseClaw hooks", func(t *testing.T) {
 		root := testenv.PrivateTempDir(t)
 		dataDir := filepath.Join(root, ".defenseclaw")
-		script := filepath.Join(dataDir, "hooks", "hermes-hook.sh")
+		script, executable := hermesHookRegistrationForTest(dataDir)
 		path := filepath.Join(root, "hermes", "config.yaml")
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
@@ -82,10 +78,10 @@ func TestHermesTeardownPutsBackTheCapturedBytesAroundAnEdit(t *testing.T) {
 		if err := os.WriteFile(path, []byte(template), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := patchHermesHooks(path, script, ""); err != nil {
+		if err := patchHermesHooks(path, script, executable); err != nil {
 			t.Fatal(err)
 		}
-		setupHermesConfigForTeardownTest(t, dataDir, path, script, readHookFileForTest(t, path))
+		setupHermesConfigForTeardownTest(t, dataDir, path, script, executable, readHookFileForTest(t, path))
 		if !hermesConfigBackupHoldsOwnedHooks(dataDir, "config.yaml", path, script) {
 			t.Fatal("fixture: the captured copy must hold DefenseClaw's hooks")
 		}
@@ -103,10 +99,10 @@ func TestHermesTeardownPutsBackTheCapturedBytesAroundAnEdit(t *testing.T) {
 	t.Run("own hook kept", func(t *testing.T) {
 		root := testenv.PrivateTempDir(t)
 		dataDir := filepath.Join(root, ".defenseclaw")
-		script := filepath.Join(dataDir, "hooks", "hermes-hook.sh")
+		script, executable := hermesHookRegistrationForTest(dataDir)
 		path := filepath.Join(root, "hermes", "config.yaml")
 		pristine := "a: 1\nhooks:\n  pre_tool_call:\n  - command: /usr/local/bin/mine\n"
-		setupHermesConfigForTeardownTest(t, dataDir, path, script, pristine)
+		setupHermesConfigForTeardownTest(t, dataDir, path, script, executable, pristine)
 		if err := os.WriteFile(path, []byte(readHookFileForTest(t, path)+"# user edit\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -116,7 +112,7 @@ func TestHermesTeardownPutsBackTheCapturedBytesAroundAnEdit(t *testing.T) {
 			t.Fatalf("remove hook entries: %v", err)
 		}
 		got := readHookFileForTest(t, path)
-		if strings.Contains(got, script) || !strings.Contains(got, "/usr/local/bin/mine") ||
+		if strings.Contains(got, hermesRegisteredTextForTest(script, executable)) || !strings.Contains(got, "/usr/local/bin/mine") ||
 			!strings.Contains(got, "hooks:") || !strings.HasSuffix(got, "# user edit\n") {
 			t.Fatalf("config.yaml after teardown =\n%s", got)
 		}
@@ -125,7 +121,7 @@ func TestHermesTeardownPutsBackTheCapturedBytesAroundAnEdit(t *testing.T) {
 
 // setupHermesConfigForTeardownTest writes pristine to path, captures it as
 // Setup does, registers DefenseClaw's hooks and records the post-setup hash.
-func setupHermesConfigForTeardownTest(t *testing.T, dataDir, path, script, pristine string) {
+func setupHermesConfigForTeardownTest(t *testing.T, dataDir, path, script, executable, pristine string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
@@ -136,10 +132,10 @@ func setupHermesConfigForTeardownTest(t *testing.T, dataDir, path, script, prist
 	if err := captureManagedFileBackup(dataDir, "hermes", "config.yaml", path); err != nil {
 		t.Fatal(err)
 	}
-	if err := patchHermesHooks(path, script, ""); err != nil {
+	if err := patchHermesHooks(path, script, executable); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(readHookFileForTest(t, path), script) {
+	if !strings.Contains(readHookFileForTest(t, path), hermesRegisteredTextForTest(script, executable)) {
 		t.Fatalf("fixture: Setup did not register the hook:\n%s", readHookFileForTest(t, path))
 	}
 	if err := updateManagedFileBackupPostHash(dataDir, "hermes", "config.yaml", path); err != nil {

@@ -293,146 +293,42 @@ func replaceWindowsOpenCodePortRecord(stagedPath, path string) error {
 	return fmt.Errorf("enterprise hooks: replace OpenCode service ports record: %w", err)
 }
 
-const (
-	windowsOpenCodeReconcileLockWait = 2 * time.Minute
-	windowsOpenCodeReconcileLockPoll = 25 * time.Millisecond
-	// WindowsOpenCodeReconcileLockFileName lives beside the record, in the
-	// SYSTEM/Administrators-only folder Setup protects, so an ordinary account
-	// can neither create nor open it.
-	WindowsOpenCodeReconcileLockFileName = "opencode-service-ports.lock"
-	windowsOpenCodeReconcileLockSDDL     = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)"
-)
+// windowsOpenCodeReconcileLockWait bounds the wait for the OpenCode port
+// reconcile lock.
+const windowsOpenCodeReconcileLockWait = 2 * time.Minute
+
+// WindowsOpenCodeReconcileLockFileName lives beside the record, in the
+// SYSTEM/Administrators-only folder Setup protects, so an ordinary account
+// can neither create nor open it.
+const WindowsOpenCodeReconcileLockFileName = "opencode-service-ports.lock"
 
 var windowsOpenCodeReconcileLocal sync.Mutex
 
 // LockWindowsOpenCodeServicePorts holds one machine-wide reconcile lock for
 // the guardian read, plan, commit and account rewrites, or for administrator
-// clear. The lock is a byte-range lock (LockFileEx) on a file inside the
-// protected record folder, opened only after that folder passes the same
-// SYSTEM/Administrators-only check as the record. The file carries an
-// Administrators owner and a protected SYSTEM/Administrators DACL, so no
-// other account can create, open or hold it, or rewrite its DACL as owner
-// (a named kernel object cannot give that guarantee: any account
-// can create it first). The local mutex serializes goroutines in this process.
+// clear: an administrator-only lock file (LockWindowsAdminOnlyFile) beside
+// the record, opened only after the record folder passes the same
+// SYSTEM/Administrators-only check as the record. The local mutex serializes
+// goroutines in this process.
 func LockWindowsOpenCodeServicePorts(recordPath string) (func(), error) {
 	windowsOpenCodeReconcileLocal.Lock()
-	handle, err := openWindowsOpenCodeReconcileLockFile(recordPath)
-	if err != nil {
+	if err := windowsOpenCodeServicePortsParent(recordPath); err != nil {
 		windowsOpenCodeReconcileLocal.Unlock()
 		return nil, fmt.Errorf("enterprise hooks: open OpenCode port reconcile lock: %w", err)
 	}
-	deadline := time.Now().Add(windowsOpenCodeReconcileLockWait)
-	for {
-		overlapped := new(windows.Overlapped)
-		err = windows.LockFileEx(handle, windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, overlapped)
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, windows.ERROR_LOCK_VIOLATION) || time.Now().After(deadline) {
-			_ = windows.CloseHandle(handle)
-			windowsOpenCodeReconcileLocal.Unlock()
-			return nil, fmt.Errorf("enterprise hooks: acquire OpenCode port reconcile lock: %w", err)
-		}
-		time.Sleep(windowsOpenCodeReconcileLockPoll)
+	unlock, err := LockWindowsAdminOnlyFile(
+		filepath.Join(filepath.Dir(recordPath), WindowsOpenCodeReconcileLockFileName),
+		"OpenCode port reconcile lock",
+		windowsOpenCodeReconcileLockWait,
+	)
+	if err != nil {
+		windowsOpenCodeReconcileLocal.Unlock()
+		return nil, err
 	}
 	return func() {
-		_ = windows.UnlockFileEx(handle, 0, 1, 0, new(windows.Overlapped))
-		_ = windows.CloseHandle(handle)
+		unlock()
 		windowsOpenCodeReconcileLocal.Unlock()
 	}, nil
-}
-
-func openWindowsOpenCodeReconcileLockFile(recordPath string) (windows.Handle, error) {
-	if err := windowsOpenCodeServicePortsParent(recordPath); err != nil {
-		return 0, err
-	}
-	lockPath := filepath.Join(filepath.Dir(recordPath), WindowsOpenCodeReconcileLockFileName)
-	for attempt := 0; attempt < 3; attempt++ {
-		handle, err := openWindowsTargetsManifestObjectWithBackup(lockPath, false, windows.GENERIC_READ|windows.GENERIC_WRITE, false)
-		if err == nil {
-			if err := validateWindowsOpenCodeReconcileLockHandle(handle, lockPath); err != nil {
-				_ = windows.CloseHandle(handle)
-				return 0, err
-			}
-			return handle, nil
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return 0, err
-		}
-		handle, err = createWindowsOpenCodeReconcileLockFile(lockPath)
-		if err == nil {
-			if err := validateWindowsOpenCodeReconcileLockHandle(handle, lockPath); err != nil {
-				_ = windows.CloseHandle(handle)
-				return 0, err
-			}
-			return handle, nil
-		}
-		if !errors.Is(err, windows.ERROR_FILE_EXISTS) && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
-			return 0, err
-		}
-	}
-	return 0, fmt.Errorf("enterprise hooks: OpenCode port reconcile lock file kept changing: %s", lockPath)
-}
-
-func createWindowsOpenCodeReconcileLockFile(lockPath string) (windows.Handle, error) {
-	descriptor, err := windows.SecurityDescriptorFromString(windowsOpenCodeReconcileLockSDDL)
-	if err != nil {
-		return 0, err
-	}
-	attributes := &windows.SecurityAttributes{
-		Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: descriptor,
-	}
-	pointer, err := winpath.UTF16Ptr(lockPath)
-	if err != nil {
-		return 0, err
-	}
-	return windows.CreateFile(pointer, windows.GENERIC_READ|windows.GENERIC_WRITE,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		attributes, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
-}
-
-// validateWindowsOpenCodeReconcileLockHandle requires a SYSTEM or
-// Administrators owner and a protected DACL that allows only SYSTEM and
-// Administrators, checked on the handle that will be locked. The owner counts
-// as much as the DACL: an object owner holds implicit WRITE_DAC, so a file
-// created by an ordinary account (before Setup protected the folder) could be
-// reopened and have its DACL changed after this check passed.
-func validateWindowsOpenCodeReconcileLockHandle(handle windows.Handle, lockPath string) error {
-	actual, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
-	if err != nil {
-		return err
-	}
-	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
-	if err != nil {
-		return err
-	}
-	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
-	if err != nil {
-		return err
-	}
-	owner, _, err := actual.Owner()
-	if err != nil || owner == nil || (!owner.Equals(system) && !owner.Equals(admins)) {
-		return fmt.Errorf("enterprise hooks: OpenCode port reconcile lock is not owned by SYSTEM or Administrators: %s", lockPath)
-	}
-	control, _, err := actual.Control()
-	if err != nil {
-		return err
-	}
-	dacl, _, err := actual.DACL()
-	if err != nil || dacl == nil || control&windows.SE_DACL_PROTECTED == 0 || dacl.AceCount == 0 {
-		return fmt.Errorf("enterprise hooks: OpenCode port reconcile lock is not administrator-only: %s", lockPath)
-	}
-	for index := uint16(0); index < dacl.AceCount; index++ {
-		var ace *windows.ACCESS_ALLOWED_ACE
-		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
-			return err
-		}
-		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || (!sid.Equals(system) && !sid.Equals(admins)) {
-			return fmt.Errorf("enterprise hooks: OpenCode port reconcile lock is not administrator-only: %s", lockPath)
-		}
-	}
-	return nil
 }
 
 func validateWindowsOpenCodeContests(contested []WindowsOpenCodeContestedPort, holders map[int]string) error {

@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"io"
 	"maps"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -28,37 +30,16 @@ import (
 // halves, so a command that reaches k members costs about k*log(n) reads of
 // the command rather than one per member. A write proof concerns one member,
 // so a half reaches exactly when one of its members does.
-func registrationWriteReachedAs(command, cwd, home string, names []string) []string {
-	if command == "" || !filepath.IsAbs(cwd) || len(names) == 0 {
-		return nil
-	}
-	if !RegistrationWriteCandidate(command) {
-		return nil
-	}
-	file, ok := parseShell(command)
+func registrationWriteReachedAs(command, cwd, home string, names []string, spellings *RegistrationSpellings) []string {
+	file, protected, origin, _, ok := registrationReachSet(command, cwd, home, names, spellings)
 	if !ok {
 		return nil
 	}
-	protected := make(protectedFiles, 0, len(names))
-	origin := make([]string, 0, len(names))
-	call := memoHookCall() // once for the names (rel-1-0-10:GAP-1293)
-	for _, name := range names {
-		if !filepath.IsAbs(name) {
-			continue
-		}
-		entry := protectedFile{path: filepath.Clean(name), call: call}
-		if info, err := call.stat(entry.path); err == nil {
-			entry.info = info
-		} else if !os.IsNotExist(err) {
-			entry.unknown = true
-		}
-		protected = append(protected, entry)
-		origin = append(origin, name)
-	}
+	writes := &registrationWrites{command: command, cwd: cwd, home: home}
 	var reached []string
 	var narrow func(lo, hi int)
 	narrow = func(lo, hi int) {
-		if lo >= hi || !registrationWriteReach(file, command, cwd, home, protected[lo:hi], protected) {
+		if lo >= hi || !registrationWriteReach(file, command, cwd, home, protected[lo:hi], protected, writes) {
 			return
 		}
 		if hi-lo == 1 {
@@ -85,9 +66,168 @@ func registrationWriteReachedAs(command, cwd, home string, names []string) []str
 	return merged
 }
 
+// registrationWrites holds, for one reading of a command, the resolved write
+// targets registrationWriteReach reads in the whole command and in each of
+// its placed statements (TopLevelStatements). They do not depend on the
+// registration set, so the narrowing by halves reads, parses and resolves
+// them once for the command, not once for every half it tries: a dynamic
+// copy-mode call of 1,500 statements after a cd parsed every statement
+// again for each half (rel-1-0-10:GAP-2271). The statements are read in
+// order and only as far as a half needs them.
+type registrationWrites struct {
+	command, cwd, home string
+	whole              []string
+	wholeRead          bool
+	statements         []PlacedStatement
+	listed             bool
+	each               [][]string
+}
+
+// targets are the write operands one reading of body in dir names, resolved
+// as protectedReachPath resolves them (resolveWriteTarget); an operand that
+// does not resolve is left out, as protectedReachPath answers it false.
+func (w *registrationWrites) targets(body, dir string, user KnownUser) []string {
+	writes := LiteralWriteOperands(body, dir, w.home)
+	writes = append(writes, InPlaceEditOperands(body, dir, w.home, user)...)
+	if strings.Contains(body, ">") {
+		redirects, _, _ := ShellWriteOperands(body, dir, w.home)
+		writes = append(writes, redirects...)
+		bounded, _ := BoundedShellWriteOperands(body, dir, w.home)
+		writes = append(writes, bounded...)
+	}
+	var memo *TargetMemo
+	resolved := make([]string, 0, len(writes))
+	for _, path := range writes {
+		if target, ok := memo.resolveWriteTarget(OperandPath(path, dir)); ok {
+			resolved = append(resolved, target)
+		}
+	}
+	return resolved
+}
+
+// wholeTargets are the targets of the whole command in cwd.
+func (w *registrationWrites) wholeTargets() []string {
+	if !w.wholeRead {
+		w.whole = w.targets(w.command, w.cwd, KnownUser{Name: ActionKnownUser(w.command, w.home)})
+		w.wholeRead = true
+	}
+	return w.whole
+}
+
+// statementTargets are the targets of placed statement i, and false past the
+// last one or when the command changes no directory or its statements
+// cannot be placed.
+func (w *registrationWrites) statementTargets(i int) ([]string, bool) {
+	if !w.listed {
+		w.listed = true
+		if ChangesDirectory(w.command) {
+			if statements, ok := TopLevelStatements(w.command, w.cwd, w.home); ok {
+				w.statements = statements
+			}
+		}
+	}
+	if i >= len(w.statements) {
+		return nil, false
+	}
+	for len(w.each) <= i {
+		statement := w.statements[len(w.each)]
+		w.each = append(w.each, w.targets(statement.Command, statement.Dir, statement.User))
+	}
+	return w.each[i], true
+}
+
+// registrationTargetsReach reports a resolved target that is a member of
+// protected (protectedReachResolved).
+func registrationTargetsReach(targets []string, protected protectedFiles) bool {
+	return slices.ContainsFunc(targets, func(target string) bool { return protectedReachResolved(target, protected, "") })
+}
+
+// registrationReachSet parses the command and stats every absolute member of
+// names once: protected and origin are those members in order, at their
+// indexes in names. ok is false when no reading can reach a member.
+func registrationReachSet(command, cwd, home string, names []string, spellings *RegistrationSpellings) (file *syntax.File, protected protectedFiles, origin []string, at []int, ok bool) {
+	if command == "" || !filepath.IsAbs(cwd) || len(names) == 0 {
+		return nil, nil, nil, nil, false
+	}
+	if !RegistrationWriteCandidate(command) {
+		return nil, nil, nil, nil, false
+	}
+	file, ok = parseShell(command)
+	if !ok {
+		return nil, nil, nil, nil, false
+	}
+	protected = make(protectedFiles, 0, len(names))
+	origin = make([]string, 0, len(names))
+	at = make([]int, 0, len(names))
+	call := memoHookCall() // once for the names (rel-1-0-10:GAP-1293)
+	if spellings == nil {
+		spellings = NewRegistrationSpellings()
+	}
+	finds := newFindReads(spellings) // once for every half the narrowing reads
+	for index, name := range names {
+		if !filepath.IsAbs(name) {
+			continue
+		}
+		entry := protectedFile{path: filepath.Clean(name), call: call, finds: finds}
+		if info, err := call.stat(entry.path); err == nil {
+			entry.info = info
+		} else if !os.IsNotExist(err) {
+			entry.unknown = true
+		}
+		if physical := spellings.physical(entry.path); physical != "" && physical != entry.path {
+			entry.physical = physical
+		}
+		protected = append(protected, entry)
+		origin = append(origin, name)
+		at = append(at, index)
+	}
+	return file, protected, origin, at, true
+}
+
+// registrationFirstWriteReachedAs is the index in names of the first member
+// registrationWriteReachedAs returns, or len(names) when it returns none or
+// none before limit. It reads the same halves in the same order and stops at
+// the first member a half narrows to: that is the first one the full
+// narrowing appends, which appends in the order of names. A half that starts
+// at limit or past the first flow member cannot hold an earlier member and
+// is not read (rel-1-0-10:GAP-2271).
+func registrationFirstWriteReachedAs(command, cwd, home string, names []string, limit int) int {
+	file, protected, _, at, ok := registrationReachSet(command, cwd, home, names, nil)
+	if !ok {
+		return len(names)
+	}
+	first := len(names)
+	for index, member := range registrationFlowMembers(file, command, cwd, home, protected) {
+		if member {
+			first = at[index]
+			break
+		}
+	}
+	limit = min(limit, first)
+	writes := &registrationWrites{command: command, cwd: cwd, home: home}
+	found := false
+	var narrow func(lo, hi int)
+	narrow = func(lo, hi int) {
+		if found || lo >= hi || at[lo] >= limit || !registrationWriteReach(file, command, cwd, home, protected[lo:hi], protected, writes) {
+			return
+		}
+		if hi-lo == 1 {
+			found = true
+			first = at[lo]
+			return
+		}
+		mid := lo + (hi-lo)/2
+		narrow(lo, mid)
+		narrow(mid, hi)
+	}
+	narrow(0, len(protected))
+	return first
+}
+
 // registrationWriteReach reports whether the command writes a member of
 // protected, one part of the registration set all the narrowing reads.
-func registrationWriteReach(file *syntax.File, command, cwd, home string, protected, all protectedFiles) bool {
+// writes holds the command's set-free write targets across the narrowing.
+func registrationWriteReach(file *syntax.File, command, cwd, home string, protected, all protectedFiles, writes *registrationWrites) bool {
 	fileProtected := make(protectedFiles, 0, len(protected))
 	for _, entry := range protected {
 		if entry.info == nil || !entry.info.IsDir() {
@@ -97,23 +237,7 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 	if actionClientResolvedProtectedWrite(file, command, cwd, home, protected, "") {
 		return true
 	}
-	readOperands := func(body, dir string, user KnownUser) bool {
-		writes := LiteralWriteOperands(body, dir, home)
-		writes = append(writes, InPlaceEditOperands(body, dir, home, user)...)
-		if strings.Contains(body, ">") {
-			redirects, _, _ := ShellWriteOperands(body, dir, home)
-			writes = append(writes, redirects...)
-			bounded, _ := BoundedShellWriteOperands(body, dir, home)
-			writes = append(writes, bounded...)
-		}
-		for _, path := range writes {
-			if protectedReachPath(OperandPath(path, dir), fileProtected, "") {
-				return true
-			}
-		}
-		return false
-	}
-	if readOperands(command, cwd, KnownUser{Name: ActionKnownUser(command, home)}) {
+	if registrationTargetsReach(writes.wholeTargets(), fileProtected) {
 		return true
 	}
 	if registrationPatchReach(file, cwd, home, protected) {
@@ -126,13 +250,13 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 		registrationFindRsyncReach(file, cwd, home, protected, all) {
 		return true
 	}
-	if ChangesDirectory(command) {
-		if statements, ok := TopLevelStatements(command, cwd, home); ok {
-			for _, statement := range statements {
-				if readOperands(statement.Command, statement.Dir, statement.User) {
-					return true
-				}
-			}
+	for i := 0; ; i++ {
+		targets, ok := writes.statementTargets(i)
+		if !ok {
+			break
+		}
+		if registrationTargetsReach(targets, fileProtected) {
+			return true
 		}
 	}
 	if registrationWalkLinks(file, command, cwd, home, protected, false, pipeEachChild) {
@@ -320,17 +444,29 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 		}
 		program, known := staticProgramWord(call.Args[0], home)
 		base := programBase(program)
-		if known && (base == "rm" || base == "rmdir" || base == "unlink" || base == "mv" || base == "gmv" ||
-			base == "chmod" || base == "chown" || base == "chgrp" || base == "setfacl" || base == "chattr") {
+		// A static prefix wrapper chain (sudo, env, nice, ...) runs its child
+		// with the caller's argv: the child is the removal read here, in the
+		// folder the chain runs it in, as a cd to that folder would place it
+		// (sudo -D/--chdir DIR, env -C DIR, chroot ROOT; rel-1-0-10:GAP-2286).
+		// Under chroot an absolute operand names a path below the new root.
+		removal, removalCWD, removalRoot, removalBase, removalKnown := call.Args, currentCWD, "", base, known
+		if known && len(call.Args) > 2 && (actionfacts.PrefixWrapperProgram(base) || base == "chroot") {
+			if child, folder, root, wrapped := registrationWrappedCall(call.Args, values, currentCWD, home); wrapped {
+				removal, removalCWD, removalRoot = child, folder, root
+				childProgram, childKnown := staticProgramWord(child[0], home)
+				removalBase, removalKnown = programBase(childProgram), childKnown
+			}
+		}
+		if removalKnown && slices.Contains(registrationRemovalPrograms, removalBase) {
 			receiver := -1
-			if base == "mv" || base == "gmv" {
-				words := make([]string, len(call.Args))
-				for index, word := range call.Args {
+			if removalBase == "mv" || removalBase == "gmv" {
+				words := make([]string, len(removal))
+				for index, word := range removal {
 					words[index], _ = StaticWord(word, home)
 				}
 				receiver = registrationMoveReceiver(words)
 			}
-			for index, word := range call.Args[1:] {
+			for index, word := range removal[1:] {
 				receives := index+1 == receiver
 				if receives && !actionWordHasBraceText(word) {
 					continue // the destination receives the sources (read where it is placed, below)
@@ -342,22 +478,19 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 						fields = fields[:len(fields)-1]
 					}
 					for _, value := range fields {
-						if protectedReachPath(OperandPath(value, currentCWD), protected, "") {
+						if protectedReachPath(OperandPath(registrationRootedOperand(value, removalRoot), removalCWD), protected, "") {
 							found = true
 							return false
 						}
 					}
 					continue
 				}
-				value, known := actionWordValueWithGlob(word, values, currentCWD, home, true)
+				value, known := actionWordValueWithGlob(word, values, removalCWD, home, true)
 				if !known || value == "" || strings.HasPrefix(value, "-") {
 					continue
 				}
 				if strings.ContainsAny(value, "*?[") && actionWordHasUnquotedGlob(word, command) {
-					paths, truncated := actionBoundedGlob(OperandPath(value, currentCWD), false)
-					if len(paths) > 64 {
-						continue
-					}
+					paths, truncated := registrationGlobMatches(OperandPath(registrationRootedOperand(value, removalRoot), removalCWD))
 					for _, path := range paths {
 						if protectedReachPath(path, protected, "") {
 							found = true
@@ -369,7 +502,7 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 					noteGlobCut(truncated)
 					continue
 				}
-				if !strings.ContainsAny(value, "*?[") && protectedReachPath(OperandPath(value, currentCWD), protected, "") {
+				if !strings.ContainsAny(value, "*?[") && protectedReachPath(OperandPath(registrationRootedOperand(value, removalRoot), removalCWD), protected, "") {
 					found = true
 					return false
 				}
@@ -416,6 +549,155 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 	}
 	syntax.Walk(file, visit)
 	return found
+}
+
+// RegistrationSpellings are the physical spellings (protectedFile.physical)
+// of registration names, read once for a hook call. The reach reader runs for
+// every statement and every reading of a call against the same names: each
+// statement walked the links of every name again, and a 60-statement removal
+// command cost 1.47 times the hook p99 of its parent (rel-1-0-10:GAP-2285,
+// TST-18078). A hook call is one decision over one file system
+// (ResolveWriteTarget), so a spelling read once holds for the rest of the
+// call; a caller keeps one only for the call it reads. nil reads afresh.
+type RegistrationSpellings struct {
+	mu    sync.Mutex
+	paths map[string]registrationSpelling
+}
+
+// registrationSpelling is a name or one of its folders as the link-aware walk
+// resolves it.
+type registrationSpelling struct {
+	resolved string
+	ok       bool
+}
+
+// NewRegistrationSpellings is an empty set of spellings for one hook call.
+func NewRegistrationSpellings() *RegistrationSpellings {
+	return &RegistrationSpellings{paths: make(map[string]registrationSpelling)}
+}
+
+// physical is the spelling ResolveWriteTarget gives path ("" when it does
+// not resolve), read once for each name.
+func (s *RegistrationSpellings) physical(path string) string {
+	if resolved, ok := s.walk(path); ok {
+		return resolved
+	}
+	return ""
+}
+
+// walk is ResolveWriteTarget of an absolute clean path with every folder on
+// the way read once for the call, since the names share their folders: a
+// component that is no link (a file, a folder, or missing) is joined to its
+// resolved folder, as the walk joins it (walkWritePathWhy). Any other
+// component (a link, an unreadable entry) is walked whole, and so is every
+// path on Windows, where a mount point is a link too and the call memory
+// already keeps the walks.
+func (s *RegistrationSpellings) walk(path string) (string, bool) {
+	s.mu.Lock()
+	known, found := s.paths[path]
+	s.mu.Unlock()
+	if found {
+		return known.resolved, known.ok
+	}
+	var answer registrationSpelling
+	joined := false
+	if parent := filepath.Dir(path); runtime.GOOS != "windows" && parent != path {
+		if folder, ok := s.walk(parent); ok {
+			candidate := filepath.Join(folder, filepath.Base(path))
+			if info, err := pathLstat(candidate); err == nil && info.Mode()&os.ModeSymlink == 0 || os.IsNotExist(err) {
+				answer, joined = registrationSpelling{resolved: candidate, ok: true}, true
+			}
+		}
+	}
+	if !joined {
+		answer.resolved, answer.ok = ResolveWriteTarget(path)
+	}
+	s.mu.Lock()
+	s.paths[path] = answer
+	s.mu.Unlock()
+	return answer.resolved, answer.ok
+}
+
+// registrationRootedOperand is an operand of a call run under root (chroot;
+// "" for the caller's root) as the caller's file system names it: an
+// absolute operand is below the new root.
+func registrationRootedOperand(value, root string) string {
+	if root != "" && filepath.IsAbs(value) {
+		return filepath.Join(root, value)
+	}
+	return value
+}
+
+// registrationRemovalPrograms remove, move or change the mode, owner or
+// attributes of their operands: an operand that is a registered file or
+// folder is reached.
+var registrationRemovalPrograms = []string{"rm", "rmdir", "unlink", "mv", "gmv", "chmod", "chown", "chgrp", "setfacl", "chattr"}
+
+// registrationWrappedCall is the call a chain of wrappers at the head of
+// args runs, the folder it runs it in and the root it runs it under ("" for
+// the caller's root). The chain is read by the readers the nested -c body
+// and the action analysis use: static prefix wrappers
+// (actionfacts.StaticPrefixWrapperChild) and chroot (actionfacts.ChrootRun).
+// The folder is placed as a cd to it is (actionPosixAdvanceDirectory),
+// resolved through its links: sudo -D/--chdir DIR and env -C DIR from the
+// folder so far, and chroot ROOT at the new root unless --skip-chdir. A
+// child that starts in a folder the words do not name (sudo -i/--login: the
+// target user's home; ~user) keeps the folder so far, as a cd the walk
+// cannot place does. wrapped is false when args is no such chain, when the
+// chain changes which program the child word names (env PATH=...), or when
+// the child word is not static.
+func registrationWrappedCall(args []*syntax.Word, values actionValues, cwd, home string) (child []*syntax.Word, folder, root string, wrapped bool) {
+	words, static := make([]string, len(args)), make([]bool, len(args))
+	for index, word := range args {
+		words[index], static[index] = actionWordValue(word, values, cwd, home)
+	}
+	place := func(dir string) string {
+		if root != "" && filepath.IsAbs(dir) {
+			dir = filepath.Join(root, dir)
+		}
+		path := OperandPath(dir, folder)
+		if resolved, ok := ResolveWriteTarget(path); ok {
+			return resolved
+		}
+		return filepath.Clean(path)
+	}
+	folder, at := cwd, 0
+	for depth := 0; depth < 4 && at < len(words) && static[at]; depth++ {
+		next := 0
+		if run, ok := actionfacts.StaticPrefixWrapperChild(words[at:], static[at:]); ok {
+			if run.ChangesResolution {
+				return nil, "", "", false
+			}
+			if dir := run.Dir; dir != "" && !run.DirUnknown && !strings.HasPrefix(dir, "~") && !strings.ContainsRune(dir, 0) {
+				folder = place(dir)
+			}
+			next = run.Index
+		} else if programBase(words[at]) == "chroot" {
+			newRoot, index, skipChdir, ok := actionfacts.ChrootRun(words[at:])
+			if !ok || !static[at+index] {
+				return nil, "", "", false
+			}
+			if !filepath.IsAbs(newRoot) && root == "" {
+				newRoot = OperandPath(newRoot, folder)
+			}
+			root = place(newRoot)
+			if !skipChdir {
+				folder = root
+			}
+			next = index
+		} else {
+			break
+		}
+		if next <= 0 || at+next >= len(args) {
+			return nil, "", "", false
+		}
+		at += next
+		wrapped = true
+	}
+	if !wrapped || !static[at] || words[at] == "" {
+		return nil, "", "", false
+	}
+	return args[at:], folder, root, true
 }
 
 // registrationShadowable names the builtins and programs the exact reading
@@ -649,10 +931,7 @@ func registrationItemPaths(word *syntax.Word, command, cwd, home string) []strin
 		return nil
 	}
 	if strings.ContainsAny(value, "*?[") && actionWordHasUnquotedGlob(word, command) {
-		matches, truncated := actionBoundedGlob(OperandPath(value, cwd), false)
-		if len(matches) > 64 {
-			return nil
-		}
+		matches, truncated := registrationGlobMatches(OperandPath(value, cwd))
 		// The loop reader decides on the matches read before the cap: the
 		// reading is truncated (RegistrationWriteReachedBounded).
 		noteGlobCut(truncated)
@@ -961,11 +1240,13 @@ func registrationFindReachedFiles(args []*syntax.Word, values actionValues, cwd,
 		roots = []string{"."}
 	}
 	var reached []string
+	finds := protected.findReads()
 	for _, root := range roots {
-		root, path, prefix := findRootStart(root, cwd, home)
+		root, path, prefix := finds.start(root, cwd, home)
 		if info, err := pathStat(path); err == nil && info.IsDir() {
+			walked := finds.root(path, prefix)
 			for _, target := range protected {
-				if target.path == path || !findRootHolds(path, prefix, target.path) {
+				if target.path == path || !walked.holds(target.path) {
 					continue
 				}
 				// A find hands its child only the entries the walk finds: a
@@ -1092,8 +1373,158 @@ func registrationFindRsyncReach(file *syntax.File, cwd, home string, protected, 
 
 // findRootHolds reports a path at or below a find root; prefix is the root
 // ending in one separator. Windows compares names without case, so find c:/
-// walks a C: home (rel-1-0-10:GAP-1642).
+// walks a C: home (rel-1-0-10:GAP-1642). A caller that asks about many paths
+// below one root reads the root once (newFindRoot).
 func findRootHolds(root, prefix, path string) bool {
+	return newFindRoot(root, prefix, nil).holds(path)
+}
+
+// findRoot is a find root read once for every path it is asked about.
+//
+// A root that keeps a dot-dot step (OperandPath leaves it raw after a link or
+// a name it cannot read) starts where the kernel climbs: it is compared by the
+// folder the link-aware walk resolves, as a write operand of the same spelling
+// is (rel-1-0-10:GAP-1648), against the path and the file the path resolves
+// to. The root is resolved once, not once for every path: a find of 50 roots
+// with three steps each under a linked home cost 4.3 times the plain find
+// when each (root, path) pair resolved the root again (CHK-RF-VB7 N2). The
+// paths are resolved once for every root too (findReads).
+type findRoot struct {
+	root, prefix             string
+	physical, physicalPrefix string // "" when the spelling alone decides
+	targets                  *findReads
+}
+
+// findReads keeps what the find readers read of their roots (findRootStart,
+// newFindRoot) and the ResolveWriteTarget answer of every path a root is
+// asked about, for every root of one find and, through the registration set
+// (protectedFile.finds), for every half the narrowing of one
+// registrationWriteReachedAs reads. A find of 50 roots with three dot-dot
+// steps each under a linked home read every root again for each reader and
+// half, and resolved each registered file again for each root: 5.2 times the
+// 1.0.10 hook time (rel-1-0-10:GAP-2299). The file system of one decision is
+// the same file system, so the answers are the ones each read gave before.
+// A nil findReads reads every time. A registered path is resolved through
+// the spellings of the hook call when the set has them: they are the
+// ResolveWriteTarget answers, read once for the call.
+type findReads struct {
+	mu        sync.Mutex
+	starts    map[findStartKey][3]string
+	roots     map[string]findRoot
+	targets   map[string]findTarget
+	spellings *RegistrationSpellings
+}
+
+type findStartKey struct{ written, cwd, home string }
+
+type findTarget struct {
+	resolved string
+	ok       bool
+}
+
+// newFindReads is an empty find memory; spellings (nil: none) are the
+// physical spellings of the registered names for the hook call.
+func newFindReads(spellings *RegistrationSpellings) *findReads {
+	return &findReads{
+		starts:    make(map[findStartKey][3]string),
+		roots:     make(map[string]findRoot),
+		targets:   make(map[string]findTarget),
+		spellings: spellings,
+	}
+}
+
+// findReads is the find memory of the set (the narrowing one when the set
+// has it), or a new one for a single find.
+func (p protectedFiles) findReads() *findReads {
+	for _, file := range p {
+		if file.finds != nil {
+			return file.finds
+		}
+	}
+	return newFindReads(nil)
+}
+
+// start is findRootStart, read once.
+func (r *findReads) start(written, cwd, home string) (string, string, string) {
+	key := findStartKey{written, cwd, home}
+	r.mu.Lock()
+	known, found := r.starts[key]
+	r.mu.Unlock()
+	if !found {
+		known[0], known[1], known[2] = findRootStart(written, cwd, home)
+		r.mu.Lock()
+		r.starts[key] = known
+		r.mu.Unlock()
+	}
+	return known[0], known[1], known[2]
+}
+
+// root is newFindRoot, read once (prefix is root ending in one separator).
+func (r *findReads) root(root, prefix string) findRoot {
+	r.mu.Lock()
+	known, found := r.roots[root]
+	r.mu.Unlock()
+	if found && known.prefix == prefix {
+		return known
+	}
+	known = newFindRoot(root, prefix, r)
+	r.mu.Lock()
+	r.roots[root] = known
+	r.mu.Unlock()
+	return known
+}
+
+// resolve is ResolveWriteTarget(path), read once.
+func (r *findReads) resolve(path string) (string, bool) {
+	if r == nil {
+		return ResolveWriteTarget(path)
+	}
+	r.mu.Lock()
+	known, found := r.targets[path]
+	r.mu.Unlock()
+	if !found {
+		if r.spellings != nil && filepath.IsAbs(path) && filepath.Clean(path) == path {
+			known.resolved, known.ok = r.spellings.walk(path)
+		} else {
+			known.resolved, known.ok = ResolveWriteTarget(path)
+		}
+		r.mu.Lock()
+		r.targets[path] = known
+		r.mu.Unlock()
+	}
+	return known.resolved, known.ok
+}
+
+// newFindRoot reads root (prefix is root ending in one separator); targets
+// keeps the paths resolved for the other roots (nil: none).
+func newFindRoot(root, prefix string, targets *findReads) findRoot {
+	r := findRoot{root: root, prefix: prefix, targets: targets}
+	if !hasDotDotStep(root) {
+		return r
+	}
+	if physical, ok := ResolveWriteTarget(root); ok && physical != root && !hasDotDotStep(physical) {
+		r.physical, r.physicalPrefix = physical, rootPrefix(physical)
+	}
+	return r
+}
+
+// holds reports path at or below the root.
+func (r findRoot) holds(path string) bool {
+	if rootSpellingHolds(r.root, r.prefix, path) {
+		return true
+	}
+	if r.physical == "" {
+		return false
+	}
+	if rootSpellingHolds(r.physical, r.physicalPrefix, path) {
+		return true
+	}
+	resolved, ok := r.targets.resolve(path)
+	return ok && resolved != path && rootSpellingHolds(r.physical, r.physicalPrefix, resolved)
+}
+
+// rootSpellingHolds is findRootHolds by the spelling of the root alone.
+func rootSpellingHolds(root, prefix, path string) bool {
 	if runtime.GOOS == "windows" {
 		return strings.EqualFold(path, root) || len(path) > len(prefix) && strings.EqualFold(path[:len(prefix)], prefix)
 	}
@@ -1254,10 +1685,12 @@ func registrationFindReach(words []string, cwd, home string, protected, all prot
 	for i, name := range names {
 		nameTests[i], _ = newFindTest(nameOption, name, "")
 	}
+	finds := all.findReads()
 	for _, written := range roots {
-		written, root, prefix := findRootStart(written, cwd, home)
+		written, root, prefix := finds.start(written, cwd, home)
+		walked := finds.root(root, prefix)
 		below := func(target protectedFile) bool {
-			return findRootHolds(root, prefix, target.path)
+			return walked.holds(target.path)
 		}
 		aimed := func(target protectedFile, tests []findTest) bool {
 			return slices.ContainsFunc(tests, func(test findTest) bool { return test.aimsAt(written, root, target.path) })
@@ -1851,4 +2284,25 @@ func registrationPatchReach(file *syntax.File, cwd, home string, protected prote
 		return true
 	})
 	return found
+}
+
+// maxRegistrationGlobMatches bounds the matches of one pattern the
+// registration readers resolve and judge. A pattern that matched more than
+// 64 names was skipped before the registered-file check with no signal
+// (rel-1-0-10:GAP-1491); every match up to this cap is judged now, and past
+// it the first ones are judged and the reading is truncated (bounded.Items),
+// so a registered file the cap hides is the unknown tier, never a silent
+// allow.
+const maxRegistrationGlobMatches = 1024
+
+// registrationGlobMatches expands pattern for a registration reader
+// (actionBoundedGlob) and keeps at most maxRegistrationGlobMatches matches,
+// with the caps the expansion and the keep hit.
+func registrationGlobMatches(pattern string) ([]string, bounded.CapSet) {
+	matches, truncated := actionBoundedGlob(pattern, false)
+	if len(matches) > maxRegistrationGlobMatches {
+		matches = matches[:maxRegistrationGlobMatches]
+		truncated = truncated.Union(bounded.Of(bounded.Items))
+	}
+	return matches, truncated
 }

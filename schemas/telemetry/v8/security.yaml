@@ -2507,7 +2507,7 @@ groups:
       details:
         evaluation_id: optional because clean and technical hook outcomes may have no guardrail evaluation
         hook_result: ok|panic is independent of the connector-facing policy action
-        input_messages: present only as a bounded, potentially redacted copy of connector event content submitted through the Cisco AI Defense hook lane when no prompt/tool companion event represents it; it cannot reconstruct the AI Defense request and is absent when handled only by local rules, the optional judge, or local file/component scanning
+        input_messages: present only with guardrail.include_hook_event_content on (off by default), as a bounded, potentially redacted copy of connector event content submitted through the Cisco AI Defense hook lane when no prompt/tool companion event represents it; it cannot reconstruct the AI Defense request and is absent when handled only by local rules, the optional judge, or local file/component scanning
         step_idx: optional and one-based when present
 - id: body.approval.requested
   type: body_group

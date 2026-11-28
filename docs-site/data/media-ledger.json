@@ -22,21 +22,6 @@
     ],
     "replays": 0
   },
-  "connectors/cowork-vm-sensor": {
-    "videos": [
-      "cowork-claude-desktop"
-    ],
-    "images": [
-      "/images/cowork/cowork-desktop-sensor-status.png",
-      "/images/cowork/cowork-desktop-vendor-refusal.png",
-      "/images/cowork/cowork-standin-grafana-findings.png",
-      "/images/cowork/cowork-standin-grafana-tactics.png",
-      "/images/cowork/cowork-standin-install.png",
-      "/images/posters/cowork-claude-desktop.jpg"
-    ],
-    "demos": [],
-    "replays": 0
-  },
   "connectors/cowork": {
     "videos": [
       "cowork-claude-desktop"
@@ -54,6 +39,21 @@
     "demos": [],
     "replays": 0
   },
+  "connectors/cowork-vm-sensor": {
+    "videos": [
+      "cowork-claude-desktop"
+    ],
+    "images": [
+      "/images/cowork/cowork-desktop-sensor-status.png",
+      "/images/cowork/cowork-desktop-vendor-refusal.png",
+      "/images/cowork/cowork-standin-grafana-findings.png",
+      "/images/cowork/cowork-standin-grafana-tactics.png",
+      "/images/cowork/cowork-standin-install.png",
+      "/images/posters/cowork-claude-desktop.jpg"
+    ],
+    "demos": [],
+    "replays": 0
+  },
   "connectors/openclaw": {
     "videos": [
       "openclaw",
@@ -62,17 +62,6 @@
     "images": [
       "/images/posters/openclaw-e2e.jpg",
       "/images/posters/openclaw.jpg"
-    ],
-    "demos": [],
-    "replays": 0
-  },
-  "routing/routing-budgets": {
-    "videos": [],
-    "images": [
-      "/images/routing/cli-routing-rules.png",
-      "/images/routing/grafana-routing-budgets.png",
-      "/images/routing/grafana-routing-savings.png",
-      "/images/routing/grafana-routing-users.png"
     ],
     "demos": [],
     "replays": 0
@@ -126,6 +115,12 @@
     "demos": [],
     "replays": 0
   },
+  "get-started/unified-llm-key": {
+    "videos": [],
+    "images": [],
+    "demos": [],
+    "replays": 1
+  },
   "get-started/windows/paths-troubleshooting": {
     "videos": [],
     "images": [
@@ -149,26 +144,6 @@
     ],
     "demos": [],
     "replays": 0
-  },
-  "routing/semantic-routing": {
-    "videos": [
-      "router-oss"
-    ],
-    "images": [
-      "/images/posters/router-oss.jpg",
-      "/images/routing/cli-routing-explain.png",
-      "/images/routing/tui-routing-panel.png",
-      "/images/routing/tui-setup-routing.png",
-      "/images/routing/tui-setup-wizard.png"
-    ],
-    "demos": [],
-    "replays": 0
-  },
-  "get-started/unified-llm-key": {
-    "videos": [],
-    "images": [],
-    "demos": [],
-    "replays": 1
   },
   "hitl": {
     "videos": [],
@@ -262,6 +237,31 @@
     "demos": [],
     "replays": 0
   },
+  "routing/routing-budgets": {
+    "videos": [],
+    "images": [
+      "/images/routing/cli-routing-rules.png",
+      "/images/routing/grafana-routing-budgets.png",
+      "/images/routing/grafana-routing-savings.png",
+      "/images/routing/grafana-routing-users.png"
+    ],
+    "demos": [],
+    "replays": 0
+  },
+  "routing/semantic-routing": {
+    "videos": [
+      "router-oss"
+    ],
+    "images": [
+      "/images/posters/router-oss.jpg",
+      "/images/routing/cli-routing-explain.png",
+      "/images/routing/tui-routing-panel.png",
+      "/images/routing/tui-setup-routing.png",
+      "/images/routing/tui-setup-wizard.png"
+    ],
+    "demos": [],
+    "replays": 0
+  },
   "sandboxes": {
     "videos": [
       "openshell-defenseclaw",
@@ -341,6 +341,24 @@
     ],
     "demos": [],
     "replays": 2
+  },
+  "sandboxes/vault": {
+    "videos": [
+      "sandbox-vault",
+      "sandbox-vault-codex"
+    ],
+    "images": [
+      "/images/posters/sandbox-vault-codex.jpg",
+      "/images/posters/sandbox-vault.jpg",
+      "/images/sandboxes/screens/vault-capture-claude.png",
+      "/images/sandboxes/screens/vault-capture-codex.png",
+      "/images/sandboxes/screens/vault-cli-list.png",
+      "/images/sandboxes/screens/vault-exposed-refused.png",
+      "/images/sandboxes/screens/vault-placeholder-call.png",
+      "/images/sandboxes/screens/vault-tui-panel.png"
+    ],
+    "demos": [],
+    "replays": 0
   },
   "scanning": {
     "videos": [],

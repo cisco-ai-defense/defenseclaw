@@ -28,9 +28,12 @@ import (
 // the Codex app, which has no engine version, is reported; and
 // unverified_versions: refuse refuses the extension. The profile is read
 // only under its owner's token, so a signed-out owner or a failed
-// impersonation finds nothing.
+// impersonation finds nothing. The Codex app's package folder is read from
+// a test Program Files: the service reads the real WindowsApps as
+// LocalSystem, and a standard user running this test may not open it
+// (GAP-1939).
 func TestWindowsStandaloneSurfaceOnlyProfile(t *testing.T) {
-	home := t.TempDir()
+	home, programFiles := t.TempDir(), t.TempDir()
 	extension := filepath.Join(home, "relocated", "anthropic.claude-code-2.1.220-win32-x64")
 	if err := os.MkdirAll(extension, 0o755); err != nil {
 		t.Fatal(err)
@@ -38,8 +41,10 @@ func TestWindowsStandaloneSurfaceOnlyProfile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(extension, "package.json"), []byte(`{"version":"2.1.220"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(home, "AppData", "Local", "Packages", "OpenAI.Codex_test"), 0o755); err != nil {
-		t.Fatal(err)
+	for _, dir := range []string{filepath.Join(home, "AppData", "Local", "Packages", "OpenAI.Codex_test"), filepath.Join(programFiles, "WindowsApps", "OpenAI.Codex_9.0.0_x64__test")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	devin := filepath.Join(home, "AppData", "Local", "Programs", "Devin")
 	page := devinDesktopManPage(filepath.Join(devin, "resources", "app"))
@@ -52,7 +57,8 @@ func TestWindowsStandaloneSurfaceOnlyProfile(t *testing.T) {
 		}
 	}
 	const sid = "S-1-5-21-1-2-3-1001"
-	previousReadAs, previousEnvironment := windowsSurfaceReadAs, windowsUserEnvironment
+	previousReadAs, previousEnvironment, previousProgramFiles := windowsSurfaceReadAs, windowsUserEnvironment, windowsSurfaceTrustedProgramFiles
+	windowsSurfaceTrustedProgramFiles = func() (string, error) { return programFiles, nil }
 	var readAsErr error
 	impersonated := 0
 	windowsSurfaceReadAs = func(owner, profileHome string, fn func() error) error {
@@ -72,7 +78,7 @@ func TestWindowsStandaloneSurfaceOnlyProfile(t *testing.T) {
 		return ""
 	}
 	t.Cleanup(func() {
-		windowsSurfaceReadAs, windowsUserEnvironment = previousReadAs, previousEnvironment
+		windowsSurfaceReadAs, windowsUserEnvironment, windowsSurfaceTrustedProgramFiles = previousReadAs, previousEnvironment, previousProgramFiles
 		SetUnverifiedVersionsPolicy(nil)
 	})
 	var reported []UnprotectedAgent
@@ -91,7 +97,7 @@ func TestWindowsStandaloneSurfaceOnlyProfile(t *testing.T) {
 		t.Fatalf("devin Desktop-only version = %q, reported %+v", got, reported)
 	}
 	if got := windowsStandaloneSurfaceVersion(row("codex"), nil, rowContext, ""); got != "" || len(reported) != 1 ||
-		reported[0].Code != UnprotectedCodeSurfaceUnverified || reported[0].Surface != "desktop" || reported[0].Refusal != "" {
+		reported[0].Code != UnprotectedCodeSurfaceUnverified || reported[0].Surface != "desktop" || reported[0].HostVersion != "9.0.0" || reported[0].Refusal != "" {
 		t.Fatalf("codex app-only version = %q, reported %+v", got, reported)
 	}
 	SetUnverifiedVersionsPolicy(func(string) string { return "refuse" })

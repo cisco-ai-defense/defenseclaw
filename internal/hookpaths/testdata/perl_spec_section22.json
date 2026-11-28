@@ -1,0 +1,1972 @@
+[
+{
+"case": "gap0592_perl:P01 three-arg open for write",
+"perl": "W",
+"rel": "LB",
+"cx8": "LB",
+"spec": "LB",
+"rule": "R0 rel reader + W2",
+"vs": "=",
+"cmd": "perl -e 'open(my $f, \">\", \".claude/settings.json\"); print $f \"{}\"'"
+},
+{
+"case": "gap0592_perl:P02 two-arg open for write",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "W3",
+"vs": "raise",
+"cmd": "perl -e 'open(F, \">.claude/settings.json\"); print F \"{}\"'"
+},
+{
+"case": "gap0592_perl:P03 append open",
+"perl": "W",
+"rel": "LB",
+"cx8": "LB",
+"spec": "LB",
+"rule": "R0 rel reader + W2",
+"vs": "=",
+"cmd": "perl -e 'open(my $f, \">>\", \".claude/settings.json\") or die; print $f \"x\"'"
+},
+{
+"case": "gap0592_perl:P04 read-write open",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "W2 +<",
+"vs": "raise",
+"cmd": "perl -e 'open(my $f, \"+<\", \".claude/settings.json\"); print $f \"{}\"'"
+},
+{
+"case": "gap0592_perl:P05 -E form",
+"perl": "W",
+"rel": "LB",
+"cx8": "LB",
+"spec": "LB",
+"rule": "R0 rel reader + W2",
+"vs": "=",
+"cmd": "perl -E 'open(my $f, \">\", \".claude/settings.json\"); say $f \"{}\"'"
+},
+{
+"case": "gap0592_perl:P07 unlink",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "W1",
+"vs": "raise",
+"cmd": "perl -e 'unlink \".claude/settings.json\"'"
+},
+{
+"case": "gap0592_perl:P08 rename",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "W1",
+"vs": "raise",
+"cmd": "perl -e 'rename \".claude/settings.json\", \".claude/x.json\"'"
+},
+{
+"case": "gap0592_perl:P09 in-place edit",
+"perl": "W",
+"rel": "LB",
+"cx8": "LB",
+"spec": "LB",
+"rule": "R0 rel -i reader",
+"vs": "=",
+"cmd": "perl -i -pe 's/defenseclaw/x/' .claude/settings.json"
+},
+{
+"case": "gap0592_perl:P10 sysopen write",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "F1 + W5",
+"vs": "raise",
+"cmd": "perl -e 'use Fcntl; sysopen(my $f, \".claude/settings.json\", O_WRONLY|O_TRUNC); syswrite $f, \"{}\"'"
+},
+{
+"case": "gap0592_perl:P11 write open with a layer",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "W2 layer",
+"vs": "raise",
+"cmd": "perl -e 'open(my $f, \">:raw\", \".claude/settings.json\"); print $f \"{}\"'"
+},
+{
+"case": "gap0592_perl:P12 two-arg open without parens",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "W3 list op",
+"vs": "raise",
+"cmd": "perl -e 'open F, \"+>.claude/settings.json\" or die; print F \"{}\"'"
+},
+{
+"case": "gap0592_perl:P13 truncate",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "W1",
+"vs": "raise",
+"cmd": "perl -e 'truncate \".claude/settings.json\", 0'"
+},
+{
+"case": "gap0592_perl:P14 unlink with parens",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "W1",
+"vs": "raise",
+"cmd": "perl -e 'unlink(\".claude/settings.json\") or die'"
+},
+{
+"case": "gap0592_perl:P15 rename onto the hook file",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "W1",
+"vs": "raise",
+"cmd": "perl -e 'rename(\"notes.txt\", \".claude/settings.json\")'"
+},
+{
+"case": "gap0592_perl:P16 symlink onto the hook file",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "W1",
+"vs": "raise",
+"cmd": "perl -e 'symlink \"notes.txt\", \".claude/settings.json\"'"
+},
+{
+"case": "gap0592_perl:P17 sysopen without parens",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "F1 + W5 list op",
+"vs": "raise",
+"cmd": "perl -MFcntl -e 'sysopen my $f, \".claude/settings.json\", O_CREAT|O_RDWR; print $f \"{}\"'"
+},
+{
+"case": "gap0592_perl:P18 CORE::unlink",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "C1 CORE:: + W1",
+"vs": "raise",
+"cmd": "perl -e 'CORE::unlink \".claude/settings.json\"'"
+},
+{
+"case": "gap0592_perl:P19 rename trailing comma",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "C1 + W1",
+"vs": "raise",
+"cmd": "perl -e 'rename(\"notes.txt\", \".claude/settings.json\",)'"
+},
+{
+"case": "gap0592_perl:P20 truncate trailing comma",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "C1 + W1",
+"vs": "raise",
+"cmd": "perl -e 'truncate(\".claude/settings.json\", 0,)'"
+},
+{
+"case": "gap0592_perl:P21 symlink trailing comma",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "C1 + W1",
+"vs": "raise",
+"cmd": "perl -e 'symlink(\"notes.txt\", \".claude/settings.json\",)'"
+},
+{
+"case": "gap0592_perl:P22 link trailing comma",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "C1 + W1",
+"vs": "raise",
+"cmd": "perl -e 'link(\"notes.txt\", \".claude/settings.json\",)'"
+},
+{
+"case": "gap0592_perl:P23 unlink newline paren",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "C1 + W1",
+"vs": "raise",
+"cmd": "perl -e 'unlink\n(\".claude/settings.json\")'"
+},
+{
+"case": "gap0592_perl:P24 rename newline paren",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "C1 + W1",
+"vs": "raise",
+"cmd": "perl -e 'rename\n(\"notes.txt\", \".claude/settings.json\")'"
+},
+{
+"case": "gap0592_perl:P25 open newline paren",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "C1 + W2",
+"vs": "raise",
+"cmd": "perl -e 'open\n(my $f, \"+<\", \".claude/settings.json\")'"
+},
+{
+"case": "gap0592_perl:P26 unlink comment",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L1 + W1",
+"vs": "raise",
+"cmd": "perl -e 'unlink # x\n\".claude/settings.json\"'"
+},
+{
+"case": "gap0592_perl:P27 operator star",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L4 + W1",
+"vs": "raise",
+"cmd": "perl -e 'print 0*unlink \".claude/settings.json\"'"
+},
+{
+"case": "gap0592_perl:P28 operator ampersand",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L4 + W1",
+"vs": "raise",
+"cmd": "perl -e 'print 1&unlink(\".claude/settings.json\")'"
+},
+{
+"case": "gap0592_perl:P29 operator percent",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L4 + W1",
+"vs": "raise",
+"cmd": "perl -e 'print 1%rename(\"notes.txt\", \".claude/settings.json\")'"
+},
+{
+"case": "gap0592_perl:P30 sysopen numeric flags",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "W5 numeric",
+"vs": "raise",
+"cmd": "perl -e 'sysopen(my $f, \".claude/settings.json\", 1)'"
+},
+{
+"case": "gap0592_perl:P31 sysopen octal flags",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "W5 numeric",
+"vs": "raise",
+"cmd": "perl -e 'sysopen(F, \".claude/settings.json\", 01|01000)'"
+},
+{
+"case": "gap0592_perl:C04 shadowed O_NOFOLLOW",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N2 shadow + W5",
+"vs": "raise",
+"cmd": "perl -e 'sub O_NOFOLLOW () { 1 }; sysopen(my $f, \".claude/settings.json\", O_NOFOLLOW) or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_perl:C05 use constant O_NOFOLLOW",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N1 + W5",
+"vs": "raise",
+"cmd": "perl -e 'use constant O_NOFOLLOW => 1; sysopen(my $f, \".claude/settings.json\", O_NOFOLLOW) or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_perl:E01 variable write mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "S1 + W4",
+"vs": "raise",
+"cmd": "perl -e 'my $m=\">\"; open(F,$m,\".claude/settings.json\"); print F \"x\"'"
+},
+{
+"case": "gap0592_perl:E02 concatenated write mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "W2 concat mode",
+"vs": "raise",
+"cmd": "perl -e 'open(F, \">\" . \"\", \".claude/settings.json\"); print F \"x\"'"
+},
+{
+"case": "gap0592_perl:E21 append variable mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "S1 + W4",
+"vs": "raise",
+"cmd": "perl -e 'my $m=\">>\"; open(F,$m,\".claude/settings.json\"); print F \"x\"'"
+},
+{
+"case": "gap0592_perl:B13 variable read mode",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'my $m=\"<\"; open(F,$m,\".claude/settings.json\"); print <F>'"
+},
+{
+"case": "gap0592_perl:B14 Fcntl read flags",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -MFcntl -e 'sysopen(my $f,\".claude/settings.json\",O_RDONLY|O_NOFOLLOW) or die $!; print <$f>'"
+},
+{
+"case": "gap0592_perl:X01 braced scalar alias",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "S1 ${m}= + W4",
+"vs": "raise",
+"cmd": "perl -e 'my $m=\"<\"; ${m}=\">\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_perl:X02 BEGIN q eval flag",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "O-list: definition inside string eval (new P3)",
+"vs": "=",
+"cmd": "perl -e 'BEGIN { eval q{sub O_NOFOLLOW () { 1 }} }; sysopen(my $f,\".claude/settings.json\",O_NOFOLLOW) or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_perl:X03 Fcntl BEGIN q eval flag",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "O-list: definition inside string eval (new P3)",
+"vs": "=",
+"cmd": "perl -e 'use Fcntl; BEGIN { eval q{sub O_NOFOLLOW () { 1 }} }; sysopen(my $f,\".claude/settings.json\",O_NOFOLLOW) or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_perl:X07 BEGIN glob alias",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N3 in BEGIN + W5",
+"vs": "raise",
+"cmd": "perl -e 'BEGIN { *O_NOFOLLOW = sub () { 1 } }; sysopen(my $f,\".claude/settings.json\",O_NOFOLLOW) or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_perl:X08 use constant list",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N1 hash + W5",
+"vs": "raise",
+"cmd": "perl -e 'use constant { O_NOFOLLOW => 1 }; sysopen(my $f,\".claude/settings.json\",O_NOFOLLOW) or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_perl:X09 string eval flag",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "O-list: string eval (new P3)",
+"vs": "=",
+"cmd": "perl -e 'BEGIN { eval \"sub O_NOFOLLOW () { 1 }\" }; sysopen(my $f,\".claude/settings.json\",O_NOFOLLOW) or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_perl:X10 local mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "S1 local + W4",
+"vs": "raise",
+"cmd": "perl -e 'our $m=\"<\"; { local $m=\">\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\" }'"
+},
+{
+"case": "gap0592_perl:X11 for alias mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "S1/S2 unproven: for alias (new P3)",
+"vs": "=",
+"cmd": "perl -e 'my $m=\"<\"; for my $m (\">\") { open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\" }'"
+},
+{
+"case": "gap0592_perl:X12 scalar reference write",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "S1/S2 unproven: \\$m reference (new P3)",
+"vs": "=",
+"cmd": "perl -e 'my $m=\"<\"; my $r=\\$m; $$r=\">\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_perl:X13 substitution mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "S1/S2 unproven: s/// target (new P3)",
+"vs": "=",
+"cmd": "perl -e 'my $m=\"<\"; $m =~ s/</>/; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_perl:X14 do file mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "O-list do FILE (GAP-1139 class)",
+"vs": "=",
+"cmd": "perl -e 'our $m=\"<\"; do \"./mode.pl\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_perl:X15 CORE GLOBAL open",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "R-O CORE::GLOBAL::open + W2",
+"vs": "raise",
+"cmd": "perl -e 'BEGIN { *CORE::GLOBAL::open = sub (*;$@) { CORE::open($_[0], \">\", $_[2]) } }; open(my $f,\"<\",\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_perl:X16 prototype sub flag",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N2 + W5",
+"vs": "raise",
+"cmd": "perl -e 'sub O_CLOEXEC () { 1 }; sysopen(my $f,\".claude/settings.json\",O_CLOEXEC) or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_perl:X17 require file mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "O-list require FILE (GAP-1139)",
+"vs": "=",
+"cmd": "perl -e 'our $m=\"<\"; require \"./mode.pl\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_perl:X18 argument alias mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "S1/S2 unproven: sub argument alias (new P3)",
+"vs": "=",
+"cmd": "perl -e 'sub set_mode { $_[0]=\">\" }; my $m=\"<\"; set_mode($m); open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_perl:X21 scalar name open",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "S1 + W4 ($open is a scalar)",
+"vs": "raise",
+"cmd": "perl -e 'my $open=\">\"; open(F,$open,\".claude/settings.json\") or die $!; print F \"x\"'"
+},
+{
+"case": "gap0592_perl:X22 leading-space mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "W3 leading space",
+"vs": "raise",
+"cmd": "perl -e 'open(F,\" >.claude/settings.json\") or die $!; print F \"x\"'"
+},
+{
+"case": "gap0592_perl:X23 pipe-ended redirection",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "R-PIPE (shell reads > redirect)",
+"vs": "raise",
+"cmd": "perl -e 'open(F,\"echo x > .claude/settings.json|\") or die $!; close F'"
+},
+{
+"case": "gap0592_perl:X24 interpolated two-arg mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "W3 + S1 interpolated mode",
+"vs": "raise",
+"cmd": "perl -e 'my $m=\">\"; open(F,\"$m.claude/settings.json\") or die $!; print F \"x\"'"
+},
+{
+"case": "gap0592_perl:F13 implicit single quoted read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e \"open(F, '.claude/settings.json') or die $!; print <F>\""
+},
+{
+"case": "gap0592_perl:B15 implicit double quoted read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'open(F, \".claude/settings.json\") or die $!; print <F>'"
+},
+{
+"case": "gap0592_perl:X06 repeated variable reads",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'my $m=\"<\"; open(my $a,$m,\".claude/settings.json\") or die $!; open(my $b,$m,\".claude/settings.json\") or die $!; print <$b>'"
+},
+{
+"case": "gap0592_perl:X19 variable read loop",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'my $m=\"<\"; for (1..2) { open(my $f,$m,\".claude/settings.json\") or die $!; print <$f> }'"
+},
+{
+"case": "gap0592_perl:X20 literal read in sub",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'sub read_file { open(my $f,\"<\",\".claude/settings.json\") or die $!; print <$f> }; read_file()'"
+},
+{
+"case": "gap0592_perl:B01 read open",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'open(my $f, \"<\", \".claude/settings.json\"); print <$f>'"
+},
+{
+"case": "gap0592_perl:B02 two-arg read open",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -ne 'print' .claude/settings.json"
+},
+{
+"case": "gap0592_perl:B03 write elsewhere",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'open(my $f, \">\", \"notes.txt\"); print $f \"{}\"'"
+},
+{
+"case": "gap0592_perl:B04 print to stdout",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'print \"settings.json\\n\"'"
+},
+{
+"case": "gap0592_perl:B05 -pe filter to stdout",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -pe 's/a/b/' .claude/settings.json"
+},
+{
+"case": "gap0592_perl:B06 read open with a layer",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'open(my $f, \"<:encoding(UTF-8)\", \".claude/settings.json\"); print <$f>'"
+},
+{
+"case": "gap0592_perl:B07 two-arg read open",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'open(F, \"<.claude/settings.json\") or die; print <F>'"
+},
+{
+"case": "gap0592_perl:B08 two-arg write elsewhere and STDERR",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'print STDERR \"x\"; open(F, \">notes.txt\"); print F \"{}\"'"
+},
+{
+"case": "gap0592_perl:B09 unlink and rename elsewhere",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'unlink \"notes.txt\"; rename \"a.txt\", \"b.txt\"'"
+},
+{
+"case": "gap0592_perl:B10 pipe open reads the file",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'open(my $p, \"-|\", \"cat\", \".claude/settings.json\"); print <$p>'"
+},
+{
+"case": "gap0592_perl:B11 method and hash key named unlink",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'my %h = (unlink => \".claude/settings.json\"); $o->unlink(\".claude/settings.json\") if 0; print %h'"
+},
+{
+"case": "gap0592_perl:B12 dup open to STDOUT",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'open(my $o, \">&STDOUT\"); print $o \"settings.json\"'"
+},
+{
+"case": "gap0592_perl:F01 end section",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'print 1;\n__END__\nunlink \".claude/settings.json\"'"
+},
+{
+"case": "gap0592_perl:F02 data section",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'print 1;\n__DATA__\nunlink \".claude/settings.json\"'"
+},
+{
+"case": "gap0592_perl:F03 brace quote",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'print q{unlink \".claude/settings.json\"}'"
+},
+{
+"case": "gap0592_perl:F04 paren quote",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'print q(rename \"a\", \".claude/settings.json\")'"
+},
+{
+"case": "gap0592_perl:F05 regex quote",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'print 1 if m{rename \".claude/settings.json\", \"x\"}'"
+},
+{
+"case": "gap0592_perl:F06 user sub after print",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'sub unlink {1} print &unlink(\".claude/settings.json\")'"
+},
+{
+"case": "rv0592f_regr:A01 local open override",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "R-O use subs + W2",
+"vs": "raise",
+"cmd": "perl -e 'use subs \"open\"; sub open (*;$@) { CORE::open($_[0],\">\",$_[2]) }; open(my $f,\"<\",\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "rv0592f_regr:A02 local open no use subs",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "not an override without use subs (real Perl reads)",
+"vs": "=",
+"cmd": "perl -e 'sub open (*;$@) { CORE::open($_[0],\">\",$_[2]) }; open(my $f,\"<\",\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "rv0592f_regr:A05 two arg local override",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "R-O use subs + W2",
+"vs": "raise",
+"cmd": "perl -e 'use subs \"open\"; sub open (*;$@) { CORE::open($_[0],\">\",substr($_[1],1)) }; open(F,\"<.claude/settings.json\") or die $!; print F \"x\"'"
+},
+{
+"case": "rv0592f_regr:A03 command import NOFOLLOW",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N1 via -Mconstant + W5",
+"vs": "raise",
+"cmd": "perl -Mconstant=O_NOFOLLOW,1 -e 'sysopen(my $f,\".claude/settings.json\",O_NOFOLLOW) or die $!; print $f \"x\"'"
+},
+{
+"case": "rv0592f_regr:A04 command import RDONLY",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N1 via -Mconstant + W5",
+"vs": "raise",
+"cmd": "perl -Mconstant=O_RDONLY,1 -e 'sysopen(my $f,\".claude/settings.json\",O_RDONLY) or die $!; print $f \"x\"'"
+},
+{
+"case": "rv0592f_regr:A06 use subs qw(open)",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "R-O use subs qw + W2",
+"vs": "raise",
+"cmd": "perl -e 'use subs qw(open); sub open (*;$@) { CORE::open($_[0],\">\",$_[2]) }; open(my $f,\"<\",\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "rv0592f_regr:A07 typeglob open override",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "R-O *open + W2",
+"vs": "raise",
+"cmd": "perl -e 'use subs \"open\"; *open = sub (*;$@) { CORE::open($_[0],\">\",$_[2]) }; open(my $f,\"<\",\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "rv0592f_regr:A08 live override after heredoc",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L5 + R-O + W2",
+"vs": "raise",
+"cmd": "perl -e 'my $x=<<X;\nuse subs qw(open)\nX\nuse subs \"open\"; sub open (*;$@) { CORE::open($_[0],\">\",$_[2]) }; open(my $f,\"<\",\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "rv0592f_regr:A09 live override after POD",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L6 + R-O + W2",
+"vs": "raise",
+"cmd": "perl -e '=pod\n\nuse subs qw(open)\n\n=cut\nuse subs \"open\"; sub open (*;$@) { CORE::open($_[0],\">\",$_[2]) }; open(my $f,\"<\",\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "rv0592f_regr:A10 live override after comment",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L1 + R-O + W2",
+"vs": "raise",
+"cmd": "perl -e '# use subs qw(open)\nuse subs \"open\"; sub open (*;$@) { CORE::open($_[0],\">\",$_[2]) }; open(my $f,\"<\",\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "rv0592f_regr:A11 live override after quote",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L2 + R-O + W2",
+"vs": "raise",
+"cmd": "perl -e 'print \"use subs qw(open)\"; use subs \"open\"; sub open (*;$@) { CORE::open($_[0],\">\",$_[2]) }; open(my $f,\"<\",\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "rv0592f_regr:A12 live override before data",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L7 + R-O + W2",
+"vs": "raise",
+"cmd": "perl -e 'use subs \"open\"; sub open (*;$@) { CORE::open($_[0],\">\",$_[2]) }; open(my $f,\"<\",\".claude/settings.json\") or die $!; print $f \"x\";\n__END__\nuse subs qw(open)'"
+},
+{
+"case": "rv0592f_regr:A13 local sysopen override",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "R-O sysopen + W5",
+"vs": "raise",
+"cmd": "perl -e 'use subs \"sysopen\"; sub sysopen (*$$) { CORE::sysopen($_[0],$_[1],1) }; sysopen(my $f,\".claude/settings.json\",0) or die $!; print $f \"x\"'"
+},
+{
+"case": "rv0592f_regr:B20 constant value names flag",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'use constant K => \"O_NOFOLLOW\"; my $m=\"<\"; open(my $f,$m,\".claude/settings.json\") or die $!; print <$f>'"
+},
+{
+"case": "rv0592f_regr:B21 use subs comment decoy",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'use subs # open\nqw(K); my $m=\"<\"; open(my $f,$m,\".claude/settings.json\") or die $!; print <$f>'"
+},
+{
+"case": "rv0592f_regr:B22 unrelated typeglob reference",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'my $r=\\*other; my $m=\"<\"; open(my $f,$m,\".claude/settings.json\") or die $!; print <$f>'"
+},
+{
+"case": "rv0592f_regr:B17 quoted override text",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'my $m=\"<\"; print \"use subs open\"; open(my $f,$m,\".claude/settings.json\") or die $!; print <$f>'"
+},
+{
+"case": "rv0592f_regr:B18 POD override text then scalar read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e '=pod\n\nuse subs qw(open)\n\n=cut\nmy $m=\"<\"; open(my $f,$m,\".claude/settings.json\") or die $!; print <$f>'"
+},
+{
+"case": "rv0592f_regr:B19 data override text",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'my $m=\"<\"; open(my $f,$m,\".claude/settings.json\") or die $!; print <$f>;\n__DATA__\nuse subs qw(open)'"
+},
+{
+"case": "rv0592f_regr:B11 heredoc GLOBAL literal read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'my $x=<<X;\nCORE::GLOBAL\nX\nopen(my $f,\"<\",\".claude/settings.json\") or die $!; print <$f>'"
+},
+{
+"case": "rv0592f_regr:B12 POD GLOBAL literal read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e '=pod\n\nCORE::GLOBAL\n\n=cut\nopen(my $f,\"<\",\".claude/settings.json\") or die $!; print <$f>'"
+},
+{
+"case": "rv0592f_regr:B13 comment GLOBAL literal read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e '# CORE::GLOBAL\nopen(my $f,\"<\",\".claude/settings.json\") or die $!; print <$f>'"
+},
+{
+"case": "rv0592f_regr:B14 string GLOBAL literal read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'print \"CORE::GLOBAL\"; open(my $f,\"<\",\".claude/settings.json\") or die $!; print <$f>'"
+},
+{
+"case": "rv0592f_regr:B15 data GLOBAL after read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'open(my $f,\"<\",\".claude/settings.json\") or die $!; print <$f>;\n__END__\nCORE::GLOBAL'"
+},
+{
+"case": "rv0592f_regr:B16 line comment then read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'my $m=\"<\"; #line 99 \"sub\"\nopen(my $f,$m,\".claude/settings.json\") or die $!; print <$f>'"
+},
+{
+"case": "rv0592f_regr:B01 helper scalar read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'my $m=\"<\"; sub read_file { open(my $f,$m,\".claude/settings.json\") or die $!; print <$f> }; read_file()'"
+},
+{
+"case": "rv0592f_regr:B02 eval block then read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'my $m=\"<\"; eval { 1 }; open(my $f,$m,\".claude/settings.json\") or die $!; print <$f>'"
+},
+{
+"case": "rv0592f_regr:B03 require Fcntl then read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'my $m=\"<\"; require Fcntl; open(my $f,$m,\".claude/settings.json\") or die $!; print <$f>'"
+},
+{
+"case": "rv0592f_regr:B04 unrelated constant then read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'use constant K => 1; my $m=\"<\"; open(my $f,$m,\".claude/settings.json\") or die $!; print <$f>'"
+},
+{
+"case": "rv0592f_regr:B05 quoted sub then read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'my $m=\"<\"; print \"sub\"; open(my $f,$m,\".claude/settings.json\") or die $!; print <$f>'"
+},
+{
+"case": "rv0592f_regr:B06 comment sub then read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'my $m=\"<\"; # sub\nopen(my $f,$m,\".claude/settings.json\") or die $!; print <$f>'"
+},
+{
+"case": "rv0592f_regr:B07 heredoc sub then read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'my $m=\"<\"; my $x=<<X;\nsub\nX\nopen(my $f,$m,\".claude/settings.json\") or die $!; print <$f>'"
+},
+{
+"case": "rv0592f_regr:B08 loop scalar read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'my $m=\"<\"; for (1..2) { open(my $f,$m,\".claude/settings.json\") or die $!; print <$f> }'"
+},
+{
+"case": "rv0592f_regr:B09 implicit read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'open(F,\".claude/settings.json\") or die $!; print <F>'"
+},
+{
+"case": "rv0592f_regr:B10 explicit two arg read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'open(F,\"<.claude/settings.json\") or die $!; print <F>'"
+},
+{
+"case": "rv0592g_regr:A01 long constant list",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N1 hash, whole list (closes GAP-1134)",
+"vs": "raise",
+"cmd": "perl -e 'use constant { K0 => 0, K1 => 0, K2 => 0, K3 => 0, K4 => 0, K5 => 0, K6 => 0, K7 => 0, K8 => 0, K9 => 0, K10 => 0, K11 => 0, K12 => 0, K13 => 0, K14 => 0, K15 => 0, K16 => 0, K17 => 0, K18 => 0, K19 => 0, K20 => 0, K21 => 0, K22 => 0, K23 => 0, K24 => 0, K25 => 0, K26 => 0, K27 => 0, K28 => 0, K29 => 0, K30 => 0, K31 => 0, K32 => 0, K33 => 0, K34 => 0, K35 => 0, K36 => 0, K37 => 0, K38 => 0, K39 => 0, K40 => 0, K41 => 0, K42 => 0, K43 => 0, K44 => 0, K45 => 0, K46 => 0, K47 => 0, K48 => 0, K49 => 0, K50 => 0, K51 => 0, K52 => 0, K53 => 0, K54 => 0, K55 => 0, K56 => 0, K57 => 0, K58 => 0, K59 => 0, K60 => 0, K61 => 0, K62 => 0, K63 => 0, K64 => 0, K65 => 0, K66 => 0, K67 => 0, K68 => 0, K69 => 0, K70 => 0, K71 => 0, K72 => 0, K73 => 0, K74 => 0, K75 => 0, K76 => 0, K77 => 0, K78 => 0, K79 => 0, K80 => 0, K81 => 0, K82 => 0, K83 => 0, K84 => 0, K85 => 0, K86 => 0, K87 => 0, K88 => 0, K89 => 0, O_RDONLY => 1 }; sysopen(my $f,\".claude/settings.json\",O_RDONLY) or die $!; print $f \"x\"'"
+},
+{
+"case": "rv0592g_regr:A02 qualified flag sub",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N2 main:: (closes GAP-1135)",
+"vs": "raise",
+"cmd": "perl -e 'sub main::O_RDONLY () { 1 }; sysopen(my $f,\".claude/settings.json\",O_RDONLY) or die $!; print $f \"x\"'"
+},
+{
+"case": "rv0592g_regr:A03 block eval qualified glob",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N3 runtime, NAME() call (closes GAP-1136)",
+"vs": "raise",
+"cmd": "perl -e 'eval { *main::O_RDONLY = sub () { 1 } }; sysopen(my $f,\".claude/settings.json\",O_RDONLY()) or die $!; print $f \"x\"'"
+},
+{
+"case": "rv0592g_regr:B01 slurp local scalar",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'my $mode=\"<\"; open(my $fh,$mode,\".claude/settings.json\") or die $!; local $/; my $s=<$fh>; print length($s)'"
+},
+{
+"case": "rv0592g_regr:B02 while readline",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'open(my $fh,\"<\",\".claude/settings.json\") or die $!; while (my $line=<$fh>) { print $line }'"
+},
+{
+"case": "rv0592g_regr:B03 map literal read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'my @v=map { open(my $fh,\"<\",\".claude/settings.json\") or die $!; scalar <$fh> } 1..2; print scalar @v'"
+},
+{
+"case": "rv0592g_regr:B04 helper explicit mode",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'sub get { open(my $fh,\"<\",\".claude/settings.json\") or die $!; return scalar <$fh> }; print get()'"
+},
+{
+"case": "rv0592g_regr:B05 loop implicit read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'for (1..2) { open(F,\".claude/settings.json\") or die $!; print <F>; close F }'"
+},
+{
+"case": "rv0592g_regr:B06 do block read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'do { open(my $fh,\"<\",\".claude/settings.json\") or die $!; print <$fh> }'"
+},
+{
+"case": "rv0592g_regr:B07 require Fcntl sysopen",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'require Fcntl; sysopen(my $fh,\".claude/settings.json\",Fcntl::O_RDONLY()) or die $!; print <$fh>'"
+},
+{
+"case": "rv0592g_regr:B08 constant unrelated",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'use constant N => 2; for (1..N) { open(my $fh,\"<\",\".claude/settings.json\") or die $!; print <$fh> }'"
+},
+{
+"case": "rv0592g_regr:B09 POD before read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e '=pod\nUnrelated text\n=cut\nopen(my $fh,\"<\",\".claude/settings.json\") or die $!; print <$fh>'"
+},
+{
+"case": "rv0592g_regr:B10 heredoc before read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'my $doc=<<EOF;\nordinary text\nEOF\nopen(my $fh,\"<\",\".claude/settings.json\") or die $!; print <$fh>'"
+},
+{
+"case": "rv0592g_mask:M01 data marker in string",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L2 + N1 + W5",
+"vs": "raise",
+"cmd": "perl -e 'my $x=\"__END__\"; use constant O_RDONLY => 1; sysopen(my $f,\".claude/settings.json\",O_RDONLY) or die $!; print $f \"x\"'"
+},
+{
+"case": "rv0592g_mask:M02 heredoc token in string",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L2/L5 + N1 + W5",
+"vs": "raise",
+"cmd": "perl -e 'my $x=\"\\nEOF\\n\"; my $doc=<<EOF;\ntext\nEOF\nuse constant O_RDONLY => 1; sysopen(my $f,\".claude/settings.json\",O_RDONLY) or die $!; print $f \"x\"'"
+},
+{
+"case": "rv0592g_mask:M03 two heredocs",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L5 + N1 + W5",
+"vs": "raise",
+"cmd": "perl -e 'my ($a,$b)=(<<A,<<B);\nalpha\nA\nbeta\nB\nuse constant O_RDONLY => 1; sysopen(my $f,\".claude/settings.json\",O_RDONLY) or die $!; print $f \"x\"'"
+},
+{
+"case": "rv0592g_mask:M04 unterminated POD",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "L6 POD to EOF, inert",
+"vs": "=",
+"cmd": "perl -e '=pod\nsysopen(my $f,\".claude/settings.json\",1); print $f \"x\";\n'"
+},
+{
+"case": "rv0592g_mask:M05 block eval string eval",
+"perl": "r",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "O-list string eval (real Perl reads)",
+"vs": "=",
+"cmd": "perl -e 'eval { eval q{use constant O_RDONLY => 1;} }; sysopen(my $f,\".claude/settings.json\",O_RDONLY) or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_perl:N01 hash key y",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L3 + W1",
+"vs": "raise",
+"cmd": "perl -e 'my %p; $p{y}=1; unlink \".claude/settings.json\"; $p{x}=1;'"
+},
+{
+"case": "gap0592_perl:N02 hash key s",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L3 + W1",
+"vs": "raise",
+"cmd": "perl -e 'my %o; $o{s}=1; unlink \".claude/settings.json\"; $o{t}=2;'"
+},
+{
+"case": "gap0592_perl:N03 arrow hash key m",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L3 + W1",
+"vs": "raise",
+"cmd": "perl -e 'my $h={}; $h->{m}=1; unlink \".claude/settings.json\"; $h->{n}=1;'"
+},
+{
+"case": "gap0592_perl:N04 file test s",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L3 + W1",
+"vs": "raise",
+"cmd": "perl -e 'print -s \"notes.txt\"; unlink \".claude/settings.json\"; print \"x\"'"
+},
+{
+"case": "gap0592_perl:N05 split regex escape",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L4 + W1",
+"vs": "raise",
+"cmd": "perl -e 'my @w = split /\\s+/, \"a b\"; unlink \".claude/settings.json\"; print 1+1'"
+},
+{
+"case": "gap0592_perl:N06 method named s",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L3 + W1",
+"vs": "raise",
+"cmd": "perl -e 'package O; sub s {1} package main; O->s(1); unlink \".claude/settings.json\"; print 1;'"
+},
+{
+"case": "gap0592_perl:N07 quote after comment",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L1 + W1",
+"vs": "raise",
+"cmd": "perl -e 'print q #c\n{a}; unlink \".claude/settings.json\"; # z\n'"
+},
+{
+"case": "gap0592_perl:N08 substitution newline replacement",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L2 + W1",
+"vs": "raise",
+"cmd": "perl -e '$_=\"a\"; s{a}\n{unlink \".claude/settings.json\"}e;\nprint 1;\n'"
+},
+{
+"case": "gap0592_perl:N13 utf8 sub identifier",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L3 + W1",
+"vs": "raise",
+"cmd": "perl -Mutf8 -e 'sub \u00e9q{ unlink \".claude/settings.json\" } \u00e9q();'"
+},
+{
+"case": "gap0592_perl:N14 hash term star",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L4 + W1",
+"vs": "raise",
+"cmd": "perl -e 'my %h=(a=>1); print $h{a}*unlink \".claude/settings.json\"'"
+},
+{
+"case": "gap0592_perl:N15 hash term ampersand",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L4 + W1",
+"vs": "raise",
+"cmd": "perl -e 'my %h=(a=>1); print $h{a}&unlink(\".claude/settings.json\")'"
+},
+{
+"case": "gap0592_perl:N17 hash key q",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "L3 + W1",
+"vs": "raise",
+"cmd": "perl -e 'my %h; $h{q}=1; unlink \".claude/settings.json\"; $h{r}=2'"
+},
+{
+"case": "gap0592_perl:F16 user sub after body",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'sub unlink {1} &unlink(\".claude/settings.json\")'"
+},
+{
+"case": "gap0592_perl:C01 custom sub",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N2 + W5",
+"vs": "raise",
+"cmd": "perl -e 'sub O_CUSTOM () { 1 }; sysopen(my $f, \".claude/settings.json\", O_CUSTOM) or die; print $f \"x\"'"
+},
+{
+"case": "gap0592_perl:C02 use constant",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N1 + W5",
+"vs": "raise",
+"cmd": "perl -e 'use constant O_CUSTOM => 1; sysopen(my $f, \".claude/settings.json\", O_CUSTOM) or die; print $f \"x\"'"
+},
+{
+"case": "gap0592_perl:C03 ampersand sub",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N2 &NAME + W5",
+"vs": "raise",
+"cmd": "perl -e 'sub O_X { 1 }; sysopen(my $f, \".claude/settings.json\", &O_X) or die; print $f \"x\"'"
+},
+{
+"case": "gap0592_perl:B01 readonly nofollow",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -MFcntl -e 'sysopen(my $f, \".claude/settings.json\", O_RDONLY|O_NOFOLLOW) or die; print <$f>'"
+},
+{
+"case": "gap0592_perl:B02 numeric octal zero",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'sysopen(my $f, \".claude/settings.json\", 00) or die; print <$f>'"
+},
+{
+"case": "gap0592_perl:B13 readonly call",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -MFcntl -e 'sysopen(my $f, \".claude/settings.json\", O_RDONLY()) or die; print <$f>'"
+},
+{
+"case": "gap0592_cust:constant sub",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N2 + W5",
+"vs": "raise",
+"cmd": "perl -e 'sub O_CUSTOM () { 1 }; sysopen(my $f, \".claude/settings.json\", O_CUSTOM) or die $!; print $f \"x\";'"
+},
+{
+"case": "gap0592_cust:use constant",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N1 + W5",
+"vs": "raise",
+"cmd": "perl -e 'use constant O_CUSTOM => 1; sysopen(my $f, \".claude/settings.json\", O_CUSTOM) or die $!; print $f \"x\";'"
+},
+{
+"case": "gap0592_cust:shadowed read-only sub",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N2 + W5",
+"vs": "raise",
+"cmd": "perl -e 'sub O_NOFOLLOW () { 1 }; sysopen(my $f, \".claude/settings.json\", O_NOFOLLOW) or die $!; print $f \"x\";'"
+},
+{
+"case": "gap0592_cust:shadowed read-only use constant",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N1 + W5",
+"vs": "raise",
+"cmd": "perl -e 'use constant O_NOFOLLOW => 1; sysopen(my $f, \".claude/settings.json\", O_NOFOLLOW) or die $!; print $f \"x\";'"
+},
+{
+"case": "gap0592_cust:variable write mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "S1 + W4",
+"vs": "raise",
+"cmd": "perl -e 'my $m=\">\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\";'"
+},
+{
+"case": "gap0592_cust:concat write mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "W2 concat",
+"vs": "raise",
+"cmd": "perl -e 'open(my $f, \">\" . \"\", \".claude/settings.json\") or die $!; print $f \"x\";'"
+},
+{
+"case": "gap0592_cust:variable append mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "S1 + W4",
+"vs": "raise",
+"cmd": "perl -e 'my $m=\">>\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\";'"
+},
+{
+"case": "gap0592_cust:ampersand sub",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N2 &NAME + W5",
+"vs": "raise",
+"cmd": "perl -e 'sub O_X { 1 }; sysopen(my $f, \".claude/settings.json\", &O_X) or die $!; print $f \"x\";'"
+},
+{
+"case": "gap0592_cust:constant hash",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N1 hash + W5",
+"vs": "raise",
+"cmd": "perl -e 'use constant { O_NOFOLLOW => 1 }; sysopen(my $f, \".claude/settings.json\", O_NOFOLLOW)'"
+},
+{
+"case": "gap0592_cust:glob assignment",
+"perl": "r",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "N3 runtime + bare NAME (real Perl reads)",
+"vs": "=",
+"cmd": "perl -e '*O_NOFOLLOW = sub { 1 }; sysopen(my $f, \".claude/settings.json\", O_NOFOLLOW)'"
+},
+{
+"case": "gap0592_cust:BEGIN glob",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N3 in BEGIN + W5",
+"vs": "raise",
+"cmd": "perl -e 'BEGIN { *O_NOFOLLOW = sub { 1 } }; sysopen(my $f, \".claude/settings.json\", O_NOFOLLOW)'"
+},
+{
+"case": "gap0592_cust:Fcntl sub",
+"perl": "r",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "N2 other-package spelling (real Perl reads)",
+"vs": "=",
+"cmd": "perl -e 'sub Fcntl::O_NOFOLLOW () { 1 }; sysopen(my $f, \".claude/settings.json\", O_NOFOLLOW)'"
+},
+{
+"case": "gap0592_cust:Fcntl glob",
+"perl": "r",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "N3 other-package spelling (real Perl reads)",
+"vs": "=",
+"cmd": "perl -e '*Fcntl::O_NOFOLLOW = sub { 1 }; sysopen(my $f, \".claude/settings.json\", O_NOFOLLOW)'"
+},
+{
+"case": "gap0592_cust:glob newline assignment",
+"perl": "r",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "N3 runtime + bare NAME (real Perl reads)",
+"vs": "=",
+"cmd": "perl -e '*O_NOFOLLOW\n = \\&writer; sysopen(my $f, \".claude/settings.json\", O_NOFOLLOW)'"
+},
+{
+"case": "gap0592_cust:our scalar",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "S1 flags + W5",
+"vs": "raise",
+"cmd": "perl -e 'our $O_NOFOLLOW = 1; sysopen(my $f, \".claude/settings.json\", $O_NOFOLLOW)'"
+},
+{
+"case": "gap0592_cust:my scalar",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "S1 flags + W5",
+"vs": "raise",
+"cmd": "perl -e 'my $O_NOFOLLOW = 1; sysopen(my $f, \".claude/settings.json\", $O_NOFOLLOW)'"
+},
+{
+"case": "gap0592_cust:local scalar",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "S1 flags + W5",
+"vs": "raise",
+"cmd": "perl -e 'local $O_NOFOLLOW = 1; sysopen(my $f, \".claude/settings.json\", $O_NOFOLLOW)'"
+},
+{
+"case": "gap0592_cust:X01 braced scalar alias",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "S1 ${m}= + W4",
+"vs": "raise",
+"cmd": "perl -e 'my $m=\"<\"; ${m}=\">\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_cust:X02 BEGIN q eval flag",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "O-list: definition inside string eval (new P3)",
+"vs": "=",
+"cmd": "perl -e 'BEGIN { eval q{sub O_NOFOLLOW () { 1 }} }; sysopen(my $f,\".claude/settings.json\",O_NOFOLLOW) or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_cust:X03 Fcntl BEGIN q eval flag",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "O-list: definition inside string eval (new P3)",
+"vs": "=",
+"cmd": "perl -e 'use Fcntl; BEGIN { eval q{sub O_NOFOLLOW () { 1 }} }; sysopen(my $f,\".claude/settings.json\",O_NOFOLLOW) or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_cust:X07 BEGIN glob alias",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N3 in BEGIN + W5",
+"vs": "raise",
+"cmd": "perl -e 'BEGIN { *O_NOFOLLOW = sub () { 1 } }; sysopen(my $f,\".claude/settings.json\",O_NOFOLLOW) or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_cust:X08 use constant list",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N1 hash + W5",
+"vs": "raise",
+"cmd": "perl -e 'use constant { O_NOFOLLOW => 1 }; sysopen(my $f,\".claude/settings.json\",O_NOFOLLOW) or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_cust:X09 string eval flag",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "O-list: string eval (new P3)",
+"vs": "=",
+"cmd": "perl -e 'BEGIN { eval \"sub O_NOFOLLOW () { 1 }\" }; sysopen(my $f,\".claude/settings.json\",O_NOFOLLOW) or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_cust:X10 local mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "S1 local + W4",
+"vs": "raise",
+"cmd": "perl -e 'our $m=\"<\"; { local $m=\">\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\" }'"
+},
+{
+"case": "gap0592_cust:X11 for alias mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "S1/S2 unproven: for alias (new P3)",
+"vs": "=",
+"cmd": "perl -e 'my $m=\"<\"; for my $m (\">\") { open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\" }'"
+},
+{
+"case": "gap0592_cust:X12 scalar reference write",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "S1/S2 unproven: \\$m reference (new P3)",
+"vs": "=",
+"cmd": "perl -e 'my $m=\"<\"; my $r=\\$m; $$r=\">\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_cust:X13 substitution mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "S1/S2 unproven: s/// target (new P3)",
+"vs": "=",
+"cmd": "perl -e 'my $m=\"<\"; $m =~ s/</>/; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_cust:X14 do file mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "O-list do FILE (GAP-1139 class)",
+"vs": "=",
+"cmd": "perl -e 'our $m=\"<\"; do \"./mode.pl\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_cust:X15 CORE GLOBAL open",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "R-O CORE::GLOBAL::open + W2",
+"vs": "raise",
+"cmd": "perl -e 'BEGIN { *CORE::GLOBAL::open = sub (*;$@) { CORE::open($_[0], \">\", $_[2]) } }; open(my $f,\"<\",\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_cust:X16 prototype sub flag",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "N2 + W5",
+"vs": "raise",
+"cmd": "perl -e 'sub O_CLOEXEC () { 1 }; sysopen(my $f,\".claude/settings.json\",O_CLOEXEC) or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_cust:X17 require file mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "O-list require FILE (GAP-1139)",
+"vs": "=",
+"cmd": "perl -e 'our $m=\"<\"; require \"./mode.pl\"; open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_cust:X18 argument alias mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "S1/S2 unproven: sub argument alias (new P3)",
+"vs": "=",
+"cmd": "perl -e 'sub set_mode { $_[0]=\">\" }; my $m=\"<\"; set_mode($m); open(my $f,$m,\".claude/settings.json\") or die $!; print $f \"x\"'"
+},
+{
+"case": "gap0592_cust:X21 scalar name open",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "S1 + W4 ($open is a scalar)",
+"vs": "raise",
+"cmd": "perl -e 'my $open=\">\"; open(F,$open,\".claude/settings.json\") or die $!; print F \"x\"'"
+},
+{
+"case": "gap0592_cust:X22 leading-space mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "W3 leading space",
+"vs": "raise",
+"cmd": "perl -e 'open(F,\" >.claude/settings.json\") or die $!; print F \"x\"'"
+},
+{
+"case": "gap0592_cust:X23 pipe-ended redirection",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "R-PIPE (shell reads > redirect)",
+"vs": "raise",
+"cmd": "perl -e 'open(F,\"echo x > .claude/settings.json|\") or die $!; close F'"
+},
+{
+"case": "gap0592_cust:X24 interpolated two-arg mode",
+"perl": "W",
+"rel": "AA",
+"cx8": "LB",
+"spec": "LB",
+"rule": "W3 + S1 interpolated mode",
+"vs": "raise",
+"cmd": "perl -e 'my $m=\">\"; open(F,\"$m.claude/settings.json\") or die $!; print F \"x\"'"
+},
+{
+"case": "gap0592_cust:F13 implicit single quoted read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'open(F, '\\''.claude/settings.json'\\'') or die $!; print <F>'"
+},
+{
+"case": "gap0592_cust:B15 implicit double quoted read",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'open(F, \".claude/settings.json\") or die $!; print <F>'"
+},
+{
+"case": "gap0592_cust:X06 repeated variable reads",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'my $m=\"<\"; open(my $a,$m,\".claude/settings.json\") or die $!; open(my $b,$m,\".claude/settings.json\") or die $!; print <$b>'"
+},
+{
+"case": "gap0592_cust:X19 variable read loop",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'my $m=\"<\"; for (1..2) { open(my $f,$m,\".claude/settings.json\") or die $!; print <$f> }'"
+},
+{
+"case": "gap0592_cust:X20 literal read in sub",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'sub read_file { open(my $f,\"<\",\".claude/settings.json\") or die $!; print <$f> }; read_file()'"
+},
+{
+"case": "gap0592_cust:dynamic eval",
+"perl": "r",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "O-list never raises (real Perl reads)",
+"vs": "=",
+"cmd": "perl -e 'eval $x; open(F,\"<\",\".claude/settings.json\")'"
+},
+{
+"case": "gap0592_cust:do file",
+"perl": "r",
+"rel": "AA",
+"cx8": "LB",
+"spec": "AA",
+"rule": "O-list never raises (real Perl reads)",
+"vs": "=",
+"cmd": "perl -e 'do(\"mode.pl\"); open(F,\"<\",\".claude/settings.json\")'"
+},
+{
+"case": "gap0592_cust:block eval",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'eval { 1 }; open(F,\"<\",\".claude/settings.json\")'"
+},
+{
+"case": "gap0592_cust:Fcntl require",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'require Fcntl; open(F,\"<\",\".claude/settings.json\")'"
+},
+{
+"case": "gap0592_cust:unrelated constant value",
+"perl": "r",
+"rel": "AA",
+"cx8": "AA",
+"spec": "AA",
+"rule": "no W rule fires (read)",
+"vs": "=",
+"cmd": "perl -e 'use constant K => \"O_RDONLY\"; open(F,\"<\",\".claude/settings.json\")'"
+}
+]

@@ -36,6 +36,7 @@ import (
 // record, with the bytes untouched; a bundle config the lifecycle recorded
 // stays a no-op.
 func TestBundleRestoreRecordsTheBundleOverAHandEditOfTheSameBytes(t *testing.T) {
+	keepTestOffTheRealDataHome(t)
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "managed_enterprise")
 	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "standalone")
 	ctx := context.Background()

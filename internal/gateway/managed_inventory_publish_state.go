@@ -48,11 +48,11 @@ import (
 // guaranteed complete bundle every managedInventoryFullBundleInterval so a cloud
 // that missed the baseline always re-baselines within a day.
 //
-// The whole mechanism is managed_enterprise-exclusive:
-// newManagedInventoryPublishState returns nil for every other deployment mode,
-// and every method here is nil-receiver safe with "never suppress" semantics. A
-// nil gate therefore reproduces the pre-change behavior exactly, so OSS and
-// other non-managed deployments are untouched and no state file is created.
+// Outside Secure Client the same gate keeps the endpoint inventory sent to
+// the operator's own destinations in its own file,
+// endpointInventoryPublishStateFile, so a machine that later moves to Secure
+// Client re-baselines AI Defense in full.
+// Every method here is nil-receiver safe with "never suppress" semantics.
 const (
 	// managedInventoryFullBundleInterval is release-owned: AI Defense receives
 	// one complete, self-consistent copy of the endpoint inventory at least
@@ -62,6 +62,9 @@ const (
 	managedInventoryFullBundleInterval = 24 * time.Hour
 
 	managedInventoryPublishStateFile = "managed_inventory_publish_state.json"
+	// endpointInventoryPublishStateFile is the inventory state of an OSS
+	// per-user or managed standalone gateway, in that gateway's data dir.
+	endpointInventoryPublishStateFile = "endpoint_inventory_publish_state.json"
 	// Version 2 invalidates v1 publish digests so the first complete scan after
 	// upgrade re-baselines AI Defense with connector-native MCP details. This is
 	// required because v1 could record a successful native publish before the
@@ -116,6 +119,12 @@ type managedInventoryPublishState struct {
 	mu       sync.Mutex
 	path     string
 	file     managedInventoryPublishFile
+	// aidBundle: the daily bundle is AI Defense's complete copy, so only a
+	// complete, non-degraded cycle stamps it (Secure Client). Elsewhere it is
+	// the daily refresh of the operator's own destinations, stamped by any
+	// forced scan cycle: a collection that stays partial must not make every
+	// scan send every collection again.
+	aidBundle bool
 
 	// Bundle-due decision memoized per discovery scan so the two publishers
 	// reached from one inventory.fanoutReport agree, even though the timestamp
@@ -132,19 +141,25 @@ type managedInventoryPublishState struct {
 	destinationDirty  bool
 }
 
-// newManagedInventoryPublishState returns nil outside managed_enterprise. A nil
-// state is the OSS/non-managed path: no digest is ever computed and no state
-// file is ever created or read.
+// newManagedInventoryPublishState returns the publish state of cfg's
+// gateway: the managed inventory state on a Secure Client endpoint, the
+// operator inventory state everywhere else. It returns nil without a data dir.
 func newManagedInventoryPublishState(cfg *config.Config) *managedInventoryPublishState {
-	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+	if cfg == nil {
 		return nil
 	}
 	dataDir := strings.TrimSpace(cfg.DataDir)
 	if dataDir == "" {
 		return nil
 	}
+	name := endpointInventoryPublishStateFile
+	aidBundle := managed.IsManagedEnterprise(cfg.DeploymentMode) && cfg.ManagedAIDOnly()
+	if aidBundle {
+		name = managedInventoryPublishStateFile
+	}
 	state := &managedInventoryPublishState{
-		path: filepath.Join(dataDir, managedInventoryPublishStateFile),
+		path:      filepath.Join(dataDir, name),
+		aidBundle: aidBundle,
 	}
 	state.file = loadManagedInventoryPublishFile(state.path)
 	return state
@@ -273,13 +288,13 @@ type managedInventoryPublishCycle struct {
 }
 
 // forcedBundle reports whether this cycle ignores digests and publishes
-// everything. A nil cycle (non-managed) always publishes.
+// everything. A nil cycle (no publish state) always publishes.
 func (cycle *managedInventoryPublishCycle) forcedBundle() bool {
 	return cycle == nil || cycle.forced
 }
 
 // shouldPublish reports whether a collection needs to ship this cycle. A nil
-// cycle never suppresses, which is what keeps non-managed behavior identical.
+// cycle (no publish state: no data folder) never suppresses.
 func (cycle *managedInventoryPublishCycle) shouldPublish(key, digest string) bool {
 	if cycle == nil || cycle.state == nil || cycle.forced {
 		return true
@@ -378,6 +393,9 @@ func (cycle *managedInventoryPublishCycle) commit() {
 	state.commitMu.Lock()
 	defer state.commitMu.Unlock()
 	stampBundle := cycle.forced && cycle.bundleScope && !cycle.degraded
+	if !state.aidBundle {
+		stampBundle = cycle.forced && cycle.scanID != ""
+	}
 	state.mu.Lock()
 	if cycle.destinationEpoch != state.destinationEpoch {
 		state.mu.Unlock()

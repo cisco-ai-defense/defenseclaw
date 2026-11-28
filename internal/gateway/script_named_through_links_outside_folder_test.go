@@ -45,7 +45,7 @@ func TestScriptNamedThroughLinksOutsideTheWorkingFolderIsReadOrUnread(t *testing
 						t.Fatal(err)
 					}
 				}
-				restore := hookpaths.OverrideNetworkSharesForTest(func(string) string { return "" }, func(string) {})
+				restore := overrideNetworkSharesIdle(t, func(string) string { return "" }, func(string) {})
 				t.Cleanup(restore)
 				if err := os.Symlink(gatewayLinkChain(t, links, live), filepath.Join(cwd, "c")); err != nil {
 					t.Skipf("symlink unavailable: %v", err)

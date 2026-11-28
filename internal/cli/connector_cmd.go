@@ -1346,9 +1346,17 @@ func runConnectorRecoverConfig(cmd *cobra.Command, _ []string) error {
 // downgrade returns to predates route-only (1.0.10); an unknown or
 // unreadable target counts as older, the safe direction.
 func rollbackTargetLacksRouteOnly(target string) bool {
-	parts := strings.Split(strings.TrimPrefix(strings.TrimSpace(target), "v"), ".")
+	nums, ok := releaseNumber(target)
+	return !ok || releaseBefore(nums, [3]int{1, 0, 10})
+}
+
+// releaseNumber is the major, minor and patch number of a release version
+// (v1.0.10, 1.0.10); false when it has fewer than three numbers or one is
+// not a number.
+func releaseNumber(version string) ([3]int, bool) {
+	parts := strings.Split(strings.TrimPrefix(strings.TrimSpace(version), "v"), ".")
 	if len(parts) < 3 {
-		return true
+		return [3]int{}, false
 	}
 	nums := [3]int{}
 	for i := 0; i < 3; i++ {
@@ -1356,11 +1364,21 @@ func rollbackTargetLacksRouteOnly(target string) bool {
 		// 1.0.11~rc1) does not change the release number.
 		n, err := strconv.Atoi(strings.FieldsFunc(parts[i]+"-", func(r rune) bool { return r == '-' || r == '+' || r == '~' })[0])
 		if err != nil {
-			return true
+			return [3]int{}, false
 		}
 		nums[i] = n
 	}
-	return nums[0] < 1 || (nums[0] == 1 && nums[1] == 0 && nums[2] < 10)
+	return nums, true
+}
+
+// releaseBefore reports whether release a is older than release b.
+func releaseBefore(a, b [3]int) bool {
+	for i := range a {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return false
 }
 
 // managedRouteOnlyConnectors lists the agents a standalone managed
@@ -1426,14 +1444,28 @@ func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 			converted[name] = count
 		}
 	}
-	// A release before 1.0.10 has no route-only listener: the agent model
-	// settings route-only wrote go back before it is installed, so the
-	// agent does not get 401 on every call (rel-1-0-10 GAP-0602). The
+	// The route-only record (the user's own model_provider or
+	// ANTHROPIC_BASE_URL a render replaced) lives in the data folder the
+	// rollback swaps out. The install brought back restores a render only
+	// with a record of its own: without one its teardown (the prune after
+	// the swap) deleted our values and the user's with them, and Codex fell
+	// back to the OpenAI sign-in (rel-1-0-10 GAP-2021); a release before
+	// 1.0.10 has no route-only listener at all, and the agent got 401 on
+	// every call (GAP-0602). So the settings go back here, from this
+	// release's record, as routing disable and teardown put them back. The
 	// installers run this with the gateway stopped, after the prompt.
 	routeRestored, routeFailed := map[string]bool{}, map[string]string{}
-	if !connectorRollbackRestore && rollbackTargetLacksRouteOnly(opts.RollbackTargetVersion) {
+	if !connectorRollbackRestore {
 		for _, name := range config.RouteOnlyCapableConnectors {
 			if connectorFlagName != "" && connectorFlagName != name {
+				continue
+			}
+			// previous/data is the release back only for `defenseclaw
+			// rollback`: a Windows downgrade and the restore of a failed
+			// upgrade swap no data, and previous/ still holds the slot of an
+			// earlier upgrade. A target before 1.0.10 (or not given) has no
+			// listener, so its settings always go back (GAP-2038).
+			if !rollbackTargetLacksRouteOnly(opts.RollbackTargetVersion) && connector.RollbackTargetRestoresRouteOnly(dataDir, name) {
 				continue
 			}
 			conn, ok := reg.Get(name)
@@ -1441,6 +1473,9 @@ func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 			if !ok || !routable {
 				continue
 			}
+			// Only a render this install recorded is reported; the restore
+			// also takes out one whose record was lost.
+			rendered := connector.RouteOnlyRecordApplied(dataDir, name)
 			restore, err := bindConnectorLifecycleConfigHome(name)
 			if err == nil {
 				err = rc.ApplyRouteOnly(opts, nil)
@@ -1450,7 +1485,9 @@ func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 				routeFailed[name] = "route-only model settings were not put back (" + err.Error() + "); run defenseclaw routing disable --connector " + name + " before the rollback, or remove the DefenseClaw base URL and route header from its settings by hand"
 				continue
 			}
-			routeRestored[name] = true
+			if rendered {
+				routeRestored[name] = true
+			}
 		}
 	}
 	// until 1.1 (GAP-2136): the agent files the OpenHands/OmniGent teardown

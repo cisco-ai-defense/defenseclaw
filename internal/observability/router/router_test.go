@@ -293,6 +293,38 @@ func TestCapabilityDefaultsAndSignalSafety(t *testing.T) {
 	}
 }
 
+func TestLocalInventoryDiagnosticStaysLocal(t *testing.T) {
+	evaluator := mustEvaluator(t, &config.ObservabilityV8Source{Destinations: []config.ObservabilityV8DestinationSource{
+		{Name: "logs", Kind: config.ObservabilityV8DestinationConsole},
+		{Name: "otlp", Kind: config.ObservabilityV8DestinationOTLP, Endpoint: "https://collector.example.com"},
+	}})
+	for action, want := range map[observability.ProducerKey][]string{
+		config.ObservabilityV8LocalInventoryDiagnosticAction: {"local-sqlite"},
+		config.ObservabilityV8SkillInventoryAction:           {"local-sqlite", "logs", "otlp"},
+	} {
+		metadata, err := NewClassifiedLogMetadata(
+			observability.ProducerGatewayEvent,
+			observability.ProducerKey("ai_discovery"),
+			observability.ClassificationContext{
+				Bucket: observability.BucketAIDiscovery, EventName: "ai_component.confidence.changed", RawSeverity: "INFO",
+			},
+			observability.SourceSystem,
+			"",
+			action,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		admission, err := evaluator.Admit(metadata)
+		if err != nil || admission != AdmissionOrdinary {
+			t.Fatalf("%s admission = %v, %v", action, admission, err)
+		}
+		if got := deliveryNames(evaluator.route(metadata, admission)); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s destinations = %v, want %v", action, got, want)
+		}
+	}
+}
+
 func TestAdvancedRoutesFirstMatchSelectorsAndDestinationFanout(t *testing.T) {
 	logs := []observability.Signal{observability.SignalLogs}
 	catchAll := []observability.Bucket{"*"}

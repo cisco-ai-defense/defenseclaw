@@ -11,6 +11,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -1205,7 +1206,7 @@ func (s *psStateScan) copyFileInfo(text string, start int) bool {
 // (psFileInfoChildren); unplaced otherwise.
 func psFileInfoExpression(text string, budget *psBudget) psFileInfo {
 	text = strings.TrimSpace(text)
-	lower := strings.ToLower(text)
+	lower := asciifold.Lower(text)
 	for _, cast := range []string{"[system.io.fileinfo]", "[io.fileinfo]"} {
 		if !strings.HasPrefix(lower, cast) || len(text) < len(cast) {
 			continue
@@ -1488,7 +1489,7 @@ func psHomeLiteralParam(param, home string) string {
 		return param
 	}
 	inner := string(r[1 : len(r)-1])
-	lower := strings.ToLower(inner)
+	lower := asciifold.Lower(inner)
 	for _, anchor := range []string{"${home}", "$home"} {
 		rest, ok := strings.CutPrefix(lower, anchor)
 		if !ok || rest == "" || rest[0] != '/' && rest[0] != '\\' {

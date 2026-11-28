@@ -60,8 +60,11 @@ var hostShapeRows = []struct {
 	{"ps-encoded/padded-EncodedCommand", []string{" -EncodedCommand", r6enc("Write-Output a")}},
 	{"ps-encoded/ec-padded", []string{"-ec ", r6enc("Write-Output a")}},
 	{"ps-encoded/padded-nop-padded-enc", []string{"-nop ", " -enc", r6enc("Write-Output a b")}},
-	// a blank-padded base64 word: the host decoder skips the blank (rel-1-0-10:GAP-1197)
-	{"ps-encoded/pad-b64", []string{"-ec", " " + "ZQBjAGgAbwA="}},
+	// a blank-padded base64 word: the host decoder skips the blank (rel-1-0-10:GAP-1197).
+	// The decoded text is "echo hi", not a bare "echo": Write-Output with no
+	// InputObject fails under a non-interactive Windows pwsh (missing mandatory
+	// parameter), so a bare echo is not a row both hosts run (GAP-1616).
+	{"ps-encoded/pad-b64", []string{"-ec", " " + "ZQBjAGgAbwAgAGgAaQA="}},
 }
 
 // hostShapeSource renders a host argv as PowerShell source with every word in
@@ -291,7 +294,7 @@ type refWord struct {
 	text   string
 	static bool
 	colon  bool
-	folder bool // an expandable string of literal text and $HOME / $PWD / $env: parts
+	folder bool // an expandable string of literal text and $HOME / $PWD / $env: parts, or one such variable
 }
 
 // The reference below is an independent statement of the table in
@@ -352,7 +355,13 @@ func refWordOf(e Expr, colon bool) refWord {
 		}
 		return refWord{folder: folder && vars > 0}
 	}
-	return refWord{colon: colon} // numbers, lists, variables, fused atoms, ...: uncertain
+	if v, ok := e.(*Variable); ok && !colon {
+		// An environment variable, $HOME or $PWD alone is one folder word too
+		// (an environment value is one string, rel-1-0-10:GAP-1556).
+		n := strings.ToLower(v.Name)
+		return refWord{folder: !v.Splat && n != "" && (strings.ToLower(v.Scope) == "env" || v.Scope == "" && (n == "home" || n == "pwd"))}
+	}
+	return refWord{colon: colon} // numbers, lists, other variables, fused atoms, ...: uncertain
 }
 
 // refArgv models the native argv of a host command from its elements: switches
@@ -729,22 +738,53 @@ func FuzzHostShape(f *testing.F) {
 	})
 }
 
+// argvShimEnv makes this test binary the argv recorder of TestHostArgvOracle:
+// started with it set, the binary appends its arguments (each NUL-terminated,
+// then "\x01\x00") to the named file and exits before any test runs. A native
+// executable receives its argv the same way on every OS, so the oracle runs on
+// Windows as well as on POSIX hosts (GAP-1616; the old shim was a sh script).
+const argvShimEnv = "PSPARSE_ARGV_SHIM_OUT"
+
+func init() {
+	out := os.Getenv(argvShimEnv)
+	if out == "" {
+		return
+	}
+	var b strings.Builder
+	for _, a := range os.Args[1:] {
+		b.WriteString(a)
+		b.WriteByte(0)
+	}
+	b.WriteString("\x01\x00")
+	f, err := os.OpenFile(out, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err == nil {
+		_, err = f.WriteString(b.String())
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}
+	if err != nil {
+		os.Exit(2)
+	}
+	os.Exit(0)
+}
+
 // TestHostArgvOracle is the missing half of the differential: it starts from
 // PowerShell SOURCE, not from argv. Each case runs in a pwsh 7.7 caller whose
-// host is a shim that records the argv it receives, and every call whose words
-// psparse reports as certain must receive exactly those words.
+// host is a shim (this test binary, see argvShimEnv) that records the argv it
+// receives, and every call whose words psparse reports as certain must receive
+// exactly those words.
 func TestHostArgvOracle(t *testing.T) {
 	pwsh := os.Getenv("PSPARSE_ORACLE")
 	if pwsh == "" {
 		t.Skip("PSPARSE_ORACLE unset")
 	}
 	dir := t.TempDir()
-	shim := filepath.Join(dir, "argvshim")
-	record := filepath.Join(dir, "argv.out")
-	script := "#!/bin/sh\n{ for a in \"$@\"; do printf '%s\\0' \"$a\"; done; printf '\\001\\0'; } >> \"$ARGV_OUT\"\n"
-	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
+	shim, err := os.Executable()
+	if err != nil {
 		t.Fatal(err)
 	}
+	record := filepath.Join(dir, "argv.out")
 	type kase struct{ src, shimSrc string }
 	var cases []kase
 	for _, r := range hostShapeRows {
@@ -778,7 +818,7 @@ foreach ($l in [IO.File]::ReadAllLines($f)) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, pwsh, "-NoProfile", "-NonInteractive", "-File", caller, lines, shim)
-	cmd.Env = append(os.Environ(), "ARGV_OUT="+record)
+	cmd.Env = append(os.Environ(), argvShimEnv+"="+record)
 	cmd.Stdin = nil
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Logf("caller: %v %s", err, out)

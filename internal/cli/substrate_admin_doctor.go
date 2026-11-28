@@ -34,12 +34,16 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/attach"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/fleet"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/revocation"
 )
 
 // The status of one doctor check.
@@ -64,6 +68,9 @@ type substrateDoctorReport struct {
 	Context  string           `json:"context,omitempty"`
 	Problems int              `json:"problems"`
 	Checks   []substrateCheck `json:"checks"`
+	// componentsChecked is true when the cluster.components row ran
+	// (--install-file): only then does the last line say "ready for agents".
+	componentsChecked bool
 }
 
 // Seams for tests.
@@ -102,15 +109,17 @@ func newSubstrateDoctorCmd() *cobra.Command {
 		Short: "Check that this computer can run agents in the cluster",
 		Long: `Checks, from this computer, everything a run needs: the cluster is set up here, its admin address answers
 over TLS, you are signed in and the cluster accepts it, the sign-in server matches, attach through the gateway works and
-you have what it asks for, your sign-in can be kept safely, and (for administrators, when the cluster uses signed policy
-bundles) every stage's bundle still verifies. Nothing needs to be installed here, and nothing in the
+you have what it asks for, your sign-in can be kept safely, the cluster can check ended sign-ins (for administrators: whether
+it ends them at all), and (for administrators, when the cluster uses signed policy bundles) every stage's bundle still verifies. Nothing needs to be installed here, and nothing in the
 cluster changes.
 
 Administrators add the cluster's own checks (version, issuer, snapshot bucket, access policies, egress callout, router
 clients, routes, API access) with --install-file, the SubstrateInstall file you gave ate-setup: they are read with
 kubectl and your own cloud credentials, the same as defenseclaw substrate verify. --cluster without it says what is missing.
 
-The last line is "ready for agents" when no check failed. Otherwise it is "not ready" and each failed check says how to fix
+The last line is "ready for agents" when no check failed and the cluster components (gateway, leader, controller,
+callout) were checked, which needs --install-file. Without it the last line says that the checks on this computer pass
+and that the cluster components were not checked. Otherwise it is "not ready" and each failed check says how to fix
 it, and the exit code is 1.`,
 		Example: "defenseclaw substrate doctor\ndefenseclaw substrate doctor --cluster --json",
 		Args:    cobra.NoArgs,
@@ -164,9 +173,14 @@ func runSubstrateDoctor(cmd *cobra.Command, out *substrateOutput, com *substrate
 		d.add("token_store", doctorOK, "your sign-in can be kept safely", "")
 	}
 
+	// 3. The optional tools the secret sources run (gh, op, security).
+	doctorSecretSources(d)
+	// 4. The desktop notifier `watch` uses (off by default; never a failure).
+	d.checks = append(d.checks, substrateNotifierCheck())
+
 	name := ""
 	if openErr != nil {
-		for _, id := range []string{"admin_address", "sign_in", "sign_in_server", "attach"} {
+		for _, id := range []string{"admin_address", "sign_in", "sign_in_server", "attach", "egress_callout"} {
 			d.add(id, doctorSkip, "needs a configured cluster", "")
 		}
 	} else {
@@ -197,6 +211,9 @@ func runSubstrateDoctor(cmd *cobra.Command, out *substrateOutput, com *substrate
 	for _, c := range d.checks {
 		if c.Status == doctorFail {
 			rep.Problems++
+		}
+		if c.ID == doctorComponentsID {
+			rep.componentsChecked = true
 		}
 	}
 	rep.OK = rep.Problems == 0
@@ -231,7 +248,13 @@ func printSubstrateDoctor(w io.Writer, rep substrateDoctorReport) {
 		}
 	}
 	if rep.OK {
-		fmt.Fprintln(w, "ready for agents")
+		if rep.componentsChecked {
+			fmt.Fprintln(w, "ready for agents")
+			return
+		}
+		// A user's doctor cannot read the cluster's components: say what
+		// it checked instead of "ready for agents" (GAP-0593).
+		fmt.Fprintln(w, doctorUserSummary)
 		return
 	}
 	fmt.Fprintf(w, "not ready: %d problem(s)\n", rep.Problems)
@@ -320,7 +343,7 @@ func doctorCluster(ctx context.Context, d *doctorRun, s *substrateSession) {
 
 	// 4. Signed in, and the cluster accepts the token.
 	var mine []api.Actor
-	signedIn := false
+	signedIn, listStale := false, false
 	if !adminOK {
 		d.add("sign_in", doctorSkip, "not checked: the admin address does not answer", "")
 	} else {
@@ -339,6 +362,11 @@ func doctorCluster(ctx context.Context, d *doctorRun, s *substrateSession) {
 		default:
 			if e, ok := api.AsError(err); ok {
 				switch {
+				case e.Status == http.StatusServiceUnavailable && e.Reason == revocation.ReasonUnavailable:
+					// B5.1: the signin_revocation row says why.
+					listStale = true
+					d.add("sign_in", doctorFail, "the cluster refused your sign-in because it can't check ended sign-ins right now (see signin_revocation)",
+						"run doctor again in a minute; if it stays, ask your administrator")
 				case e.Unauthorized():
 					d.add("sign_in", doctorFail, "the cluster did not accept your sign-in ("+doctorWord(e.Reason, "token refused")+")", "defenseclaw substrate login")
 				case e.NotImplemented():
@@ -358,11 +386,145 @@ func doctorCluster(ctx context.Context, d *doctorRun, s *substrateSession) {
 
 	// 6. Attach through the gateway.
 	d.checks = append(d.checks, doctorAttach(ctx, s, mine, signedIn))
+	// 6b. How that agent gets its registry placeholders (B1 2.6, S7).
+	d.checks = append(d.checks, doctorRegistryFiles(ctx, s, mine, signedIn))
 
-	// 7. Policy bundles (administrators, when the cluster has them on).
+	// 7. Ended sign-ins (B5.1).
+	if c, ok := doctorSignInRevocation(ctx, s, signedIn, listStale); ok {
+		d.checks = append(d.checks, c)
+	}
+
+	// 8. Policy bundles (administrators, when the cluster has them on).
 	if c, ok := doctorBundles(ctx, s, signedIn); ok {
 		d.checks = append(d.checks, c)
 	}
+
+	// 8. The egress callout: another one in Substrate's slot turns
+	// DefenseClaw's egress checks off (GAP-0497).
+	d.checks = append(d.checks, doctorEgressCallout(ctx, s, adminOK))
+	// 9. Cluster budgets: the leader, the spend feed and the price table.
+	if signedIn {
+		u, err := s.Client.Usage(ctx, api.UsageQuery{By: "model", Since: "24h"})
+		if c, ok := doctorBudgetsRow(u, err); ok {
+			d.checks = append(d.checks, c)
+		}
+		if err == nil {
+			d.checks = append(d.checks, substrateCheck{ID: "usage_person_key", Status: doctorOK, Summary: doctorPersonKeyNotice})
+		}
+	}
+}
+
+// doctorPersonKeyNotice names the one change to how an agent's usage is
+// owned: its calls are counted under the person key (issuer and subject), not
+// the bare subject, which two sign-in servers can share. Usage rows exported
+// before the change keep the old id and are not rewritten (until 1.0.13).
+const doctorPersonKeyNotice = "usage of your agents is counted under your person key (issuer and subject), not the bare subject, so " +
+	"one subject at two sign-in servers is two people; usage rows exported before this change keep the old id and are not rewritten"
+
+// doctorBudgetsRow is the cluster_budgets row: whether the cluster's leader
+// answers usage (the leader), whether every budget has a spend (the feed) and
+// whether the calls of the last day had a price (the price table). ok is
+// false when the cluster cannot say (an older cluster, no access).
+func doctorBudgetsRow(u api.UsageAnswer, err error) (substrateCheck, bool) {
+	const id = "cluster_budgets"
+	if err != nil {
+		e, ok := api.AsError(err)
+		if !ok {
+			return substrateCheck{}, false
+		}
+		switch e.Reason {
+		case "usage_disabled":
+			return substrateCheck{ID: id, Status: doctorSkip, Summary: "usage is turned off on this cluster (substrate.usage.enabled: false), so actor and batch budgets are not counted across its replicas"}, true
+		case "usage_unavailable":
+			return substrateCheck{ID: id, Status: doctorWarn, Summary: "the cluster's leader did not answer usage, so budget spend cannot be read",
+				Fix: "ask your administrator to check the leader pods (kubectl get pods -l app.kubernetes.io/component=leader)"}, true
+		}
+		return substrateCheck{}, false
+	}
+	var unpriced int64
+	for _, r := range u.Rows {
+		if d := r.UsageCalls - r.CostCalls; d > 0 {
+			unpriced += d
+		}
+	}
+	unknown := 0
+	for _, b := range u.Budgets {
+		if b.SpentUSD == nil && !b.Exceeded {
+			unknown++
+		}
+	}
+	var problems []string
+	if unknown > 0 {
+		problems = append(problems, fmt.Sprintf("the spend of %d budget(s) is not known yet (the leader's spend feed has not answered)", unknown))
+	}
+	if unpriced > 0 {
+		problems = append(problems, fmt.Sprintf("%d call(s) in the last day had no known price (the model is not in the price table), so budgets do not count them", unpriced))
+	}
+	if len(problems) == 0 {
+		return substrateCheck{ID: id, Status: doctorOK, Summary: "the leader answers usage, every budget has a spend and the calls of the last day were priced"}, true
+	}
+	return substrateCheck{ID: id, Status: doctorWarn, Summary: strings.Join(problems, "; "),
+		Fix: "ask your administrator to add the model to observability.pricing in the chart values, or to check the leader"}, true
+}
+
+const (
+	doctorRevocationStaleFix = "run doctor again in a minute; if it stays, ask your administrator to check that the cluster's leader pod " +
+		"is running and reachable from the gateway"
+	doctorRevocationOldFix = "ask your administrator to upgrade DefenseClaw on the cluster to 1.0.11 or later"
+)
+
+// doctorSignInRevocation is the signin_revocation row (B5.1): can the
+// cluster end a sign-in, so that signing out (or an administrator's
+// revoke) stops a copy of the token? A gateway whose list of ended
+// sign-ins is too old refuses every sign-in, its own doctor route
+// included, so that case comes from the sign_in answer (listStale).
+// Otherwise an administrator gets the gateway's own
+// substrate.signin_revocation row; a gateway without that row is older
+// than 1.0.11 and does not end sign-ins. A non-administrator gets no row.
+func doctorSignInRevocation(ctx context.Context, s *substrateSession, signedIn, listStale bool) (substrateCheck, bool) {
+	const id = "signin_revocation"
+	stale := substrateCheck{ID: id, Status: doctorFail, Fix: doctorRevocationStaleFix,
+		Summary: "the cluster can't read its list of ended sign-ins right now, so it refuses every sign-in until it reads the list again"}
+	old := substrateCheck{ID: id, Status: doctorWarn, Fix: doctorRevocationOldFix,
+		Summary: "the cluster's gateway does not end sign-ins (it is older than 1.0.11): signing out does not stop a copy of " +
+			"your sign-in token, which keeps working until it expires (up to 24 h)"}
+	switch {
+	case listStale:
+		return stale, true
+	case !signedIn:
+		return substrateCheck{}, false
+	}
+	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	rows, err := s.Client.GatewayDoctor(cctx)
+	if err != nil {
+		if e, ok := api.AsError(err); ok {
+			switch {
+			case e.Status == http.StatusForbidden:
+				return substrateCheck{}, false
+			case e.Status == http.StatusNotFound || e.NotImplemented():
+				return old, true
+			case e.Status == http.StatusServiceUnavailable && e.Reason == revocation.ReasonUnavailable:
+				return stale, true
+			}
+		}
+		return substrateCheck{ID: id, Status: doctorWarn, Summary: "whether the cluster ends sign-ins could not be read: " + doctorFirstLine(err),
+			Fix: "run doctor again in a minute"}, true
+	}
+	for _, r := range rows {
+		if r.ID != "substrate.signin_revocation" {
+			continue
+		}
+		c := substrateCheck{ID: id, Status: doctorWarn, Summary: "the gateway says: " + safetext.Line(r.Detail), Fix: safetext.Line(r.Fix)}
+		switch r.Status {
+		case "pass":
+			c.Status = doctorOK
+		case "fail":
+			c.Status = doctorFail
+		}
+		return c, true
+	}
+	return old, true
 }
 
 const doctorBundleFix = "apply a bundle signed by a key of the bundle-anchors Secret (defenseclaw substrate bundle apply), " +
@@ -409,10 +571,43 @@ func doctorBundles(ctx context.Context, s *substrateSession, signedIn bool) (sub
 		return substrateCheck{ID: id, Status: doctorWarn, Fix: "create the bundle-anchors Secret before a bundle is applied",
 			Summary: "no bundle is applied and the cluster cannot read its bundle trust anchors: " + safetext.Line(anchorsErr)}, true
 	}
+	if c, ok := doctorBundlesOCI(res); ok {
+		return c, true
+	}
 	if len(stages) == 0 {
 		return substrateCheck{ID: id, Status: doctorOK, Summary: "no policy bundle is applied; config.yaml is in force"}, true
 	}
 	return substrateCheck{ID: id, Status: doctorOK, Summary: fmt.Sprintf("the active bundle of each of %d stage(s) verifies", len(stages))}, true
+}
+
+// doctorBundlesOCI fails the policy_bundles row when the bundle pulled for an
+// OCI stage was refused, and warns while one is not pulled yet (GAP-0437).
+func doctorBundlesOCI(res map[string]any) (substrateCheck, bool) {
+	const id = "policy_bundles"
+	oci, _ := res["oci"].([]any)
+	var refused, pending []string
+	for _, o := range oci {
+		om, _ := o.(map[string]any)
+		stage, _ := om["stage"].(string)
+		state, _ := om["state"].(string)
+		result, _ := om["result"].(string)
+		code, _ := om["code"].(string)
+		switch {
+		case state != "processed":
+			pending = append(pending, safetext.Line(stage))
+		case result == "refused":
+			refused = append(refused, safetext.Line(stage)+" ("+safetext.Line(code)+")")
+		}
+	}
+	if len(refused) > 0 {
+		return substrateCheck{ID: id, Status: doctorFail, Fix: "sign the bundle with a key in the bundle anchors, push it and pin the new digest in substrate.bundles.oci.stages",
+			Summary: "the bundle pulled from the OCI registry was refused for stage(s) " + strings.Join(refused, ", ") + "; those stages keep their last verified bundle"}, true
+	}
+	if len(pending) > 0 {
+		return substrateCheck{ID: id, Status: doctorWarn, Fix: "check the controller events (sandbox.bundle.*) for the pull error: registry reachable, digest, credentials, CA",
+			Summary: "the OCI bundle of stage(s) " + strings.Join(pending, ", ") + " is not pulled yet; the controller retries every refresh"}, true
+	}
+	return substrateCheck{}, false
 }
 
 func doctorSignInServer(ctx context.Context, c auth.Context) substrateCheck {
@@ -555,8 +750,180 @@ func doctorKubeChecks(ctx context.Context, kf *substrateClusterFlags, tokenGroup
 			rows[i].Fix = fleet.CalloutFix(o)
 		}
 	}
-	return rows
+	rows = append(rows, doctorComponents(r.Health, o.Namespace))
+	return append(rows, doctorSkillScan(ctx, kf))
 }
+
+// doctorComponentsID is the row that reads the components' ready pods.
+const doctorComponentsID = "cluster.components"
+
+// doctorUserSummary is the last line of a doctor without --install-file
+// when no check failed.
+const doctorUserSummary = "your sign-in, token store and attach checks pass; the cluster components were not checked " +
+	"(an administrator runs defenseclaw substrate doctor --install-file FILE)"
+
+// doctorComponents fails, naming each component, when one of the four the
+// chart always deploys (gateway, leader, controller, callout) has no ready
+// pod: scaled to 0, not deployed, or not ready. With the callout down every
+// agent's hook and egress is refused, so the cluster is not ready for agents
+// (GAP-0593, GAP-0608: kubectl scale --replicas=0 sets desired to 0, so a
+// desired > 0 test would miss the J46 shape).
+func doctorComponents(h fleet.Health, ns string) substrateCheck {
+	comps := []struct {
+		name           string
+		desired, ready int
+	}{
+		{"gateway", h.Gateway.Desired, h.Gateway.Ready},
+		{"leader", h.Leader.Desired, 0},
+		{"controller", h.Controller.Desired, h.Controller.Ready},
+		{"callout", h.Callout.Desired, h.Callout.Ready},
+	}
+	if h.Leader.Ready {
+		comps[1].ready = 1
+	}
+	var down, up []string
+	for _, c := range comps {
+		switch {
+		case c.ready > 0:
+			up = append(up, fmt.Sprintf("%s %d/%d", c.name, c.ready, c.desired))
+		case c.desired == 0:
+			down = append(down, c.name+" has no pod (scaled to 0 or not deployed)")
+		default:
+			down = append(down, fmt.Sprintf("%s has 0 of %d pods ready", c.name, c.desired))
+		}
+	}
+	if len(down) > 0 {
+		return substrateCheck{ID: doctorComponentsID, Status: doctorFail, Summary: strings.Join(down, "; "),
+			Fix: "kubectl -n " + ns + " get deployments,statefulsets shows the component (wrong --namespace if none is listed); " +
+				"scale it back with kubectl -n " + ns + " scale, or redeploy it with helm upgrade; kubectl -n " + ns +
+				" describe pods and logs say why a pod is not ready"}
+	}
+	return substrateCheck{ID: doctorComponentsID, Status: doctorOK, Summary: "ready pods: " + strings.Join(up, ", ")}
+}
+
+// doctorSkillScan is the substrate.skill_scan row (B5.4, GAP-0477): the
+// gateway pods' skill-scanner sidecar, from the pods' container status, and
+// the gateway config (substrate.skills.scan.enabled, deployment_mode, the
+// hook policy tier). A scanner that is not running fails where the gateway
+// refuses new skills unscanned (managed installs, the strict tier) and warns
+// on the others (new skills are allowed with an alert).
+func doctorSkillScan(ctx context.Context, kf *substrateClusterFlags) substrateCheck {
+	const id = "substrate.skill_scan"
+	gc := doctorSkillScanConfig(ctx, kf)
+	if gc.read && !gc.scanOn {
+		return substrateCheck{ID: id, Status: doctorSkip, Summary: "Skill scanning is turned off (substrate.skills.scan.enabled: false)."}
+	}
+	raw, err := substrateKubectl(ctx, kf, "get", "pods", "-n", kf.namespace, "-l", "app.kubernetes.io/component=gateway", "-o", "json")
+	if err != nil {
+		return substrateCheck{ID: id, Status: doctorWarn, Summary: "the skill scanner was not read: " + doctorFirstLine(err), Fix: "check your kubectl access, then run doctor again"}
+	}
+	var pods struct {
+		Items []struct {
+			Spec struct {
+				Containers []struct{ Name, Image string } `json:"containers"`
+			} `json:"spec"`
+			Status struct {
+				ContainerStatuses []struct {
+					Name  string `json:"name"`
+					Ready bool   `json:"ready"`
+				} `json:"containerStatuses"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &pods); err != nil {
+		return substrateCheck{ID: id, Status: doctorWarn, Summary: "the skill scanner was not read: " + doctorFirstLine(err), Fix: "run doctor again"}
+	}
+	if len(pods.Items) == 0 {
+		return substrateCheck{ID: id, Status: doctorSkip, Summary: "not checked: no gateway pod runs"}
+	}
+	version, with, down := "", 0, 0
+	for _, p := range pods.Items {
+		for _, c := range p.Spec.Containers {
+			if c.Name == skillScannerContainer {
+				with++
+				version = imageTag(c.Image)
+			}
+		}
+		for _, cs := range p.Status.ContainerStatuses {
+			if cs.Name == skillScannerContainer && !cs.Ready {
+				down++
+			}
+		}
+	}
+	if with == 0 && !gc.read {
+		// No sidecar and no config to say otherwise: the chart renders none
+		// when gateway.skillScanner.enabled is false.
+		return substrateCheck{ID: id, Status: doctorSkip, Summary: "Skill scanning is turned off (substrate.skills.scan.enabled: false)."}
+	}
+	if n := down + len(pods.Items) - with; n > 0 {
+		status, outcome := doctorWarn, "allowed with an alert"
+		switch {
+		case !gc.read:
+			status, outcome = doctorFail, "refused on managed installs and allowed with an alert on others"
+		case gc.refusedAll:
+			status, outcome = doctorFail, "refused"
+		case len(gc.refused) > 0:
+			status, outcome = doctorFail, "refused for "+strings.Join(gc.refused, ", ")+" and allowed with an alert for the other agents"
+		}
+		return substrateCheck{ID: id, Status: status, Summary: fmt.Sprintf("Skill scanner is not running on %d of %d gateway pods. New skills are %s there.", n, len(pods.Items), outcome),
+			Fix: "kubectl -n " + kf.namespace + " logs deploy/defenseclaw-gateway -c " + skillScannerContainer}
+	}
+	return substrateCheck{ID: id, Status: doctorOK, Summary: "Skill scanner ready (skill-scanner image " + doctorWord(version, "untagged") + ")."}
+}
+
+// skillScanConfig is what the substrate.skill_scan row reads of the gateway
+// config; read is false when there was none to read. refused are the
+// connectors whose new skills the gateway refuses unscanned (managed
+// installs: every one; else the strict-tier ones).
+type skillScanConfig struct {
+	read, scanOn, refusedAll bool
+	refused                  []string
+}
+
+// doctorSkillScanConfig reads the gateway config doctor checks (--config, or
+// the cluster's config map, as the fleet checks do).
+func doctorSkillScanConfig(ctx context.Context, kf *substrateClusterFlags) skillScanConfig {
+	text := ""
+	if kf.configFile != "" {
+		b, err := os.ReadFile(kf.configFile)
+		if err != nil {
+			return skillScanConfig{}
+		}
+		text = string(b)
+	} else {
+		cms, err := kubeGetList(ctx, kf, "get", "configmaps", "-n", kf.namespace)
+		if err != nil {
+			return skillScanConfig{}
+		}
+		for _, c := range cms {
+			if t := c.Data["config.yaml"]; strings.Contains(t, "substrate:") {
+				text = t
+				break
+			}
+		}
+	}
+	if text == "" {
+		return skillScanConfig{}
+	}
+	var doc config.Config
+	if yaml.Unmarshal([]byte(text), &doc) != nil {
+		return skillScanConfig{}
+	}
+	// GAP-0936: the gateway's own check (managed, or the connector's strict
+	// tier), for each connector an actor can run.
+	blocks := substrateBlocksUnscannedSkills(&doc)
+	var refused []string
+	all := slices.Concat(kit.Wave1Connectors, kit.Wave2Connectors, kit.Wave3Connectors)
+	for _, c := range all {
+		if blocks(c) {
+			refused = append(refused, c)
+		}
+	}
+	return skillScanConfig{read: true, scanOn: doc.Substrate.SkillScanEnabled(), refusedAll: len(refused) == len(all), refused: refused}
+}
+
+// skillScannerContainer is the chart's scanner sidecar container name.
+const skillScannerContainer = "skill-scanner"
 
 func fleetCheckFix(id string) string {
 	switch id {

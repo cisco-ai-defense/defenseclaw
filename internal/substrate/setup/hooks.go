@@ -71,7 +71,21 @@ type ConfigMap struct {
 	Name            string
 	ResourceVersion string
 	Data            map[string]string
+	// Annotations and Labels are carried through an update, so a write keeps
+	// what other tools (and GrantedUserSecretsAnnotation) recorded on the
+	// object (GAP-0909 added the labels: the PUT replaces the whole object).
+	Annotations map[string]string
+	Labels      map[string]string
 }
+
+// GrantedUserSecretsAnnotation records, on the credential provider policy
+// ConfigMap, the self-service namespace setup last granted to the launcher
+// atespaces. When self_service_secrets.namespace changes, the recorded one
+// is revoked (RV3 P3-4). Setup does not delete the orphan values in the old
+// namespace (that would widen the hook Jobs' access); it prints the kubectl
+// delete command. A namespace renamed in the same upgrade that first writes
+// this annotation is not caught: the first run only records it.
+const GrantedUserSecretsAnnotation = "defenseclaw.cisco.com/granted-user-secrets-namespace"
 
 // KubeAPI is the part of the Kubernetes API the hook steps use. Not-found
 // is (nil, nil) for GetConfigMap and nil for DeleteSecret.
@@ -88,7 +102,19 @@ type KubeAPI interface {
 	// terminating ones included (they can still write); 0 when it does not
 	// exist.
 	DeploymentPods(ctx context.Context, namespace, name string) (int32, error)
+	// DeleteJob deletes a Job and, in the background, its pods; found is
+	// false when it does not exist.
+	DeleteJob(ctx context.Context, namespace, name string) (found bool, err error)
 }
+
+// LeftoverHookJobs are the chart's hook Jobs other than pre-delete
+// (templates/hooks/jobs.yaml). A failed hook keeps its Job and Error pod
+// (hook-delete-policy hook-succeeded; before-hook-creation only fires when
+// the same hook runs again), so the pre-delete hook removes them, by name in
+// the release namespace (GAP-0609). The chart's uninstall Role names the
+// same list.
+var LeftoverHookJobs = []string{"defenseclaw-chain-key", "defenseclaw-relay-session", "defenseclaw-pre-upgrade",
+	"defenseclaw-pre-rollback", "defenseclaw-bootstrap"}
 
 // StepReport is what a hook step did, for the Job log and `--json`.
 type StepReport struct {
@@ -109,8 +135,25 @@ func (r *StepReport) note(format string, args ...any) {
 // atespaces and as global viewer, then grants the launcher atespaces the
 // secrets namespace in the credential provider policy and restarts the
 // provider so it reads the policy. It is idempotent.
+//
+// owner nil is an upgrade without the owner token Secret (the first
+// bootstrap deleted it): the access policies stay as they are, but the
+// credential provider grant, which needs only the Kubernetes API, still
+// follows the plan. Before, that upgrade skipped the grant too, so a cluster
+// upgraded to a chart with self-service secrets never granted their
+// namespace and the provider refused every bound person secret (GAP-1076).
 func Bootstrap(ctx context.Context, plan ChartPlan, owner SubstrateAPI, kube KubeAPI) (StepReport, error) {
 	r := StepReport{Step: "bootstrap"}
+	if owner == nil {
+		r.note("no owner token Secret: the access policies were not touched. Doctor checks them; " +
+			"create the Secret again to rewrite them.")
+		if plan.CredentialProvider.Grant {
+			if err := grantProvider(ctx, plan, kube, &r); err != nil {
+				return r, err
+			}
+		}
+		return r, nil
+	}
 	for _, a := range plan.LauncherAtespaces {
 		ok, err := owner.GetAtespace(ctx, a)
 		if err != nil {
@@ -209,27 +252,68 @@ func grantProvider(ctx context.Context, plan ChartPlan, kube KubeAPI, r *StepRep
 			"so no grant was written", plan.SubstrateNamespace, cp.ConfigMap)
 		return nil
 	}
-	text, changes, err := GrantNamespace(cm.Data[NamespacePolicyKey], plan.LauncherAtespaces, cp.SecretsNamespace)
-	if err != nil {
-		return err
+	grant, revoke := cp.grantedNamespaces()
+	// The namespace granted by the last run is revoked when it changed or
+	// self-service went off (RV3 P3-4).
+	cur := ""
+	if len(grant) > 1 {
+		cur = grant[1]
 	}
-	// An atespace that left launcher_atespaces loses the grant (GAP-0083).
-	text, revoked, err := RevokeNamespaceExcept(text, plan.LauncherAtespaces, cp.SecretsNamespace)
-	if err != nil {
-		return err
+	prev := cm.Annotations[GrantedUserSecretsAnnotation]
+	if prev != "" && prev != cur && prev != cp.SecretsNamespace && !slices.Contains(revoke, prev) {
+		revoke = append(revoke, prev)
+		if cur != "" {
+			r.note("self-service secrets moved from namespace %s to %s: the grant of %s is revoked. "+
+				"The values people set there (Secrets named dc-b-*) are no longer read; delete them with "+
+				"`kubectl -n %s delete secret -l app.kubernetes.io/managed-by=defenseclaw` once nobody needs them",
+				prev, cur, prev, prev)
+		}
 	}
-	changes = append(changes, revoked...)
-	if len(changes) == 0 {
+	text := cm.Data[NamespacePolicyKey]
+	var changes []GrantChange
+	for _, ns := range grant {
+		var granted, revoked []GrantChange
+		var err error
+		if text, granted, err = GrantNamespace(text, plan.LauncherAtespaces, ns); err != nil {
+			return err
+		}
+		// An atespace that left launcher_atespaces loses the grant (GAP-0083).
+		if text, revoked, err = RevokeNamespaceExcept(text, plan.LauncherAtespaces, ns); err != nil {
+			return err
+		}
+		changes = append(append(changes, granted...), revoked...)
+	}
+	// Self-service secrets turned off: no atespace keeps their namespace.
+	for _, ns := range revoke {
+		var revoked []GrantChange
+		var err error
+		if text, revoked, err = RevokeNamespaceExcept(text, nil, ns); err != nil {
+			return err
+		}
+		changes = append(changes, revoked...)
+	}
+	if len(changes) == 0 && prev == cur {
 		return nil
 	}
 	if cm.Data == nil {
 		cm.Data = map[string]string{}
 	}
 	cm.Data[NamespacePolicyKey] = text
+	if cur == "" {
+		delete(cm.Annotations, GrantedUserSecretsAnnotation)
+	} else {
+		if cm.Annotations == nil {
+			cm.Annotations = map[string]string{}
+		}
+		cm.Annotations[GrantedUserSecretsAnnotation] = cur
+	}
 	if err := kube.UpdateConfigMap(ctx, cm); err != nil {
 		return fmt.Errorf("credential provider policy: %w", err)
 	}
 	r.Grants = append(r.Grants, changes...)
+	if len(changes) == 0 {
+		return nil
+	}
 	if err := kube.RestartDeployment(ctx, plan.SubstrateNamespace, cp.Deployment); err != nil {
 		return fmt.Errorf("restart the credential provider (it reads its policy at start only): %w", err)
 	}
@@ -277,14 +361,59 @@ func PreUpgrade(ctx context.Context, plan ChartPlan, config []byte, validate fun
 }
 
 // PreRollback refuses a rollback to a release that reads an older store
-// schema than the store has, naming the backup (E25).
+// schema than the store has, naming the backup (E25), and how to clear the
+// revision helm keeps for the refused rollback (GAP-0448). helm writes that
+// revision before it runs the hook, so every refusal carries the recovery: a
+// store state that cannot be read or parsed leaves it as much as a schema
+// refusal does (GAP-0666).
 func PreRollback(ctx context.Context, plan ChartPlan, kube KubeAPI) (StepReport, error) {
 	r := StepReport{Step: "pre-rollback"}
-	st, err := storeState(ctx, plan, kube)
+	cm, err := kube.GetConfigMap(ctx, plan.Namespace, plan.StoreStateConfigMap)
 	if err != nil {
-		return r, err
+		return r, fmt.Errorf("store state: %w. %s", err, RefusedRollbackRecovery(plan))
 	}
-	return r, CheckRollback(plan.StoreSchema, st)
+	var st *StoreState
+	if cm != nil {
+		if st, err = ParseStoreState(cm.Data); err != nil {
+			// The same ConfigMap fails every rerun of this hook, so clearing
+			// the pending-rollback revision with a helm rollback is not enough:
+			// the ConfigMap is repaired first (GAP-0917).
+			return r, fmt.Errorf("%w. %s", err, UnreadableStoreStateRecovery(plan))
+		}
+	}
+	if err := CheckRollback(plan.StoreSchema, st); err != nil {
+		return r, fmt.Errorf("%w. %s", err, RefusedRollbackRecovery(plan))
+	}
+	return r, nil
+}
+
+// RefusedRollbackRecovery says how to clear a refused rollback. helm
+// writes the rollback revision (status pending-rollback) before it runs
+// the pre-rollback hook and leaves it there when the hook fails, so every
+// later helm upgrade fails with "another operation (install/upgrade/
+// rollback) is in progress" (GAP-0448). A rollback to the revision that is
+// deployed now is allowed over it (helm checks no pending state on a
+// rollback), passes this check (that release reads the store's schema) and
+// changes nothing; then upgrades work again.
+func RefusedRollbackRecovery(plan ChartPlan) string {
+	return fmt.Sprintf("Nothing was rolled back, but helm keeps this rollback as a pending-rollback revision and refuses "+
+		"every helm upgrade until it is cleared: run helm -n %[1]s rollback %[2]s N, where N is the revision helm -n %[1]s "+
+		"history %[2]s shows as deployed (it changes nothing), then upgrade as usual", plan.Namespace, plan.Release)
+}
+
+// UnreadableStoreStateRecovery is the recovery for a store-state ConfigMap
+// that does not parse. Every rollback runs this hook again and fails the same
+// way, so the ConfigMap comes first: set schema_version to the whole number the
+// store is at (the leader logs it at start), or delete the ConfigMap (the
+// recorded backup name is lost, the leader writes a new one at its next
+// start). Then the pending-rollback revision is cleared as for any refusal.
+func UnreadableStoreStateRecovery(plan ChartPlan) string {
+	return fmt.Sprintf("Nothing was rolled back. Repairing the ConfigMap comes first, because a helm rollback runs this "+
+		"check again and fails the same way: run kubectl -n %[1]s edit configmap %[3]s and set %[4]s to the schema version "+
+		"the store is at (a whole number, 1 or more), or run kubectl -n %[1]s delete configmap %[3]s (the leader writes a "+
+		"new one at its next start; the backup name it recorded is lost). Then clear the pending-rollback revision helm "+
+		"keeps: run helm -n %[1]s rollback %[2]s N, where N is the revision helm -n %[1]s history %[2]s shows as deployed, "+
+		"and retry the rollback you wanted", plan.Namespace, plan.Release, plan.StoreStateConfigMap, StoreStateSchemaKey)
 }
 
 // ErrPoliciesLeft fails the uninstall while DefenseClaw-written egress
@@ -348,6 +477,9 @@ func PreDelete(ctx context.Context, plan ChartPlan, api SubstrateAPI, kube KubeA
 		r.note("helm removes the cluster-wide ClusterRoleBinding %s (gateway ServiceAccount to system:auth-delegator, "+
 			"for the Kubernetes sign-in) with the release", plan.AuthDelegatorBinding)
 	}
+	if len(left) == 0 {
+		deleteLeftoverHookJobs(ctx, plan, kube, &r)
+	}
 	r.Notes = append(r.Notes, PurgeSteps(plan)...)
 	if len(left) > 0 {
 		return r, restore(fmt.Errorf("%w on %d actor(s): %s. Delete them as an atespace editor "+
@@ -355,6 +487,25 @@ func PreDelete(ctx context.Context, plan ChartPlan, api SubstrateAPI, kube KubeA
 			ErrPoliciesLeft, len(left), strings.Join(left, ", ")))
 	}
 	return r, nil
+}
+
+// deleteLeftoverHookJobs removes the hook Jobs (and their pods) that earlier
+// failed hooks left. A failure is a note: it never stops the uninstall.
+func deleteLeftoverHookJobs(ctx context.Context, plan ChartPlan, kube KubeAPI, r *StepReport) {
+	var gone []string
+	for _, name := range LeftoverHookJobs {
+		found, err := kube.DeleteJob(ctx, plan.Namespace, name)
+		if err != nil {
+			r.note("the hook Job %s could not be deleted (%v); delete it with kubectl -n %s delete job %s", name, err, plan.Namespace, name)
+			continue
+		}
+		if found {
+			gone = append(gone, name)
+		}
+	}
+	if len(gone) > 0 {
+		r.note("deleted the hook Job(s) %s and their pods, left by earlier failed hooks", strings.Join(gone, ", "))
+	}
 }
 
 // ScaleBackTimeout bounds the scale-back after a failed uninstall step; it
@@ -458,16 +609,33 @@ func revokeProvider(ctx context.Context, plan ChartPlan, kube KubeAPI, r *StepRe
 	if err != nil || cm == nil {
 		return err
 	}
-	// Every atespace granted the secrets namespace, not only today's
+	// Every atespace granted the secrets namespaces, not only today's
 	// launcher list: one removed from launcher_atespaces earlier keeps its
-	// grant otherwise (GAP-0083). Only DefenseClaw grants that namespace.
-	text, changes, err := RevokeNamespaceExcept(cm.Data[NamespacePolicyKey], nil, cp.SecretsNamespace)
-	if err != nil || len(changes) == 0 {
-		return err
+	// grant otherwise (GAP-0083). Only DefenseClaw grants those namespaces.
+	grant, revoke := cp.grantedNamespaces()
+	if prev := cm.Annotations[GrantedUserSecretsAnnotation]; prev != "" && prev != cp.SecretsNamespace {
+		revoke = append(revoke, prev)
+	}
+	text := cm.Data[NamespacePolicyKey]
+	var changes []GrantChange
+	for _, ns := range append(grant, revoke...) {
+		var revoked []GrantChange
+		if text, revoked, err = RevokeNamespaceExcept(text, nil, ns); err != nil {
+			return err
+		}
+		changes = append(changes, revoked...)
+	}
+	_, recorded := cm.Annotations[GrantedUserSecretsAnnotation]
+	if len(changes) == 0 && !recorded {
+		return nil
 	}
 	cm.Data[NamespacePolicyKey] = text
+	delete(cm.Annotations, GrantedUserSecretsAnnotation)
 	if err := kube.UpdateConfigMap(ctx, cm); err != nil {
 		return err
+	}
+	if len(changes) == 0 {
+		return nil
 	}
 	r.Grants = append(r.Grants, changes...)
 	return kube.RestartDeployment(ctx, plan.SubstrateNamespace, cp.Deployment)
@@ -491,20 +659,34 @@ func PurgeSteps(plan ChartPlan) []string {
 		"  3. Check the bucket prefix for objects of deleted actors and remove them with your cloud's tools.",
 		"  4. The leader store volume (PVC defenseclaw-store) is kept on uninstall; delete it with " +
 			"kubectl -n " + plan.Namespace + " delete pvc defenseclaw-store once you no longer need the audit history.",
-		"  5. The access-policy grants stay (only a global owner can remove them): take " +
+		"  5. The access-policy grants stay (only a global owner can remove them), so a later ServiceAccount of the " +
+			"same name would get them. As a global owner, take " +
 			strings.Join(memberList(append(append([]string{}, plan.Editors...), plan.GlobalViewers...)), ", ") +
-			" out of the global policy and of the policies of " + strings.Join(orNone(plan.WritableAtespaces), ", ") +
-			" (kubectl ate get|update access-policy), so a later ServiceAccount of the same name gets nothing.",
+			" out of the global policy: kubectl ate get access-policy --global -o yaml > global.yaml, delete those " +
+			"members from its bindings, then kubectl ate update access-policy --global -f global.yaml." + atespaceGrantSteps(plan),
 	}
 	steps = append(steps, "  6. The Secrets the install hooks created are kept, so a reinstall keeps chain joins and the images built with "+
-		"the relay session key: "+ChainKeySecret+", "+CalloutTokenSecret+", "+plan.relaySessionSecret()+". Delete them with "+
-		"kubectl -n "+plan.Namespace+" delete secret "+ChainKeySecret+" "+CalloutTokenSecret+" "+plan.relaySessionSecret()+
+		"the relay session key and the relay CA: "+ChainKeySecret+", "+CalloutTokenSecret+", "+plan.relaySessionSecret()+", "+plan.relayCASecret()+". Delete them with "+
+		"kubectl -n "+plan.Namespace+" delete secret "+ChainKeySecret+" "+CalloutTokenSecret+" "+plan.relaySessionSecret()+" "+plan.relayCASecret()+
 		" once nothing uses them (images built with the old relay session key then need a rebuild).")
 	if plan.AuthDelegatorBinding != "" {
 		steps = append(steps, "  7. After helm uninstall --no-hooks or a lost release, check the cluster-wide binding is gone: "+
 			"kubectl delete clusterrolebinding "+plan.AuthDelegatorBinding+" --ignore-not-found.")
 	}
 	return steps
+}
+
+// atespaceGrantSteps is the same edit for each writable atespace's policy.
+func atespaceGrantSteps(plan ChartPlan) string {
+	if len(plan.WritableAtespaces) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString(" Then the same for each atespace policy:")
+	for _, a := range plan.WritableAtespaces {
+		fmt.Fprintf(&sb, " kubectl ate get access-policy -a %s -o yaml > %s.yaml, delete the members, kubectl ate update access-policy -a %s -f %s.yaml;", a, a, a, a)
+	}
+	return strings.TrimSuffix(sb.String(), ";") + "."
 }
 
 func memberList(principals []string) []string {

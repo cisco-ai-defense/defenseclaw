@@ -42,7 +42,6 @@ func currentFolderChild(t *testing.T, command, cwd, home string) SimpleCommand {
 // statement is the plain spelling itself. In a
 // folder the walk knows, $(pwd)/ and `pwd`/ name the files $PWD/ names.
 func TestSimpleCommandsCurrentFolderHeadIsTheFolderTheWalkIsIn(t *testing.T) {
-	skipPOSIXPathsOnWindows(t)
 	home := "/" + strings.Join([]string{"work", "alice"}, "/")
 	project := home + "/proj"
 	operands := []string{".ssh/id_rsa", ".aws/credentials", ".ssh/*", ".*/*", ".defenseclaw/config.yaml"}

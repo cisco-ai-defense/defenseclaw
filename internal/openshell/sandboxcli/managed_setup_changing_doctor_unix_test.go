@@ -27,7 +27,7 @@ func TestManagedSetupChangingDoctorIsNotReady(t *testing.T) {
 	if row == nil || row.Status != openshell.StatusFail || rep.OK() {
 		t.Fatalf("doctor runtime row = %+v, ready = %v", row, rep.OK())
 	}
-	ta.printDoctor(rep)
+	ta.printDoctor(rep, nil)
 	has(t, ta.output(), "not ready for sandboxes")
 	lacks(t, ta.output(), "ready for sandboxes\n")
 	wantExit(t, ta.fresh().RunDoctor(bg, DoctorOptions{Output: OutputJSON}), 1)
@@ -52,7 +52,7 @@ func TestManagedForbiddenProfileDoctorIsNotReady(t *testing.T) {
 	}
 	has(t, row.Fix.Summary, "it-help@example.com")
 	has(t, row.Detail, "doesn't allow sandboxes for claudecode")
-	ta.printDoctor(rep)
+	ta.printDoctor(rep, nil)
 	has(t, ta.output(), "not ready for sandboxes")
 	lacks(t, ta.output(), "ready for sandboxes\n")
 	wantExit(t, ta.fresh().RunDoctor(bg, DoctorOptions{Output: OutputJSON}), 1)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -5331,8 +5332,8 @@ class SandboxMachineCheck:
     # With OpenShell installed (a supported CLI, or one newer than
     # supported), the failing check whose doctor's fix openshell_detail
     # gives: installing OpenShell would change nothing. Setup stops on a
-    # CLI or gateway one before it installs anything; a "vm-driver" one it
-    # fixes with the install's consent (e2fsprogs) or stops on.
+    # CLI or gateway one before it installs anything, and a "vm-driver"
+    # one (a Linux MicroVM gateway) before it starts sandboxes.
     openshell_attention: str = ""
     # A supported OpenShell older than the release setup installs
     # (DoctorReport.OpenShellUpgradeAvailable, the report's
@@ -5342,9 +5343,28 @@ class SandboxMachineCheck:
     # The release setup installs (the report's ``openshell_install_version``;
     # "" from a doctor that does not say).
     openshell_release: str = ""
+    # On a Mac, this OpenShell (the release setup installs when none is)
+    # starts MicroVMs (openshell.MicroVMStartsOnMac, GAP-1775). Only the
+    # wizard's text follows it: the default stays the docker driver.
+    microvm_starts: bool = False
 
 
 _DOCTOR_GLYPHS = {"pass": "✓", "warn": "⚠", "fail": "✗"}
+
+# The first OpenShell release whose MicroVMs start on a Mac
+# (openshell.MicroVMStartsOnMacMin, GAP-1775).
+_MICROVM_STARTS_ON_MAC_MIN = (0, 1, 9)
+
+
+def microvm_starts_on_mac(version: str) -> bool:
+    """Whether OpenShell ``version`` (a prerelease is before its release) starts MicroVMs on a Mac."""
+    match = re.match(r"^v?(\d+)\.(\d+)\.(\d+)(.*)$", version.strip())
+    if not match:
+        return False
+    found = tuple(int(part) for part in match.groups()[:3])
+    if found == _MICROVM_STARTS_ON_MAC_MIN:
+        return not match.group(4).startswith(("-", "~"))
+    return found > _MICROVM_STARTS_ON_MAC_MIN
 
 # The checks setup stops on, in its order, when it does not install
 # OpenShell (sandboxcli/setup.go, after step 3).
@@ -5360,11 +5380,12 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
     DoctorReport.OpenShellInstallNeeded). With OpenShell installed, any
     other failing check is not the install's (it would install nothing):
     the first one setup stops on, a gateway's before a MicroVM driver's,
-    is shown with the doctor's fix (``openshell_attention``). On a MicroVM
-    (vm) gateway, or a Mac whose docker driver has no Landlock (which setup
-    switches to MicroVMs), that includes a failed ``vm-driver`` check. A
+    is shown with the doctor's fix (``openshell_attention``). On a Linux
+    MicroVM (vm) gateway that includes a failed ``vm-driver`` check, and a
     MicroVM mounts no host folders, so the bind-mount check is left out
-    there. An OpenShell installed another way than the Homebrew formula
+    there. On a Mac the wizard's setup (``--non-interactive``) moves a vm
+    gateway to the docker driver, so the docker driver's needs count there,
+    bind mounts included. An OpenShell installed another way than the Homebrew formula
     (macOS) or without the openshell-gateway user unit (Linux) is marked,
     as setup marks it: setup uses its gateway while it answers (the user
     restarts it after a gateway change) and stops, with the doctor's fix,
@@ -5397,14 +5418,15 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
 
     # The driver the gateway runs, else the one its files configure
     # (DoctorReport.Driver, .ConfiguredDriver; the Go doctor always names
-    # one). On a Mac whose docker driver has no Landlock (Docker Desktop's
-    # VM) setup switches the gateway to MicroVMs, which is its default
-    # (sandboxcli/setup.go): the MicroVM driver's needs count then, and no
+    # one). On a Mac setup's MicroVM question defaults to no, which
+    # --non-interactive takes: setup runs sandboxes on the docker driver
+    # there and moves a gateway on vm to it (sandboxcli/setup.go,
+    # GAP-1704), so the MicroVM driver's needs never count on a Mac, and
     # bind mounts do.
     driver = str(report.get("driver") or report.get("configured_driver") or "").strip()
     on_microvm = not compute_driver(driver).host_mounts
     mac = detail("platform").startswith("darwin/")
-    microvm = on_microvm or (mac and status("landlock") != "pass")
+    microvm = on_microvm and not mac
     parts: list[str] = []
     docker = status("docker")
     if docker:
@@ -5508,6 +5530,9 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
     elif mounts in {"warn", "fail"}:
         off = detail("bind-mounts").startswith("disabled")
         parts.append("✗ bind mounts off" if off else "✗ bind mounts: " + detail("bind-mounts"))
+    # No version at all is no OpenShell yet, which setup installs as its own
+    # release, as Go reads it (openshell.MicroVMStartsOnMac, GAP-1786).
+    vm_version = str(report.get("cli_version") or release).strip()
     # One check per line: joined on one line, the checks after the first
     # few were cut off at 80 columns.
     return SandboxMachineCheck(
@@ -5518,6 +5543,7 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
         openshell_attention=attention,
         openshell_upgrade=upgrade,
         openshell_release=release,
+        microvm_starts=mac and (not vm_version or microvm_starts_on_mac(vm_version)),
     )
 
 
@@ -5541,9 +5567,10 @@ def sandbox_wizard_fields(
     machine; until it answers, Install OpenShell stays off. On macOS the
     telemetry question names ~/.config/openshell/gateway.env, which the
     Homebrew service reads; a gateway no Homebrew service runs gets none
-    (setup cannot change its environment). There is no mounts question on
-    macOS: setup runs sandboxes there in OpenShell MicroVMs, which mount no
-    host folders, so every run there works on a copy.
+    (setup cannot change its environment). On macOS setup runs sandboxes on
+    the docker driver (its MicroVM question's default, which
+    --non-interactive takes) and moves a gateway on the MicroVM driver to
+    it, so the mounts question is asked there as on Linux (GAP-1704).
     """
 
     configured = {str(name) for name in (get_config_value(cfg, "openshell.harnesses", []) or [])}
@@ -5595,9 +5622,6 @@ def sandbox_wizard_fields(
         if macos
         else "(uses sudo; the terminal asks for your password)"
     )
-    # On macOS setup installs e2fsprogs, which the MicroVM driver formats
-    # its disks with, under the same consent as OpenShell (sandboxcli/setup.go).
-    e2fsprogs = " Yes also installs e2fsprogs for the MicroVM driver when it is missing (brew install e2fsprogs)."
     # The release setup installs, as the doctor names it.
     release = (
         f"OpenShell {machine.openshell_release}" if machine is not None and machine.openshell_release else "OpenShell"
@@ -5632,15 +5656,6 @@ def sandbox_wizard_fields(
             f"Yes upgrades in place to {release} {consequence}. {machine.openshell_detail}.{pulls} "
             f"It runs {installer}."
         )
-    elif machine.openshell_attention == "vm-driver":
-        # Under the install's consent setup installs e2fsprogs and signs
-        # the formula's driver (sandboxcli/setup.go prepareMicroVMs).
-        machine_line = machine.summary
-        install = "no"
-        install_hint = (
-            f"{machine.openshell_detail}; OpenShell is installed, and yes lets setup install e2fsprogs "
-            "(brew install e2fsprogs) or sign the MicroVM driver when that is what it needs."
-        )
     elif machine.openshell_attention:
         # The doctor's fix: installing OpenShell would change nothing.
         machine_line = machine.summary
@@ -5648,17 +5663,12 @@ def sandbox_wizard_fields(
     else:
         machine_line = machine.summary
         install, install_hint = "no", f"{machine.openshell_detail}; nothing to install."
-    # Setup gets to e2fsprogs only past the OpenShell and gateway checks: not
-    # where it stops on a gateway fix.
-    stops = machine is not None and machine.openshell_attention != ""
-    if macos and not stops:
-        install_hint += e2fsprogs
     # A gateway no gateway service runs is its user's to restart
     # (DoctorReport.GatewayUnmanaged): setup writes the change.
     unmanaged = machine is not None and machine.openshell_unmanaged
     restart_note = _GATEWAY_MANUAL_RESTART_NOTE if unmanaged else _GATEWAY_RESTART_NOTE
-    microvm_restart = (
-        "; you restart the gateway yourself, the way you started it" if unmanaged else " and restarts it once"
+    driver_restart = (
+        "; you restart the gateway yourself, the way you started it" if unmanaged else ", which restarts it once"
     )
     fields += [
         WizardFormField(
@@ -5686,38 +5696,42 @@ def sandbox_wizard_fields(
         ),
     ]
     if macos:
-        # Setup on macOS asks no mounts question: it runs sandboxes in
-        # MicroVMs, which mount no host folders (--no-mounts would do nothing).
+        # Setup's MicroVM question defaults to no on a Mac, which
+        # --non-interactive takes: the docker driver, also for a gateway on
+        # vm, which it moves (sandboxcli/setup.go, GAP-1704).
         fields.append(
             WizardFormField(
-                "MicroVMs",
+                "Compute Driver",
                 "section",
-                value="every run works on a copy",
-                hint="Docker Desktop's Linux kernel has no Landlock, so setup switches the OpenShell gateway to "
-                'its MicroVM driver (compute_driver = "vm"; Apple silicon; experimental upstream)'
-                + microvm_restart
-                + ". MicroVMs mount no host folders: the agent works on a copy, and defenseclaw sandbox pull NAME --apply "
-                "brings the changes back. The first run of each image prepares its MicroVM disk (about a minute "
-                "and 5 GB).",
+                value="docker (Docker Desktop 29.8 or newer)",
+                hint=(
+                    "This OpenShell starts MicroVMs on a Mac: run `defenseclaw sandbox setup` and answer yes to its MicroVM "
+                    "question to use them. This form keeps sandboxes on "
+                    if machine is not None and machine.microvm_starts
+                    else "MicroVMs do not start on a Mac until OpenShell fixes its MicroVM driver, so setup runs sandboxes on "
+                )
+                + 'the docker driver and moves a gateway on the MicroVM driver to it (compute_driver = "docker"'
+                + driver_restart
+                + "; sandboxes made on the MicroVM driver cannot start after the switch). Setup first checks Docker "
+                "Desktop's Landlock, host networking and file sharing.",
                 visible_when=is_setup,
             )
         )
-    else:
-        fields += [
-            WizardFormField(
-                "Mount Project Folder",
-                "bool",
-                no_flag="--no-mounts",
-                value="yes",
-                default="yes",
-                hint="Allow sandboxes to mount the folder you launch from (enables bind mounts on your local "
-                "OpenShell gateway; DefenseClaw mounts only the launch folder and the read-only settings Claude Code "
-                "and Codex sandboxes need). No: no Claude Code or Codex sandbox can start, and other harnesses "
-                "run on a copy. "
-                "Turning bind mounts on " + restart_note,
-                visible_when=is_setup,
-            ),
-        ]
+    fields.append(
+        WizardFormField(
+            "Mount Project Folder",
+            "bool",
+            no_flag="--no-mounts",
+            value="yes",
+            default="yes",
+            hint="Allow sandboxes to mount the folder you launch from (enables bind mounts on your local "
+            "OpenShell gateway; DefenseClaw mounts only the launch folder and the read-only settings Claude Code "
+            "and Codex sandboxes need). No: no Claude Code or Codex sandbox can start, and other harnesses "
+            "run on a copy. "
+            "Turning bind mounts on " + restart_note,
+            visible_when=is_setup,
+        ),
+    )
     # On macOS the Homebrew service reads gateway.env too. A Mac gateway no
     # Homebrew service runs takes the setting from the environment it was
     # started with, which setup does not change, so it is not asked there.
@@ -6598,6 +6612,15 @@ def _narrow_goal_connectors(
             else field
             for field in fields
         )
+    if goal is not None and goal.id == "add" and opening:
+        # With several agents active the row opened on the first one in the
+        # alphabet (amp), so Ctrl+R set up an agent nobody picked (GAP-2052).
+        # With one active agent the row keeps it; with none it already waits.
+        if len(set(_active_connector_names_for_setup(cfg))) > 1:
+            return tuple(
+                replace(field, value="", default="") if field.label == "Connector" and field.kind == "choice" else field
+                for field in fields
+            )
     if goal is None or goal.id not in _CONFIGURED_CONNECTOR_GOALS:
         return tuple(fields)
     configured = tuple(sorted(dict.fromkeys(_active_connector_names_for_setup(cfg))))

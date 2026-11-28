@@ -269,13 +269,16 @@ type fakeRelay struct {
 	inputs    bytes.Buffer
 	polls     map[string]*fakePoll
 	nextPoll  int
-	// received is the DATA bytes each WebSocket attachment delivered, by
-	// the input id of its hello (GAP-0170); legacyHello sends a hello
+	// received is the DATA bytes each attachment (WebSocket or long-poll)
+	// delivered, by the input id of its hello (GAP-0170); legacyHello sends a hello
 	// without one, as a relay from before it does.
 	received    map[string]int64
 	legacyHello bool
 	// warning goes in every hello (GAP-0151).
 	warning string
+	// sessionSeconds, when set, is the gateway's session-seconds answer
+	// header on the WebSocket upgrade (GAP-0588).
+	sessionSeconds int
 }
 
 func newFakeRelay(tokens ...string) *fakeRelay {
@@ -313,7 +316,7 @@ func (f *fakeRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"version": relay.Version, "session": "sess-1", "agent_running": true})
 	case p == "/dcrelay/1/poll" && r.Method == http.MethodPost:
-		f.pollOpen(w)
+		f.pollOpen(w, r)
 	case strings.HasPrefix(p, "/dcrelay/1/poll/"):
 		f.pollRoute(w, r, strings.TrimPrefix(p, "/dcrelay/1/poll/"))
 	default:
@@ -336,6 +339,11 @@ func (f *fakeRelay) react(frame []byte, send func([]byte)) (end, drop bool) {
 		switch {
 		case strings.Contains(s, "DROP"):
 			return false, true
+		case strings.Contains(s, "EXPIRE"):
+			// The long-poll relay's end of an attachment whose session
+			// token expired (GAP-0070); the WebSocket one is in serveWS.
+			send(relay.EncodeControl(relay.Control{Type: relay.CtlError, Message: "session token expired"}))
+			return true, false
 		case strings.Contains(s, "EXIT"):
 			code := 7
 			send(relay.EncodeControl(relay.Control{Type: relay.CtlExit, Code: &code}))
@@ -362,7 +370,13 @@ func (f *fakeRelay) react(frame []byte, send func([]byte)) (end, drop bool) {
 
 func (f *fakeRelay) serveWS(w http.ResponseWriter, r *http.Request) {
 	up := websocket.Upgrader{Subprotocols: []string{relay.Subprotocol}, CheckOrigin: func(*http.Request) bool { return true }}
-	conn, err := up.Upgrade(w, r, nil)
+	f.mu.Lock()
+	var hdr http.Header
+	if f.sessionSeconds > 0 {
+		hdr = http.Header{"X-Defenseclaw-Session-Seconds": {strconv.Itoa(f.sessionSeconds)}}
+	}
+	f.mu.Unlock()
+	conn, err := up.Upgrade(w, r, hdr)
 	if err != nil {
 		return
 	}
@@ -402,10 +416,22 @@ func (f *fakeRelay) serveWS(w http.ResponseWriter, r *http.Request) {
 			// suspend in that moment): never counted, never typed.
 			conn.UnderlyingConn().Close()
 			return
-		} else if err == nil && t == relay.FrameData {
+		} else if err == nil && t == relay.FrameData && !strings.Contains(string(p), "UNCOUNTED") {
+			// UNCOUNTED: sent, but not yet counted by the relay when the
+			// attachment ends.
 			f.mu.Lock()
 			f.received[inID] += int64(len(p))
 			f.mu.Unlock()
+		}
+		if t, p, err := relay.Decode(msg); err == nil && t == relay.FrameData && strings.Contains(string(p), "EXPIRE") {
+			// The relay ends an attachment whose session token expired
+			// (GAP-0070): an error control, then a normal close. The
+			// input was received (GAP-0588).
+			send(relay.EncodeControl(relay.Control{Type: relay.CtlError, Message: "session token expired"}))
+			wmu.Lock()
+			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "agent detached"), time.Now().Add(time.Second))
+			wmu.Unlock()
+			return
 		}
 		end, drop := f.react(msg, send)
 		if drop {
@@ -419,6 +445,7 @@ func (f *fakeRelay) serveWS(w http.ResponseWriter, r *http.Request) {
 }
 
 type fakePoll struct {
+	inID   string // the input id of its hello (GAP-0170), "" for a legacy hello
 	mu     sync.Mutex
 	frames [][]byte
 	closed bool
@@ -446,15 +473,24 @@ func (p *fakePoll) close() {
 	}
 }
 
-func (f *fakeRelay) pollOpen(w http.ResponseWriter) {
+func (f *fakeRelay) pollOpen(w http.ResponseWriter, r *http.Request) {
 	p := &fakePoll{notify: make(chan struct{}, 1)}
+	hello := relay.Control{Type: relay.CtlHello, Version: relay.Version, Session: "sess-1", Mode: "interact"}
 	f.mu.Lock()
 	f.pollOpens++
 	f.nextPoll++
 	id := "p" + strconv.Itoa(f.nextPoll)
 	f.polls[id] = p
+	if !f.legacyHello {
+		p.inID = "in-" + id
+		f.received[p.inID] = 0
+		hello.Input = p.inID
+		if got, ok := f.received[r.URL.Query().Get("resume")]; ok {
+			hello.Received = &got
+		}
+	}
 	f.mu.Unlock()
-	p.push(relay.EncodeControl(relay.Control{Type: relay.CtlHello, Version: relay.Version, Session: "sess-1", Mode: "interact"}))
+	p.push(relay.EncodeControl(hello))
 	p.push(relay.Encode(relay.FrameData, []byte("screen:lp\r\n")))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"id": id, "cursor": 0})
@@ -510,13 +546,29 @@ func (f *fakeRelay) pollRoute(w http.ResponseWriter, r *http.Request, id string)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		lost := false
 		for _, fr := range frames {
-			if end, _ := f.react(fr, p.push); end {
+			if t, d, err := relay.Decode(fr); err == nil && t == relay.FrameData && strings.Contains(string(d), "LOSE") {
+				// Answered but lost on the way to the agent (a suspend in
+				// that moment), then the attachment ends: never counted,
+				// never typed, as on the WebSocket.
+				lost = true
+				break
+			} else if err == nil && t == relay.FrameData && p.inID != "" {
+				f.mu.Lock()
+				f.received[p.inID] += int64(len(d))
+				f.mu.Unlock()
+			}
+			end, drop := f.react(fr, p.push)
+			if end || drop {
 				p.close()
 				break
 			}
 		}
 		w.WriteHeader(http.StatusNoContent)
+		if lost {
+			p.close()
+		}
 	case http.MethodDelete:
 		f.mu.Lock()
 		f.detaches++

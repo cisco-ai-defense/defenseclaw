@@ -20,6 +20,7 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -32,13 +33,18 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/relaytls"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/revocation"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/secretbind"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -93,7 +99,10 @@ const (
 	substrateRelayTask = "/api/v1/substrate/relay/task"
 	// substrateRelayTamper takes a relay guard trip (substrate_task.go).
 	substrateRelayTamper = "/api/v1/substrate/relay/tamper"
-	substrateLLMPrefix   = "/llm/"
+	// substrateRelayCert signs the relay's TLS serving certificate
+	// (substrate_relaycert.go).
+	substrateRelayCert = "/api/v1/substrate/relay/cert"
+	substrateLLMPrefix = "/llm/"
 
 	substrateShutdownTimeout = 10 * time.Second
 )
@@ -147,16 +156,33 @@ type SubstrateConfig struct {
 	// Profiles picks a create's profile and launcher atespace (nil: every
 	// create is refused).
 	Profiles SubstrateProfileResolver
+	// ProfileWhy says why the caller gets the profile they get (policy
+	// explain with no agent named; nil leaves it out).
+	ProfileWhy SubstrateProfileExplainer
 	// WorkloadEntry names the match.substrate.workloads entry a workload
 	// subject matches and its profile (SubstrateWorkloadEntry over the live
 	// config); nil leaves the workload answer out of the actor list.
 	WorkloadEntry func(subject string) (entry, profile string)
-	// Usage answers own-only usage (stream 10 seam; nil: 501).
+	// Usage answers the usage API (own rows; an administrator's all=1 reads
+	// every owner). Nil: 501 usage_unavailable.
 	Usage SubstrateUsage
+	// UsageDisabled is substrate.usage.enabled: false: the usage API answers
+	// 501 usage_disabled, and the replica counts no spend on the leader.
+	UsageDisabled bool
+	// SpendLeader moves this replica's budget spend and usage onto the
+	// leader (nil: not a cluster replica, or usage disabled).
+	SpendLeader SubstrateSpendLeader
+	// UsageSyncInterval is substrate.usage.sync_interval (0: the default).
+	UsageSyncInterval time.Duration
 	// Bundles applies and shows signed policy bundles (nil: 501).
 	Bundles SubstrateBundles
 	// Activity receives the last-activity feed of A3's idle logic.
 	Activity SubstrateActivitySink
+	// ActivityFeed is the leader's activity snapshot, read by list and
+	// status for the agent state (B3.6; nil: no activity in the answers).
+	ActivityFeed SubstrateActivityFeed
+	// ActivityConfig is the live substrate.activity block (nil: defaults).
+	ActivityConfig func() config.SubstrateActivityConfig
 	// Skills scans the skill folders the kit attaches (GAP-0039); nil
 	// scans nothing.
 	Skills SubstrateSkillScanner
@@ -171,6 +197,9 @@ type SubstrateConfig struct {
 	// template "atespace/name" (the controller's verdict): a folder with one
 	// of them is trusted without a scan (GAP-0164). Nil trusts none.
 	TemplateSkills func(ctx context.Context, template string) ([]string, error)
+	// SkillScanLimits returns skills.scan.timeout and skills.pending_wait
+	// (B5.4); nil or 0 waits for the whole scan.
+	SkillScanLimits func() (timeout, pendingWait time.Duration)
 	// SkillReceiptKey signs skill scan receipts; every replica must have the
 	// same key (derived from the shared chain key). Empty: a random key per
 	// process, so receipts hold only on the replica that gave them.
@@ -191,13 +220,64 @@ type SubstrateConfig struct {
 	// Relays reaches an actor's relay through the router for attach
 	// (nil: attach answers 503).
 	Relays SubstrateRelayDialer
+	// RelayCA signs relay serving certificates and verifies them on attach
+	// (B3.5, the gateway.relayCASecret Secret); nil: TLS relays cannot be
+	// reached and /relay/cert answers relay_ca_missing.
+	RelayCA *relaytls.CA
+	// RelayTLS is substrate.relay_tls ("" is auto).
+	RelayTLS relaytls.Mode
+	// RelayCerts is the leader's record of the live relay serving
+	// certificate per actor (GAP-0861), shared by every replica and kept
+	// over restarts. nil: in refuse mode /relay/cert answers
+	// relay_cert_record_unavailable; in flag mode every certificate asked
+	// for without proof of the live key is a HIGH row.
+	RelayCerts registry.RelayCerts
+	// RelayCertReissue is the active substrate.relay_cert_reissue (refuse
+	// or flag; "" is auto: refuse when Managed).
+	RelayCertReissue string
+	// Interactive is substrate.interactive in force (B3 port forward and
+	// MCP bridge switches; nil: the defaults).
+	Interactive func() config.SubstrateInteractiveConfig
 	// WorkspaceMaxBytes caps a workspace upload through attach
 	// (substrate.workspace_max_bytes, E23).
 	WorkspaceMaxBytes int64
+	// KeyReplay reads substrate.launcher.key_replay live for launchers
+	// (B3.1); nil reports ask.
+	KeyReplay func() string
+	// UploadScan reads substrate.launcher.upload_scan live for launchers
+	// (B1); nil reports the defaults.
+	UploadScan func() config.SubstrateUploadScanConfig
+	// FilesPush and FilesSync read substrate.files.push and .sync live;
+	// nil reports on.
+	FilesPush func() bool
+	FilesSync func() bool
+	// Revocations is this replica's copy of the ended sign-ins list,
+	// RevocationSource the leader it pulls from and writes revokes to, and
+	// Streams the open attach streams it closes on a revoke (B5.1). nil:
+	// revocation is off (substrate.identity.revocation.enabled: false).
+	Revocations      *revocation.Snapshot
+	RevocationSource revocation.Source
+	Streams          *revocation.Streams
+	// Git reads substrate.git live for launchers (B2 2.5: the https
+	// rewrite map, submodules, LFS); nil reports the defaults.
+	Git func() config.SubstrateGitConfig
+	// GitPush is allow, ask or deny for pull --push-branch from an actor
+	// of profile (SubstrateGitPushFor, read live; B2 2.4). nil: the push
+	// route answers push_unavailable.
+	GitPush func(profile string) string
+	// PushGrants opens and closes the leader's push grants (GAP-1073): an
+	// allowed pull --push-branch that asks for one (?grant=1) gets a grant
+	// the egress callout enforces. nil: no grant, and the launcher warns.
+	PushGrants SubstratePushGrants
 	// Doctor runs the gateway-side doctor checks; Info is the
 	// unauthenticated sign-in information (issuer, client_id, sign_in).
 	Doctor func(ctx context.Context) []SubstrateCheck
 	Info   map[string]any
+	// EgressCallout is who holds Substrate's egress callout slot, as the
+	// controller last reported it through the leader (nil: not reported).
+	// /info carries its class and the checks that are off, /doctor the
+	// holder (GAP-0497).
+	EgressCallout func(ctx context.Context) (controller.CalloutStatus, bool)
 	// SignInServer is the OIDC issuer people sign in with (nil: none
 	// configured). The gateway checks it from its own network every
 	// signInCheckEvery; /info names a failing cause, /doctor the detail,
@@ -207,6 +287,24 @@ type SubstrateConfig struct {
 	// values (nil: list only).
 	Secrets     []config.SubstrateSecret
 	SecretStore SubstrateSecretStore
+	// Bindings is the self-service binding store (nil when
+	// self_service_secrets.mode is off); SelfService and SecretTemplates
+	// are its config, NoSwapHosts substrate.egress.no_swap_hosts.
+	Bindings        *secretbind.Store
+	SelfService     config.SubstrateSelfServiceSecretsConfig
+	SecretTemplates []config.SubstrateSecretTemplate
+	// LiveSelfService, when set, is the self-service config and template
+	// catalog in force now (config.yaml applied live): mode, limits, asks
+	// and templates follow it; namespace and provider stay the boot ones.
+	LiveSelfService func() (config.SubstrateSelfServiceSecretsConfig, []config.SubstrateSecretTemplate)
+	// LiveNoSwapHosts, when set, is substrate.egress.no_swap_hosts as the
+	// gateway follows config.yaml; NoSwapHosts is the boot value.
+	LiveNoSwapHosts func() []string
+	NoSwapHosts     []string
+	// SecretAudit receives each typed secret change record
+	// (log.substrate.secret.changed); nil sends it to the gateway's
+	// sandbox recorder. Tests capture it here.
+	SecretAudit func(context.Context, audit.SubstrateSecretChangeEvent)
 	// Chains is the leader's chain and intent state (lane A13): a verified
 	// actor's tool-chain windows and the judge's session intent live there,
 	// so every replica sees the same. Nil turns the chain lane off for
@@ -217,6 +315,9 @@ type SubstrateConfig struct {
 	// through this replica's telemetry runtime (GAP-0450, GAP-0453). Nil:
 	// nothing is relayed.
 	Relay *telemetryrelay.Taker
+	// SecretUses reads when the caller's agents last reached each host,
+	// for the last use secrets list and test show (S6b). Nil: no last use.
+	SecretUses SubstrateSecretUses
 }
 
 // SubstrateActorVerifier verifies actor tokens (identity.ActorVerifier).
@@ -250,8 +351,14 @@ const (
 
 type substrateState struct {
 	cfg SubstrateConfig
+	// activityAsks remembers a failed pending-asks read of list and status
+	// (GAP-1018).
+	activityAsks substrateActivityAsksDown
 	// taskEnds bounds the task-end audit rows per actor.
 	taskEnds substrateTaskEnds
+	// streams counts the open port forwards and MCP bridges per actor on
+	// this replica (GAP-0818), and serializes over-cap MCP judging.
+	streams substrateStreamCounts
 	// refusals bounds refusal log lines: a flood of bad tokens is still
 	// refused, not logged line by line.
 	refusals *rate.Limiter
@@ -261,6 +368,12 @@ type substrateState struct {
 	// logOut is the gateway log (stderr); now is the clock. Tests set both.
 	logOut io.Writer
 	now    func() time.Time
+	// budget is the BUDGET cell of an agent (substrateActorBudget); nil
+	// when the server has no live config.
+	budget func(reg registry.Registration) string
+	// readBudgets reads the budget keys of regs before a view
+	// (substrateReadBudgetKeys); nil with budget.
+	readBudgets func(ctx context.Context, regs []registry.Registration)
 
 	// receiptKey signs skill scan receipts (substrate_skills.go);
 	// receiptShared says every replica has it.
@@ -268,6 +381,20 @@ type substrateState struct {
 	receiptShared bool
 	// alert raises an audit alert (the API server's logger).
 	alert func(ctx context.Context, severity, summary string, details map[string]any)
+	// action writes one skill audit row (B5.4: substrate.skill.*).
+	action func(ctx context.Context, action, severity string, details map[string]any)
+	// scanMu guards scans, the skill scans in flight (B5.4 pending), their
+	// count per actor UID (GAP-0932) and scanFree, closed when one ends.
+	scanMu     sync.Mutex
+	scans      map[string]*skillScanCall
+	scanActors map[string]int
+	scanFree   chan struct{}
+	// scanKept is the outcome of a managed or strict scan that ended after
+	// its post stopped waiting (a held folder, GAP-0980), for the next post
+	// of that content, and heldSince is when that content was first held:
+	// a hold ends at skills.scan.timeout, whatever the scanner does.
+	scanKept  map[string]skillScanKept
+	heldSince map[string]time.Time
 	// alerted is alertOnce's memory (substrate_skills.go).
 	alertMu    sync.Mutex
 	alerted    map[string]bool
@@ -280,6 +407,9 @@ type substrateState struct {
 	tokens actorTokenHealth
 	// signIn is the last check of the OIDC sign-in server (GAP-0262).
 	signIn signInHealth
+	// calloutView is the hook path's last read of the egress callout slot
+	// (GAP-0505, substrate_callout_note.go).
+	calloutView substrateCalloutView
 
 	actorOnce, adminOnce sync.Once
 	actorHandler         http.Handler
@@ -328,14 +458,40 @@ func (a *APIServer) SetSubstrate(cfg SubstrateConfig) error {
 			return fmt.Errorf("substrate: skill receipt key: %w", err)
 		}
 	}
+	st.budget = func(reg registry.Registration) string {
+		now := time.Now()
+		if st.now != nil {
+			now = st.now()
+		}
+		return substrateActorBudget(a.liveConfig(), reg, now)
+	}
+	st.readBudgets = func(ctx context.Context, regs []registry.Registration) {
+		substrateReadBudgetKeys(ctx, a.liveConfig(), regs)
+	}
 	st.audit = func(ctx context.Context, severity, summary string, details map[string]any) {
 		if a.logger != nil {
 			_ = a.logger.LogAlertCtx(ctx, "substrate", severity, summary, details)
 		}
 	}
+	st.action = func(ctx context.Context, action, severity string, details map[string]any) {
+		if a.logger != nil {
+			raw, _ := json.Marshal(details)
+			_ = a.logger.LogActionCtxSeverity(ctx, action, fmt.Sprint(details["folder"]), string(raw), severity)
+		}
+	}
 	st.alert = func(ctx context.Context, severity, summary string, details map[string]any) {
 		st.audit(ctx, severity, summary, details)
 		st.logRefusal("%s: %v", summary, details["folder"])
+	}
+	if cfg.Revocations != nil {
+		// RV1-07: the leader's list of ended sign-ins was reset (its volume
+		// was recreated, or the file moved aside). Say so; the replica
+		// keeps what it knew until it lapses.
+		cfg.Revocations.OnReset(func(kept int) {
+			summary := fmt.Sprintf("the leader's list of ended sign-ins was reset: this replica keeps the %d end(s) it knew until they lapse; a replica that starts now does not know them", kept)
+			st.audit(context.Background(), "HIGH", summary, map[string]any{"event": "substrate.signin.list_reset", "kept": kept})
+			st.logRefusal("%s", summary)
+		})
 	}
 	a.substrateMu.Lock()
 	a.substrate = st
@@ -401,6 +557,11 @@ func (a *APIServer) RunSubstrate(ctx context.Context) error {
 	a.startPendingHookRecovery(ctx)
 	if st.cfg.Relay != nil {
 		st.cfg.Relay.Record = a.recordSubstrateRelay
+		// GAP-0486: the leader knows this replica before it serves a hook
+		// call. Bounded: a leader out of reach only delays the marks.
+		jctx, cancel := context.WithTimeout(ctx, substrateRelayJoinWait)
+		_ = st.cfg.Relay.Join(jctx)
+		cancel()
 		go st.cfg.Relay.Run(ctx)
 	}
 	if st.cfg.SignInServer != nil {
@@ -475,6 +636,8 @@ type substrateActorRoute struct {
 	task bool
 	// tamper is the relay's guard trip report (relay is set too).
 	tamper bool
+	// cert is the relay's certificate request (relay is set too).
+	cert bool
 }
 
 // classifySubstrateActorPath maps a path to its route, or false (404).
@@ -507,6 +670,8 @@ func (a *APIServer) classifySubstrateActorPath(path string) (substrateActorRoute
 		return substrateActorRoute{relay: true, task: true}, true
 	case path == substrateRelayTamper:
 		return substrateActorRoute{relay: true, tamper: true}, true
+	case path == substrateRelayCert:
+		return substrateActorRoute{relay: true, cert: true}, true
 	case strings.HasPrefix(path, substrateLLMPrefix) && len(path) > len(substrateLLMPrefix):
 		return substrateActorRoute{llm: true}, true
 	}
@@ -698,10 +863,22 @@ func (a *APIServer) substrateActorAuthenticate(st *substrateState, next http.Han
 		ctx = context.WithValue(ctx, substrateRegistrationKey{}, reg)
 		w.Header().Set(substrateModeHeader, substrateMode(reg))
 		w.Header().Set(substrateFailModeHeader, substrateFailMode(st.cfg, reg))
+		hook := route.class == sandboxauth.RouteHook && r.Method == http.MethodPost
+		var claim *substrateResumeClaim
+		if hook && st.cfg.Relay != nil && st.cfg.Relay.Resumes().Hook(actor.UID, start) {
+			// Maybe its first hook call after a resume: the leader decides,
+			// while the call is served (GAP-0486).
+			claim = startSubstrateResumeClaim(st.cfg.Relay, actor.UID, start)
+			ctx = withFirstHookAfterResume(ctx, claim)
+		}
 		next.ServeHTTP(w, r.WithContext(ctx))
-		if route.class == sandboxauth.RouteHook && r.Method == http.MethodPost {
+		if hook {
 			// A hook call; the kit's GET warm-up pings are not counted.
-			a.recordSubstrateHookRTT(time.Since(start))
+			d := time.Since(start)
+			a.recordSubstrateHookRTT(d)
+			if claim.isFirst() {
+				a.recordSubstrateFirstHookAfterResume(d)
+			}
 		}
 	})
 }
@@ -792,6 +969,11 @@ func (a *APIServer) substrateActorScope(st *substrateState, next http.Handler) h
 			}
 			// Gateway receive time only (E15): nothing the actor sends.
 			st.cfg.Activity.ObserveActivity(kind, actor.Atespace, actor.UID, time.Now())
+			// While a model stream is open the agent is thinking: report it
+			// every 10 s. Off (status_window 0s) adds no timer.
+			if route.llm && st.activityConfig().EffectiveStatusWindow() > 0 {
+				defer substrateReportOpenModel(st.cfg.Activity, actor.Atespace, actor.UID)()
+			}
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -838,6 +1020,9 @@ func (a *APIServer) serveSubstrateActorRoute(w http.ResponseWriter, r *http.Requ
 		return
 	case route.tamper:
 		a.serveSubstrateRelayTamper(st, w, r)
+		return
+	case route.cert:
+		a.serveSubstrateRelayCert(st, w, r)
 		return
 	case route.relay:
 		a.serveSubstrateRelayVerify(st, w, r)
@@ -887,6 +1072,20 @@ func (a *APIServer) serveSubstrateActorRoute(w http.ResponseWriter, r *http.Requ
 	default:
 		writeSandboxIngressError(w, http.StatusNotFound, "not found")
 	}
+}
+
+// substrateWorkloadSubject is the OIDC subject of the CI workload a verified
+// actor was started by (its registration's person), "" for a person or no
+// registration (GAP-0540).
+func substrateWorkloadSubject(ctx context.Context) string {
+	if _, ok := substrateActorFrom(ctx); !ok {
+		return ""
+	}
+	reg, ok := substrateRegistrationFrom(ctx)
+	if !ok || reg.Attributed || reg.Person.Kind != identity.PersonWorkload {
+		return ""
+	}
+	return reg.Person.Subject
 }
 
 // substrateProfileSubject is the profile subject of an actor request: the

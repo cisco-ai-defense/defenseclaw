@@ -24,6 +24,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -32,6 +33,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -48,13 +50,18 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/configwatch"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
-	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity/ateactors"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/pushgrant"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/relaytls"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/revocation"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/secretbind"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/setup"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/spendleader"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
@@ -88,6 +95,7 @@ var serveFlags struct {
 	leaderIDs        []string
 	issuerCA         string
 	sessionKeyFile   string
+	relayCADir       string
 	calloutTokenFile string
 	llmCredDir       string
 	bedrockRegion    string
@@ -155,6 +163,7 @@ func init() {
 	f.StringVar(&serveFlags.issuerCA, "issuer-ca", "", "deprecated: use substrate.identity.keys_ca_file")
 	_ = f.MarkDeprecated("issuer-ca", "use substrate.identity.keys_ca_file")
 	f.StringVar(&serveFlags.sessionKeyFile, "session-key-file", "/var/run/secrets/defenseclaw-relay-session/private.pem", "relay session signing key")
+	f.StringVar(&serveFlags.relayCADir, "relay-ca-dir", "/var/run/secrets/defenseclaw-relay-ca", "relay CA (ca.pem, ca-key.pem) that signs and verifies relay TLS certificates")
 	f.StringVar(&serveFlags.calloutTokenFile, "callout-token-file", "/var/run/secrets/defenseclaw-callout-judge/token", "callout service token")
 	f.StringVar(&serveFlags.llmCredDir, "llm-credentials-dir", "/var/run/secrets/defenseclaw-llm", "provider keys, one file per provider")
 	f.StringVar(&serveFlags.bedrockRegion, "bedrock-region", "us-east-1", "Bedrock runtime region")
@@ -201,6 +210,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 		if !cfg.Substrate.Enabled {
 			return errors.New("serve: substrate.enabled is false in the configuration")
 		}
+		// Before anything reads the issuers (startup checks, routing.admin
+		// warnings and matching): pin whether this gateway lets Kubernetes
+		// people sign in. substrate.identity is restart-only, so a live
+		// reload must not move the issuers away from the verifiers built now
+		// (GAP-0939, GAP-0968).
+		config.PinKubeSignIn(substrateKubeSignIn(cfg))
 		// Managed: policy_dir is the root-owned vendor folder the chart's
 		// init container seeds (substrate-datadir --policies) and mounts
 		// read-only; the gateway account must not write its own policy.
@@ -381,9 +396,12 @@ func (substrateNoPeople) Verify(context.Context, string) (identity.Person, error
 }
 
 // substrateKubeSignIn reports whether people sign in with Kubernetes
-// credentials: no OIDC issuer, not a managed install, not turned off.
+// credentials: no OIDC issuer, not a managed install, not turned off by
+// substrate.identity.kube_sign_in or --no-kube-sign-in. runServe pins the
+// answer at start (config.PinKubeSignIn), so the routing.admin issuers agree
+// with the verifiers for the life of the process (GAP-0939, GAP-0968).
 func substrateKubeSignIn(c *config.Config) bool {
-	return c.Substrate.Identity.OIDC.Issuer == "" && !managed.IsManagedEnterprise(c.DeploymentMode) && !serveFlags.noKubeSignIn
+	return c.SubstrateKubeSignIn() && !serveFlags.noKubeSignIn
 }
 
 func substrateKubePeople() *identity.KubeTokenVerifier {
@@ -495,7 +513,9 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			Proxy:         llmProxy,
 			BedrockModels: c.Substrate.LLM.BedrockModels,
 			// actor_secrets: exact-value DLP on prompts (PLAN §7.2), from
-			// the callout's actor-secrets Secret mounted in the gateway.
+			// the callout's actor-secrets Secret mounted in the gateway; the
+			// hook route masks the same values before any audit row
+			// (GAP-0504).
 			ExposedValues: gateway.SubstrateExposedValues(c, c.Substrate.Extproc.ActorSecretsDir),
 		})
 		if err != nil {
@@ -513,7 +533,10 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 		regs := &registry.Remote{Client: toLeader}
 		// The idle feed: last hook, model call and relay byte per actor,
 		// sent to the leader every few seconds (A3's ActivitySource reads it).
-		recorder := &activity.Recorder{Leader: toLeader}
+		// Replica (the pod name) adds a heartbeat to every flush, so the leader
+		// can tell a replica that stopped reporting (substrate-1:GAP-0578 e).
+		replicaName, _ := os.Hostname()
+		recorder := &activity.Recorder{Leader: toLeader, Replica: replicaName}
 		go recorder.Run(context.Background())
 		// The create path's policy writer: the controller's own admission,
 		// profiles and render, run before the first resume.
@@ -521,22 +544,49 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 		if err != nil {
 			return out, fmt.Errorf("serve: controller for the create path: %w", err)
 		}
+		// The create path writes the same policy as the controller while
+		// another callout holds Substrate's egress slot (GAP-0505). The
+		// gateway may not read the slot: it reads the controller's latest
+		// report from the leader; none, or one older than three reads, is
+		// unknown.
+		ctl.SetCallout(&controller.LeaderCallout{Leader: toLeader})
 		router, routerErr := substrateRouter()
 		runtimeScan := newRuntimeSkillScanner(c)
+		bindingStore := substrateBindingStore(c)
+		// B5.1: the ended sign-ins list, pulled from the leader (nil: off).
+		revs := newSubstrateRevocation(context.Background(), c.Substrate.Identity.Revocation, &revocation.Client{Leader: toLeader})
+		runtimeScan.enabled = func() bool { return live().Substrate.SkillScanEnabled() }
+		go runtimeScan.checkSidecar(context.Background(), os.Stderr, 12, 5*time.Second)
 		out = gateway.SubstrateConfig{
 			ActorAddr: serveFlags.actorListen, ActorTLS: actorTLS,
 			Actors: actors, Registrations: regs, Activity: recorder,
+			ActivityFeed: &activity.Reader{Leader: toLeader},
+			ActivityConfig: func() config.SubstrateActivityConfig {
+				if cur := live(); cur != nil {
+					return cur.Substrate.Activity
+				}
+				return c.Substrate.Activity
+			},
 			Chains: &chainstate.Client{Leader: toLeader},
 			// The controller's, the callout's and the leader's records reach
 			// the OTLP destinations through this replica (GAP-0450, GAP-0453).
 			Relay: &telemetryrelay.Taker{Leader: toLeader},
-			Asks:  &asks.Client{Leader: toLeader}, Policies: ate,
+			// Last use of a secret: the leader's host-use map (S6b).
+			SecretUses: &telemetryrelay.UseReader{Leader: toLeader},
+			Asks:       &asks.Client{Leader: toLeader}, Policies: ate,
 			UnattendedAsk: func(profile string) gateway.SubstrateUnattendedAsk {
 				return gateway.SubstrateUnattendedAskFor(live(), profile)
 			},
 			Secrets: c.Substrate.Secrets, SecretStore: substrateKubeSecrets(),
-			Relays: relayDialer(router),
-			Skills: runtimeScan,
+			Bindings: bindingStore, SelfService: c.Substrate.SelfServiceSecrets,
+			SecretTemplates: c.Substrate.SecretTemplates, NoSwapHosts: c.Substrate.Egress.NoSwapHosts,
+			LiveSelfService: func() (config.SubstrateSelfServiceSecretsConfig, []config.SubstrateSecretTemplate) {
+				l := live()
+				return l.Substrate.SelfServiceSecrets, l.Substrate.SecretTemplates
+			},
+			LiveNoSwapHosts: func() []string { return live().Substrate.Egress.NoSwapHosts },
+			Relays:          relayDialer(router),
+			Skills:          runtimeScan,
 			// E20, GAP-0185: the runtime MCP scan of hook events.
 			MCP: gateway.AttestMCPScanner{RT: runtimeScan.rt},
 			// GAP-0039: an unscanned skill folder is refused where hooks fail
@@ -545,17 +595,43 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			BlockUnscannedSkills: func(connector string) bool { return substrateBlocksUnscannedSkills(live())(connector) },
 			SkillReceiptKey:      substrateSkillReceiptKey(chainKey),
 			TemplateSkills:       substrateTemplateSkills(ctl),
-			Info:                 substrateInfo(c),
+			SkillScanLimits: func() (time.Duration, time.Duration) {
+				s := live().Substrate
+				return s.EffectiveSkillScanTimeout(), s.EffectiveSkillPendingWait()
+			},
+			Info: substrateInfo(c),
+			// GAP-0497: /info says when another callout holds Substrate's
+			// egress slot and which checks are off; launchers print it.
+			EgressCallout: ctl.CalloutStatus,
 			// GAP-0262: the gateway checks the sign-in server it verifies
 			// people with, from its own network.
 			SignInServer: substrateSignInServer(people),
 			// E23: the workspace cap of an upload through attach.
 			WorkspaceMaxBytes: c.Substrate.EffectiveWorkspaceMaxBytes(),
+			// B3.1: read live, so the admin-off switch applies to the next attach.
+			KeyReplay: func() string { return live().Substrate.Launcher.EffectiveKeyReplay() },
+			// B1: the upload scan, read live; hold_back is its admin-off switch.
+			UploadScan: func() config.SubstrateUploadScanConfig { return live().Substrate.Launcher.UploadScan },
+			// B2: the admin-off switches of push and sync, read live.
+			FilesPush:   func() bool { return live().Substrate.Files.PushAllowed() },
+			FilesSync:   func() bool { return live().Substrate.Files.SyncAllowed() },
+			Revocations: revs.snap, RevocationSource: revs.src, Streams: revs.streams,
+			// B2 2.5: the https rewrite map, submodules and LFS, read live.
+			Git: func() config.SubstrateGitConfig { return live().Substrate.Git },
+			// B2 2.4: git_push and substrate.git.push_branch, read live.
+			GitPush: func(profile string) string { return gateway.SubstrateGitPushFor(live())(profile) },
+			// GAP-1073: an allowed push opens a grant the callout enforces.
+			PushGrants: &pushgrant.Client{Leader: toLeader},
 			Doctor: func(ctx context.Context) []gateway.SubstrateCheck {
 				return []gateway.SubstrateCheck{gateway.SubstrateUpstreamCheck(ctx,
 					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil),
 					substrateRouterCheck(ctx, router, routerErr), substrateActorKeysCheck(ctx, ks),
-					substrateTemplateAllowlistCheck(ctx, ate, ctl.LiveAttestor()), substrateRelaySeparationCheck(ctx, ate, ctl.LiveAttestor())}
+					substrateTemplateAllowlistCheck(ctx, ate, ctl.LiveAttestor()), substrateRelaySeparationCheck(ctx, ate, ctl.LiveAttestor()),
+					gateway.SubstrateSecretEchoHostCheck(live().Substrate.Secrets, live().Substrate.Egress.NoSwapHosts),
+					gateway.SubstrateSecretBindingStoreCheck(bindingStore),
+					gateway.SubstrateRevocationCheck(revs.snap, time.Now()),
+					gateway.SubstrateRelayCertReissueCheck(c.Substrate.EffectiveRelayCertReissue(), c.Substrate.RelayCertReissueFor(managed.IsManagedEnterprise(c.DeploymentMode))),
+					gateway.SubstrateSecretBindingFormCheck(bindingStore, live().Substrate.SecretTemplates)}
 			},
 			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), TemplateKit: substrateTemplateKit(ctl.LiveAttestor())},
 			// PLAN 7.3: the profile sandbox_class picks the class at create.
@@ -572,6 +648,17 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			SecretPlaceholders: substrateSecretPlaceholders(c.Substrate.Secrets),
 		}
 		out.PolicyReset = substratePolicyResetter()
+		// T-COST: spend and usage live on the leader. substrate.usage.enabled
+		// false leaves both unset: no counter swap, no usage sink, no push
+		// loop, and the usage API answers usage_disabled.
+		if c.Substrate.Usage.UsageEnabled() {
+			spend := &spendleader.Client{Leader: toLeader}
+			out.SpendLeader = spend
+			out.UsageSyncInterval = c.Substrate.Usage.EffectiveSyncInterval()
+			out.Usage = gateway.NewSubstrateLeaderUsage(spend, live, regs)
+		} else {
+			out.UsageDisabled = true
+		}
 		if people != nil {
 			adminTLS := servingTLS
 			if !serveFlags.plainHTTP {
@@ -592,6 +679,9 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			out.Profiles = func(p identity.Person, requested, connector string, admin bool) (string, string, error) {
 				return gateway.SubstrateLauncherProfiles(live())(p, requested, connector, admin)
 			}
+			out.ProfileWhy = func(p identity.Person, admin bool) gateway.SubstrateProfileWhy {
+				return gateway.SubstrateProfileWhyFor(live())(p, admin)
+			}
 			out.WorkloadEntry = func(subject string) (string, string) {
 				return gateway.SubstrateWorkloadEntry(live(), subject)
 			}
@@ -611,9 +701,45 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			}
 			out.Sessions = s
 		}
+		if out.RelayCA, err = loadRelayCA(serveFlags.relayCADir); err != nil {
+			return out, err
+		}
+		out.RelayTLS = relaytls.Mode(c.Substrate.EffectiveRelayTLS())
+		// GAP-0861: the live relay certificate per actor is on the leader.
+		out.RelayCerts = regs
+		out.RelayCertReissue = c.Substrate.RelayCertReissueFor(managed.IsManagedEnterprise(c.DeploymentMode))
+		out.Interactive = func() config.SubstrateInteractiveConfig {
+			if cur := live(); cur != nil {
+				return cur.Substrate.Interactive
+			}
+			return c.Substrate.Interactive
+		}
 		ready.Store(true)
 		return out, nil
 	}
+}
+
+// loadRelayCA reads the relay CA Secret mount (substrate setup,
+// gateway.relayCASecret). A missing folder is no CA: TLS relays then
+// answer relay_ca_missing and doctor fails substrate.relay_tls.
+func loadRelayCA(dir string) (*relaytls.CA, error) {
+	certPEM, err := os.ReadFile(filepath.Join(dir, setup.RelayCACertKey))
+	if errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintln(os.Stderr, "[substrate] no relay CA at", dir+": actors on templates with relay TLS cannot be attached")
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("serve: relay CA: %w", err)
+	}
+	keyPEM, err := os.ReadFile(filepath.Join(dir, setup.RelayCAKeyKey))
+	if err != nil {
+		return nil, fmt.Errorf("serve: relay CA key: %w", err)
+	}
+	ca, err := relaytls.LoadCA(certPEM, keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("serve: relay CA: %w", err)
+	}
+	return ca, nil
 }
 
 // substrateSecretPlaceholders resolves bound secret names to the environment
@@ -670,18 +796,21 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	if err := substrateRecordStoreState(ctx, ns); err != nil {
 		return err
 	}
+	// chains is the leader's chain state, opened below before the elector
+	// runs; becoming the leader starts its start grace term (GAP-0601).
+	var chains *chainstate.Service
 	el := &leader.Elector{
 		API: &leader.KubeLeaseAPI{Server: "https://" + net.JoinHostPort(host, port), Namespace: ns, Name: serveFlags.lease,
 			TokenFile: serveFlags.kubeTokenFile, HTTP: kube},
 		Name: serveFlags.lease, Ns: ns, Identity: pod,
-		OnStarted: func(context.Context) {
-			fmt.Fprintf(os.Stderr, "[substrate] %s is the leader\n", pod)
-			ready.Store(true)
-		},
+		OnStarted: func(context.Context) { substrateLeaderStarted(os.Stderr, pod, chains, ready) },
 		OnStopped: func() { ready.Store(false) },
 	}
 	srv := &leader.Server{IsLeader: el.IsLeader}
 	registry.Serve(srv, store)
+	if err := serveSubstrateRevocations(srv, cfg, serveFlags.storeDir); err != nil {
+		return err
+	}
 	askStore, err := asks.Open(filepath.Join(serveFlags.storeDir, "asks"))
 	if err != nil {
 		return err
@@ -690,8 +819,9 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	if cfg != nil {
 		askStore.Expiry = cfg.Substrate.EffectiveAskTimeout()
 	}
-	// An approved host joins the actor's registration; the controller adds
-	// it to the policy on its next pass.
+	// A host approved always joins the actor's registration; the controller
+	// adds it to the policy on its next pass. The store never runs this for
+	// a once approval, which lets one request through (GAP-0484).
 	askStore.OnApprove = func(ctx context.Context, a asks.Ask) error {
 		// Only a host-wide approval joins the registration (and so the
 		// policy); a url_rules approval covers its rule only (GAP-0177).
@@ -707,6 +837,11 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 		}
 		return store.Put(ctx, reg)
 	}
+	// A revoked always approval leaves the registration, and so the policy
+	// on the controller's next pass (GAP-0492).
+	askStore.OnRevoke = func(ctx context.Context, in asks.RevokeRequest) (bool, error) {
+		return registry.RemoveApproved(ctx, store, in.Atespace, in.UID, in.Host, in.CallerID, in.Admin)
+	}
 	asks.Serve(srv, askStore)
 	activity.Serve(srv, &activity.Store{Pending: askStore.Pending})
 	// The records the gateway replicas export for the components that have
@@ -714,10 +849,15 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	// decisions and the lifecycle events below (GAP-0450, GAP-0453).
 	relay := &telemetryrelay.Store{Registrations: store}
 	telemetryrelay.Serve(srv, relay)
+	// The controller's egress callout slot reads, for the gateways
+	// (GAP-0505).
+	controller.ServeCallout(srv, &controller.CalloutBoard{})
+	// The pull --push-branch push grants the callout enforces (GAP-1073).
+	pushgrant.Serve(srv, pushgrant.NewStore())
 	chainOpts, source := leaderChainOptions(cfg, store, serveFlags.storeDir, serveFlags.chainRetention)
 	fmt.Fprintf(os.Stderr, "[substrate] leader: chain egress action %s (%s): a request after a secret read is %s at the egress callout\n",
 		chainOpts.EgressAction, source, map[string]string{chainstate.EgressBlock: "refused", chainstate.EgressAlert: "allowed with an alert"}[chainOpts.EgressAction])
-	chains, err := chainstate.New(chainOpts)
+	chains, err = chainstate.New(chainOpts)
 	if err != nil {
 		return err
 	}
@@ -734,9 +874,16 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 		}).run(ctx)
 	}
 	chains.Register(srv)
+	// Cluster spend and usage of the gateway replicas (T-COST): on the store
+	// volume, only for the gateway peer, off with substrate.usage.enabled.
+	closeSpend, err := serveSpendUsage(srv, cfg, serveFlags.storeDir)
+	if err != nil {
+		return err
+	}
+	defer closeSpend()
 	// A crashed or deleted actor asks nothing any more (E16): its open asks
 	// close when the controller reports the lifecycle event.
-	srv.Handle(chainstate.MethodChainLifecycle, leader.Typed(substrateLifecycleRelays(substrateLifecycleClosesAsks(chains.Lifecycle, askStore), store, relay)))
+	srv.Handle(chainstate.MethodChainLifecycle, leader.Typed(substrateLifecycleRelays(substrateLifecycleClosesAsks(chains.Lifecycle, askStore, os.Stderr, relay), store, relay)))
 	go func() { _ = chains.Run(ctx) }()
 	hs := &http.Server{Addr: serveFlags.leaderListen, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
 	if !serveFlags.plainHTTP {
@@ -773,6 +920,16 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	return err
 }
 
+// substrateLeaderStarted runs when this replica becomes the leader: the
+// chain start grace term begins (its 30 s cap runs from here, not from when
+// the chain state was opened, which can be a lease duration earlier), then
+// ready (GAP-0601).
+func substrateLeaderStarted(w io.Writer, pod string, chains *chainstate.Service, ready *atomic.Bool) {
+	fmt.Fprintf(w, "[substrate] %s is the leader\n", pod)
+	chains.Leading()
+	ready.Store(true)
+}
+
 func kubeHTTPClient() (*http.Client, error) {
 	pem, err := os.ReadFile(serveFlags.kubeCAFile)
 	if err != nil {
@@ -788,11 +945,15 @@ func kubeHTTPClient() (*http.Client, error) {
 }
 
 // substrateLeaderPermissions is who may call what on the leader
-// (GAP-0094): gateway replicas every method; the callout only the egress
-// chain check, the name lookup of a registration (GAP-0090) and its egress
-// decisions for the telemetry relay; the controller the registrations, the
-// chain lifecycle, the activity feed and its counts for the relay
-// (GAP-0450). Each relay method accepts only its poster's kinds of record.
+// (GAP-0094): gateway replicas every method but the controller's own
+// (leader.NamedOnly, GAP-0553); the callout only the egress chain check,
+// the name lookup of a registration (GAP-0090), its egress decisions for
+// the telemetry relay, the check of a git push against the open push
+// grants (GAP-1073, never their opening or closing) and its share of the
+// per-actor egress rate (GAP-0635); the controller the registrations, the chain
+// lifecycle, the activity feed, its counts for the relay (GAP-0450) and
+// publishing its egress callout slot read (GAP-0505). Each relay method
+// accepts only its poster's kinds of record.
 // An identity listed in two roles gets both sets.
 func substrateLeaderPermissions(gateways, callouts, controllers []string) leader.Permissions {
 	p := leader.Permissions{}
@@ -804,11 +965,39 @@ func substrateLeaderPermissions(gateways, callouts, controllers []string) leader
 		}
 	}
 	add(gateways, "*")
-	add(callouts, chainstate.MethodChainEgress, leader.MethodRegistrationLookup, telemetryrelay.MethodPostEgress)
+	add(callouts, chainstate.MethodChainEgress, leader.MethodRegistrationLookup, telemetryrelay.MethodPostEgress, pushgrant.MethodCheck, ratelimit.MethodShare)
 	add(controllers, leader.MethodRegistrationGet, leader.MethodRegistrationList, leader.MethodRegistrationWrite,
-		chainstate.MethodChainLifecycle, chainstate.MethodChainRunning, leader.MethodActivitySnapshot, telemetryrelay.MethodPostCounts)
+		chainstate.MethodChainLifecycle, chainstate.MethodChainRunning, leader.MethodActivitySnapshot, telemetryrelay.MethodPostCounts,
+		leader.MethodCalloutPublish)
 	return p
 }
+
+// substrateBindingsConfigMap is the chart's binding store ConfigMap in the
+// release namespace.
+const substrateBindingsConfigMap = "defenseclaw-secret-bindings"
+
+// substrateBindingStore is the self-service binding store, watched every
+// 2 s. It is nil, and nothing reads the ConfigMap, when
+// self_service_secrets.mode is off or outside a cluster (M-PERF-1).
+func substrateBindingStore(c *config.Config) *secretbind.Store {
+	if c.Substrate.SelfServiceSecrets.EffectiveMode() == config.SelfServiceOff {
+		return nil
+	}
+	return substrateBindingsWatched()
+}
+
+// substrateBindingsWatched is the one store and watcher of this process
+// (gateway or controller).
+var substrateBindingsWatched = sync.OnceValue(func() *secretbind.Store {
+	ns := strings.TrimSpace(os.Getenv("POD_NAMESPACE"))
+	k, ok := substrateKubeSecrets().(*kubeSecrets)
+	if ns == "" || !ok || k == nil {
+		return nil
+	}
+	st := secretbind.New(kubeBindings{k: k, ns: ns, name: substrateBindingsConfigMap})
+	go st.Watch(context.Background(), 2*time.Second)
+	return st
+})
 
 // substrateKubeSecrets is the secrets admin API's writer over the
 // Kubernetes API (nil outside a cluster: the list still answers).
@@ -936,7 +1125,7 @@ func substrateStartupChecks(c *config.Config) {
 	if line := substrateAuditExportWarning(c); line != "" {
 		fmt.Fprintln(os.Stderr, line)
 	}
-	for _, line := range substrateEchoHostWarnings(c.Substrate.Secrets) {
+	for _, line := range substrateEchoHostWarnings(c.Substrate.Secrets, c.Substrate.Egress.NoSwapHosts) {
 		fmt.Fprintln(os.Stderr, line)
 	}
 	go func() {
@@ -950,28 +1139,22 @@ func substrateStartupChecks(c *config.Config) {
 	}()
 }
 
-// substrateEchoHostWarnings says, once at start, which secrets are bound to
-// a host that echoes or publishes requests (GAP-0405): egress injects the
-// real value there, and the answer hands it back to the agent and its
-// model. A warning, not a refusal: a test binding is legitimate, and no
-// list covers every echoing service.
-func substrateEchoHostWarnings(secrets []config.SubstrateSecret) []string {
+// substrateEchoHostWarnings says, once at start, which secrets an
+// administrator let be added on a host that echoes or publishes requests
+// (inject.allow_echo; GAP-0405): egress injects the real value there, and
+// the answer hands it back to the agent and its model. Every other echo
+// binding is dropped by the controller (secret_echo_host) and failed by
+// the doctor row substrate.secret_echo_host, so it needs no start line.
+func substrateEchoHostWarnings(secrets []config.SubstrateSecret, noSwap []string) []string {
 	var out []string
 	for _, sec := range secrets {
-		seen := map[string]bool{}
-		var hits []string
-		for _, h := range sec.Inject.Hosts {
-			for _, e := range egressspec.EchoHostsCovered(h) {
-				if !seen[e] {
-					seen[e] = true
-					hits = append(hits, e)
-				}
-			}
+		if !sec.Inject.AllowEcho {
+			continue
 		}
-		if len(hits) > 0 {
-			out = append(out, fmt.Sprintf("[substrate] warning: secret %s is injected on %s, which return the request they get: "+
-				"the real value comes back to the agent and its model. Bind the secret only to the API that needs it "+
-				"(docs: Substrate secrets, hosts that echo tokens).", sec.Name, strings.Join(hits, ", ")))
+		if hits := gateway.SubstrateSecretEchoHits(sec, noSwap); len(hits) > 0 {
+			out = append(out, fmt.Sprintf("[substrate] warning: secret %s is injected on %s, which return the request they get, "+
+				"because its entry sets inject.allow_echo: the real value comes back to the agent and its model.",
+				sec.Name, strings.Join(hits, ", ")))
 		}
 	}
 	return out
@@ -1088,11 +1271,30 @@ func substrateBlocksUnscannedSkills(c *config.Config) func(connector string) boo
 	}
 }
 
+// substrateAskCloseReasons is the reason code and the words of an ask a
+// lifecycle event closes (GAP-0526).
+var substrateAskCloseReasons = map[string][2]string{
+	chainstate.LifecycleCrashed:  {telemetryrelay.AskClosedActorCrashed, "the actor crashed"},
+	chainstate.LifecycleReverted: {telemetryrelay.AskClosedActorReverted, "the actor was reverted to a snapshot"},
+	chainstate.LifecycleDeleted:  {telemetryrelay.AskClosedActorDeleted, "the actor was deleted"},
+}
+
 // substrateLifecycleClosesAsks wraps the chain lifecycle handler: after a
 // crashed, reverted or deleted event the actor's pending asks are closed
 // (a revert drops the held request with the run it belonged to, GAP-0415).
+// Each closed ask is a decision with the reason code, as an answer is; a
+// log line names the event and every ask it closed; and each closure is a
+// relay record, which a gateway replica writes to its audit log and the
+// webhooks with the reason code (actor_crashed, actor_reverted,
+// actor_deleted): the closure left no record anywhere before (GAP-0526).
+// log and relay may be nil.
 func substrateLifecycleClosesAsks(next func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error),
-	asksStore interface{ CloseActor(uid, reason string) int }) func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
+	asksStore interface {
+		CloseActor(uid, code, reason string) []asks.Ask
+	}, log io.Writer, relay *telemetryrelay.Store) func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
+	if log == nil {
+		log = io.Discard
+	}
 	return func(ctx context.Context, ev chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
 		res, err := next(ctx, ev)
 		if err != nil || res.Ignored {
@@ -1101,13 +1303,20 @@ func substrateLifecycleClosesAsks(next func(context.Context, chainstate.Lifecycl
 			// (GAP-0142 residual).
 			return res, err
 		}
-		switch ev.Event {
-		case chainstate.LifecycleCrashed:
-			asksStore.CloseActor(ev.Actor.UID, "the actor crashed")
-		case chainstate.LifecycleReverted:
-			asksStore.CloseActor(ev.Actor.UID, "the actor was reverted to a snapshot")
-		case chainstate.LifecycleDeleted:
-			asksStore.CloseActor(ev.Actor.UID, "the actor was deleted")
+		why, ok := substrateAskCloseReasons[ev.Event]
+		if !ok {
+			return res, nil
+		}
+		closed := asksStore.CloseActor(ev.Actor.UID, why[0], why[1]+" ("+why[0]+")")
+		fmt.Fprintf(log, "[substrate] lifecycle %s: actor %s/%s; closed %d open ask(s) (%s)\n", ev.Event, ev.Actor.Atespace, ev.Actor.UID, len(closed), why[0])
+		now := time.Now().UTC()
+		for _, a := range closed {
+			fmt.Fprintf(log, "[substrate] ask %s of %s/%s (%s) closed: expired, reason %s (%s)\n", a.ID, a.Atespace, a.Actor, substrateFirst(a.Host, a.Tool), why[0], why[1])
+			if relay != nil {
+				relay.Add(telemetryrelay.Record{Kind: telemetryrelay.KindAskClosed, At: now, Atespace: a.Atespace, Actor: a.Actor, UID: a.UID,
+					AskID: a.ID, Host: substrateFirst(a.Host, a.Tool), Reason: why[0], Unattended: a.Unattended, Severity: a.Severity,
+					Profile: a.Profile, UserID: a.OwnerID})
+			}
 		}
 		return res, nil
 	}
@@ -1176,6 +1385,24 @@ func substrateChainRegistrations(store registry.Store) chainstate.Options {
 		// caches (GAP-0234).
 		Current: func(ctx context.Context, atespace, name, uid string) (bool, error) {
 			return registry.Current(ctx, store, atespace, name, uid)
+		},
+		// An actor registered in this leader term, not a fork, skips the
+		// chain start grace (GAP-0642).
+		// "Registered in this term" is the leader's own set of registrations
+		// it wrote (GAP-1148), not a comparison of CreatedAt, written by
+		// another node, with this node's clock.
+		Born: func(ctx context.Context, atespace, uid string) (bool, string, error) {
+			term, ok := store.(interface {
+				RegisteredThisTerm(atespace, uid string) bool
+			})
+			if !ok || !term.RegisteredThisTerm(atespace, uid) {
+				return false, "", nil
+			}
+			reg, found, err := store.Get(ctx, atespace, uid)
+			if err != nil || !found {
+				return false, "", err
+			}
+			return true, reg.ParentUID, nil
 		},
 	}
 }

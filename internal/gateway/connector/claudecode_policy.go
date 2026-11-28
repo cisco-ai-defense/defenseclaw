@@ -88,10 +88,6 @@ func readOptionalClaudeCodeManagedSettings(name, kind, path string) (*claudeCode
 	return source, err
 }
 
-func (s *claudeCodeSettingsSource) active() bool {
-	return s != nil && len(s.settings) > 0
-}
-
 func (s *claudeCodeSettingsSource) label() string {
 	if s == nil {
 		return ""
@@ -163,6 +159,21 @@ func claudeCodeEffectiveHookContract(opts SetupOpts) (bool, error) {
 		// Setup, so absence/replacement there is not repairable locally and
 		// must carry an exact diagnostic. File policy and the lower HKCU
 		// fallback can be repaired by restoring our higher file drop-in.
+		if activeManaged == managed.osAdmin {
+			composition, err := classifyClaudeCodeOSAdminPolicy(managed.osAdmin, opts)
+			if err != nil {
+				return false, err
+			}
+			if composition == claudeCodeOSAdminMerges {
+				// Claude Code applies the union of the OS-admin and file
+				// tiers, which carries the matrix exactly when DefenseClaw's
+				// drop-in does; a missing drop-in is repairable absence.
+				if err := validateClaudeCodeManagedHookControls(managed.file, true); err != nil {
+					return false, err
+				}
+				return claudeCodeSourceHasHookContract(managed.file, opts, false)
+			}
+		}
 		diagnoseMissing := activeManaged == managed.remote || activeManaged == managed.osAdmin
 		return claudeCodeSourceHasHookContract(activeManaged, opts, diagnoseMissing)
 	}
@@ -195,10 +206,11 @@ type claudeCodeManagedSourceSet struct {
 
 func (s claudeCodeManagedSourceSet) active() *claudeCodeSettingsSource {
 	for _, candidate := range []*claudeCodeSettingsSource{s.remote, s.osAdmin, s.file, s.userFallback} {
-		// Claude selects the first managed source that delivers a non-empty
-		// configuration. An empty remote/registry/file object falls through to
-		// the next endpoint-managed tier.
-		if candidate.active() {
+		// Claude selects the first managed source that carries a policy key.
+		// An empty object, or one with only source-control keys
+		// (managedSourcesBehavior, wslInheritsWindowsSettings), falls through
+		// to the next endpoint-managed tier.
+		if claudeCodeSourceHasPolicyKey(candidate) {
 			return candidate
 		}
 	}
@@ -234,8 +246,10 @@ func inspectClaudeCodeManagedSources() (claudeCodeManagedSourceSet, error) {
 // validateClaudeCodeManagedFileDestination prevents an enterprise installer
 // from writing a perfectly valid drop-in that Claude will never load because a
 // higher managed tier wins. The installer owns only the file-based tier; remote
-// and MDM policy must carry the hook matrix through their native admin channel.
-func validateClaudeCodeManagedFileDestination() error {
+// policy must carry the hook matrix through its native admin channel, and an
+// OS-admin (HKLM) policy must carry it or merge managed sources
+// (classifyClaudeCodeOSAdminPolicy).
+func validateClaudeCodeManagedFileDestination(opts SetupOpts) error {
 	managed, err := inspectClaudeCodeManagedSources()
 	if err != nil {
 		return err
@@ -246,17 +260,14 @@ func validateClaudeCodeManagedFileDestination() error {
 			helper.label(),
 		)
 	}
-	if managed.remote.active() {
+	if claudeCodeSourceHasPolicyKey(managed.remote) {
 		return fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			"Claude Code %s has higher precedence than file-based managed hooks; deploy the DefenseClaw hook matrix through that source",
 			managed.remote.label(),
 		)
 	}
-	if managed.osAdmin.active() {
-		return fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
-			"Claude Code %s has higher precedence than file-based managed hooks; deploy the DefenseClaw hook matrix through that source",
-			managed.osAdmin.label(),
-		)
+	if _, err := classifyClaudeCodeOSAdminPolicy(managed.osAdmin, opts); err != nil {
+		return err
 	}
 	if err := validateClaudeCodeManagedHookControls(managed.file, true); err != nil {
 		return err

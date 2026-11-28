@@ -193,7 +193,7 @@ type bedrockEventStreamText struct {
 	tools    map[int]*bedrockStreamTool
 	done     []bedrockStreamTool
 	converse bool // a ConverseStream (else InvokeModelWithResponseStream)
-	maxIndex int
+	maxIndex int  // the highest content index read so far, -1 none
 	// ambiguous is why an event can be read two ways (a repeated or
 	// differently spelled key), "" when none: the stream takes the fail mode.
 	ambiguous string
@@ -315,11 +315,17 @@ func (s *bedrockEventStreamText) anthropicStreamToolEvent(inner []byte) {
 		return
 	}
 	switch ev.Type {
+	case "content_block_start", "content_block_delta", "content_block_stop":
+		// Every content block event names its block, also a block whose
+		// content_block_start the stream left out (GAP-1206).
+		if ev.Index > s.maxIndex {
+			s.maxIndex = ev.Index
+		}
+	}
+	switch ev.Type {
 	case "content_block_start":
 		if ev.ContentBlock.Type == "tool_use" || serverCallType(ev.ContentBlock.Type) {
 			s.toolStart(ev.Index, ev.ContentBlock.Name, string(ev.ContentBlock.Input), serverCallType(ev.ContentBlock.Type))
-		} else if ev.Index > s.maxIndex {
-			s.maxIndex = ev.Index
 		}
 	case "content_block_delta":
 		if ev.Delta.Type == "input_json_delta" {
@@ -331,7 +337,7 @@ func (s *bedrockEventStreamText) anthropicStreamToolEvent(inner []byte) {
 }
 
 func newBedrockEventStreamText() *bedrockEventStreamText {
-	return &bedrockEventStreamText{dec: eventstream.NewDecoder()}
+	return &bedrockEventStreamText{dec: eventstream.NewDecoder(), maxIndex: -1}
 }
 
 // Broken reports a stream the decoder could not frame.
@@ -509,6 +515,9 @@ func (s *bedrockEventStreamText) messagePieces(msg eventstream.Message) []respon
 		if json.Unmarshal(msg.Payload, &st) == nil {
 			s.toolStop(st.Index)
 		}
+		typed = []responsePiece{laneEndPiece(0)} // GAP-2154, GAP-2162: parked
+	case "messageStop":
+		typed = []responsePiece{messageEndPiece(0)}
 	}
 	// Every event goes through the walker, whatever its type.
 	return withWalkerPieces(typed, s.eventSegments(msg.Payload))
@@ -536,11 +545,10 @@ func (w *headersSentWriter) Flush() {
 }
 
 // writeBlockTail ends a Bedrock stream the agent already received part of
-// with the block message as one more text block of the same message (the
-// message then ends normally), so the agent shows it instead of a cut
-// stream.
-func (s *bedrockEventStreamText) writeBlockTail(w io.Writer, msg string) {
-	idx := s.maxIndex + 1
+// with the block message as one more text block of the same message, at
+// idx, the index after the last content block the agent got (the message
+// then ends normally), so the agent shows it instead of a cut stream.
+func (s *bedrockEventStreamText) writeBlockTail(w io.Writer, idx int, msg string) {
 	if s.converse {
 		for _, f := range []struct {
 			t string

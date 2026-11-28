@@ -47,6 +47,8 @@ func TestEvaluateClaudeCodeHook_CapturesExactEventContentSentToInspection(t *tes
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "claudecode"
+	// The export is opt-in (rel-1-0-10:GAP-2161); these rows check what it carries.
+	cfg.Guardrail.IncludeHookEventContent = true
 	api := &APIServer{
 		scannerCfg: cfg,
 		ciscoInspector: &CiscoInspectClient{
@@ -113,6 +115,8 @@ func TestEvaluateClaudeCodeHook_StopFailureRetainsNormalizedSubmittedContent(t *
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "claudecode"
+	// The export is opt-in (rel-1-0-10:GAP-2161); these rows check what it carries.
+	cfg.Guardrail.IncludeHookEventContent = true
 	cfg.Guardrail.BlockMessage = blockMessage
 	api := &APIServer{
 		scannerCfg: cfg,
@@ -156,6 +160,8 @@ func TestEvaluateClaudeCodeHook_SubmittedContentStaysRawUntilProjection(t *testi
 			cfg := &config.Config{}
 			cfg.Guardrail.Mode = "action"
 			cfg.Guardrail.Connector = "claudecode"
+			// The export is opt-in (rel-1-0-10:GAP-2161); these rows check what it carries.
+			cfg.Guardrail.IncludeHookEventContent = true
 			api := &APIServer{
 				scannerCfg: cfg,
 				ciscoInspector: &CiscoInspectClient{
@@ -290,6 +296,8 @@ func TestEvaluateClaudeCodeHook_LocalInspectionDoesNotClaimAIDSubmission(t *test
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "claudecode"
+	// The export is opt-in (rel-1-0-10:GAP-2161); these rows check what it carries.
+	cfg.Guardrail.IncludeHookEventContent = true
 	api := &APIServer{scannerCfg: cfg}
 
 	resp := api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
@@ -313,6 +321,8 @@ func TestEvaluateClaudeCodeHook_AIDSubmissionDoesNotRequireVerdict(t *testing.T)
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "claudecode"
+	// The export is opt-in (rel-1-0-10:GAP-2161); these rows check what it carries.
+	cfg.Guardrail.IncludeHookEventContent = true
 	api := &APIServer{
 		scannerCfg: cfg,
 		ciscoInspector: &CiscoInspectClient{
@@ -361,6 +371,8 @@ func TestEvaluateClaudeCodeHook_SubagentStartRetainsOnlyDistinctSubmittedContent
 			cfg := &config.Config{}
 			cfg.Guardrail.Mode = "action"
 			cfg.Guardrail.Connector = "claudecode"
+			// The export is opt-in (rel-1-0-10:GAP-2161); these rows check what it carries.
+			cfg.Guardrail.IncludeHookEventContent = true
 			api := &APIServer{
 				scannerCfg: cfg,
 				ciscoInspector: &CiscoInspectClient{
@@ -573,6 +585,8 @@ func TestEvaluateClaudeCodeHook_DoesNotDuplicateCompanionCanonicalContent(t *tes
 			cfg := &config.Config{}
 			cfg.Guardrail.Mode = "action"
 			cfg.Guardrail.Connector = "claudecode"
+			// The export is opt-in (rel-1-0-10:GAP-2161); these rows check what it carries.
+			cfg.Guardrail.IncludeHookEventContent = true
 			api := &APIServer{
 				scannerCfg: cfg,
 				ciscoInspector: &CiscoInspectClient{
@@ -608,6 +622,8 @@ func TestEvaluateClaudeCodeHook_LocalFileScanDoesNotReportUninspectedEventConten
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "claudecode"
+	// The export is opt-in (rel-1-0-10:GAP-2161); these rows check what it carries.
+	cfg.Guardrail.IncludeHookEventContent = true
 	api := &APIServer{
 		scannerCfg: cfg,
 		ciscoInspector: &CiscoInspectClient{
@@ -1609,6 +1625,8 @@ func TestEvaluateClaudeCodeHook_StopFailureInspectsErrorAsResult(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "claudecode"
+	// The export is opt-in (rel-1-0-10:GAP-2161); these rows check what it carries.
+	cfg.Guardrail.IncludeHookEventContent = true
 	api := &APIServer{scannerCfg: cfg}
 
 	resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{

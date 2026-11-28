@@ -169,12 +169,6 @@ func TestGAP1150FailedLocationChangeThenRelativeStateWriteFiveTiers(t *testing.T
 					// at rel).
 					continue
 				}
-				if p.managed && route == "copilot" && (r.id == "benign-append" || r.id == "benign-project") {
-					// A Copilot managed-peer append after a cd that may
-					// fail is an unresolved write target:
-					// rel-1-0-10:GAP-1157 (same at rel).
-					continue
-				}
 				// A gateway of its own for each call: gap1150Post sends one
 				// tool use id, and a second call with it on one gateway is a
 				// correlation collision (as in the GAP-1228 test).
@@ -182,7 +176,9 @@ func TestGAP1150FailedLocationChangeThenRelativeStateWriteFiveTiers(t *testing.T
 				out := gap1150Post(t, a, route, r.cwd, r.command, home, p.managed)
 				raw, _ := json.Marshal(out)
 				action, _ := out["action"].(string)
-				state := strings.Contains(string(raw), "tamper.detector_state_write")
+				// The rule id in any spelling: a Windows host's reader names it
+				// TAMPER.DETECTOR_STATE_WRITE (canonicalTrustedRuleID folds both).
+				state := strings.Contains(strings.ToLower(string(raw)), "tamper.detector_state_write")
 				// A proven state write is a HIGH alert outside strict and
 				// managed strict, a block there (GAP-0747 owner tiering 2026-11-15T15:20Z).
 				want := gap1173Want("write", p.name)

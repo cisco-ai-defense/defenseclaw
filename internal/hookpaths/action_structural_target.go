@@ -7,12 +7,98 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
+
+// actionWalkDirectoryScoped is syntax.Walk for a walk that follows the
+// shell's folder with actionPosixAdvanceDirectory (cwd and stack are that
+// walk's folder and pushd stack). A ( ... ) group and a command or process
+// substitution run in a copy of the shell: a cd, pushd or popd in one moves
+// the statements after it inside the group only, and when the group closes
+// the folder and the stack are what they were when it opened, as the
+// isolated reading of registrationWriteReach and actionfacts
+// working_folder.go read them. A walk that carried the move past the group
+// read an unknown word after `(cd .ssh && ls)` as if it ran in ~/.ssh, and
+// blocked it as an authorized-keys write (substrate-1:GAP-0503). A pipe
+// stage keeps its move: with lastpipe the last stage runs in the shell.
+func actionWalkDirectoryScoped(node syntax.Node, cwd *string, stack *[]string, visit func(syntax.Node) bool) {
+	type opened struct {
+		group bool
+		cwd   string
+		stack []string
+	}
+	var open []opened
+	syntax.Walk(node, func(node syntax.Node) bool {
+		if node == nil {
+			last := open[len(open)-1]
+			open = open[:len(open)-1]
+			if last.group {
+				*cwd, *stack = last.cwd, last.stack
+			}
+			return visit(nil)
+		}
+		if !visit(node) {
+			return false
+		}
+		switch node.(type) {
+		case *syntax.Subshell, *syntax.CmdSubst, *syntax.ProcSubst:
+			open = append(open, opened{group: true, cwd: *cwd, stack: slices.Clone(*stack)})
+		default:
+			open = append(open, opened{})
+		}
+		return true
+	})
+}
+
+// actionReadOnlyGroupStatements are the statements of file inside a ( ... )
+// group or a command or process substitution whose statements are all known
+// read-only (actionKnownReadOnlyShell). A cd, pushd or popd among them
+// moves the group's copy of the shell only, and nothing that runs there
+// writes, so the folder it enters (`(cd .ssh && ls)`) is no write target:
+// the mention scan leaves its word out, and reads every other statement of
+// the group as the same statement outside it (substrate-1:GAP-0503). A
+// group with any other statement keeps the move's reading for what it runs
+// (`(cd .ssh && $CMD)`).
+func actionReadOnlyGroupStatements(file *syntax.File, home string) map[*syntax.Stmt]bool {
+	var grouped map[*syntax.Stmt]bool
+	if file == nil {
+		return grouped
+	}
+	mark := func(stmts []*syntax.Stmt) bool {
+		if len(stmts) == 0 || !actionKnownReadOnlyShell(&syntax.File{Stmts: stmts}, home) {
+			return true
+		}
+		if grouped == nil {
+			grouped = map[*syntax.Stmt]bool{}
+		}
+		for _, stmt := range stmts {
+			syntax.Walk(stmt, func(node syntax.Node) bool {
+				if inner, ok := node.(*syntax.Stmt); ok {
+					grouped[inner] = true
+				}
+				return true
+			})
+		}
+		return false
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch group := node.(type) {
+		case *syntax.Subshell:
+			return mark(group.Stmts)
+		case *syntax.CmdSubst:
+			return mark(group.Stmts)
+		case *syntax.ProcSubst:
+			return mark(group.Stmts)
+		}
+		return true
+	})
+	return grouped
+}
 
 // The mention scan follows the same effective working directory the shell
 // uses for later words. A physical directory is retained so a symlink into
@@ -74,7 +160,9 @@ func actionPosixAdvanceDirectory(call *syntax.CallExpr, values actionValues, hom
 // An unresolved fragment is target-bearing only when the surrounding syntax
 // or current directory puts its possible expansion in the protected class.
 // This keeps ordinary project variables out of the protected-target rule.
-func actionUnknownWordMayNameKey(word *syntax.Word, cwd, home string) bool {
+// inSSH answers actionFolderIsSSHFolder for home (the mention scan's
+// per-folder, per-call-state memo).
+func actionUnknownWordMayNameKeyIn(word *syntax.Word, cwd, home string, inSSH func(cwd string) bool) bool {
 	if word == nil {
 		return false
 	}
@@ -92,10 +180,14 @@ func actionUnknownWordMayNameKey(word *syntax.Word, cwd, home string) bool {
 	if actionPosixWindowsHome(home) {
 		return path.Clean(cwd) == path.Join(home, ".ssh")
 	}
+	return inSSH(cwd)
+}
+
+// actionFolderIsSSHFolder reports that cwd resolves to home's SSH folder.
+func actionFolderIsSSHFolder(cwd, home string) bool {
 	ssh, sshKnown := ResolveWriteTarget(filepath.Join(home, ".ssh"))
 	current, cwdKnown := ResolveWriteTarget(cwd)
-	return sshKnown && cwdKnown && samePathName(current, ssh) &&
-		strings.ContainsAny(value, "$`*?[")
+	return sshKnown && cwdKnown && samePathName(current, ssh)
 }
 
 func actionWindowsAdvanceDirectory(words []string, home string, cwd *string, stack *[]string) {

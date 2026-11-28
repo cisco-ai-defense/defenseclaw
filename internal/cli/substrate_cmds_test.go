@@ -335,13 +335,13 @@ func TestSubstrateSecretsNeverTakeAValueOnTheCommandLine(t *testing.T) {
 
 func TestSubstrateUsageAndPolicyPrintTheDocument(t *testing.T) {
 	f := &fakeAdmin{h: map[string]func(http.ResponseWriter, *http.Request){
-		"GET usage":          jsonReply(map[string]any{"calls": 12, "tokens": map[string]any{"in": 100, "out": 50}}),
+		"GET usage":          jsonReply(map[string]any{"by": "actor", "rows": []map[string]any{{"key": "eng-web/fix-login", "calls": 12, "usage_calls": 12, "input_tokens": 100, "output_tokens": 50, "cost_usd": 1.5, "cost_calls": 12}}}),
 		"GET actors":         jsonReply(sampleActors()),
 		"GET policy/explain": jsonReply(map[string]any{"model": "claude", "verdict": "allow"}),
 	}}
 	useFakeAdmin(t, f)
 	out, _, err := runSubstrate(t, newSubstrateUsageCmd())
-	if err != nil || !strings.Contains(out, "calls: 12") || !strings.Contains(out, "  in: 100") {
+	if err != nil || !strings.Contains(out, "eng-web/fix-login") || !strings.Contains(out, "$1.50") {
 		t.Fatalf("usage = %q, %v", out, err)
 	}
 	out, _, err = runSubstrate(t, newSubstratePolicyTestCmd(), "fix-tests-1", "--host", "registry.example.test")
@@ -411,5 +411,57 @@ func TestSubstrateAgeWords(t *testing.T) {
 	}
 	if substrateAge(time.Time{}, now) != "-" {
 		t.Error("an unknown time is a dash")
+	}
+}
+
+func TestSubstrateUsageTable(t *testing.T) {
+	cost := 14.02
+	pct, spent := 32.0, 16.13
+	f := &fakeAdmin{h: map[string]func(http.ResponseWriter, *http.Request){
+		"GET usage": jsonReply(map[string]any{"by": "actor", "rows": []map[string]any{
+			{"key": "eng-web/fix-login", "calls": 212, "usage_calls": 212, "input_tokens": 1900000, "output_tokens": 88100, "cost_usd": cost, "cost_calls": 212},
+			{"key": "eng-web/batch-7f3a-03", "calls": 40, "usage_calls": 40, "input_tokens": 310200, "output_tokens": 12000, "cost_usd": 2.11, "cost_calls": 39},
+		}, "budgets": []map[string]any{{"id": "day-per-person", "scope": "user", "period": "day", "limit_usd": 50, "spent_usd": spent, "percent_used": pct, "resets_at": "2026-11-23T00:00:00Z"}}}),
+	}}
+	useFakeAdmin(t, f)
+	out, _, err := runSubstrate(t, newSubstrateUsageCmd())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Log("\n" + out)
+	for _, want := range []string{"Your usage by agent, last 7d (UTC):", "AGENT", "1.9M", "88.1K", "total", "$16.13",
+		"1 call had no known cost", "Budget day-per-person: $16.13 of $50.00 today (32 %), resets 2026-11-23T00:00:00Z"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("usage output lacks %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(strings.Join(f.calls, " "), "by=actor") || !strings.Contains(strings.Join(f.calls, " "), "since=7d") {
+		t.Errorf("by and since were not sent: %v", f.calls)
+	}
+}
+
+func TestSubstrateUsageFlagsAndErrors(t *testing.T) {
+	useFakeAdmin(t, &fakeAdmin{h: map[string]func(http.ResponseWriter, *http.Request){}})
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--by", "person"}, "--by person needs --all"},
+		{[]string{"--by", "nope"}, "--by is one of"},
+		{[]string{"--since", "99d"}, "at most 31 days"},
+		{[]string{"--since", "soon"}, "--since takes a window"},
+	} {
+		_, _, err := runSubstrate(t, newSubstrateUsageCmd(), c.args...)
+		if err == nil || !strings.Contains(err.Error(), c.want) || cliusage.ExitCode(err) != 2 {
+			t.Errorf("%v: err = %v (exit %d), want %q exit 2", c.args, err, cliusage.ExitCode(err), c.want)
+		}
+	}
+	for reason, want := range map[string]string{
+		"usage_disabled": "turned off on this cluster", "usage_unavailable": "leader did not answer",
+		"usage_hidden": "users_see: none", "usage_forbidden": "only administrators",
+	} {
+		if got := substrateUsageMessage(reason); !strings.Contains(got, want) {
+			t.Errorf("%s: %q lacks %q", reason, got, want)
+		}
 	}
 }

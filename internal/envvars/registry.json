@@ -311,7 +311,7 @@
     {
       "name": "DEFENSECLAW_J43_ACTORS",
       "category": "test_fixture",
-      "purpose": "Number of simulated actors in the J43 leader load test (substrate-1 GAP-0564).",
+      "purpose": "Number of simulated actors in the leader load test.",
       "default": "50",
       "accepted_values": [
         "positive integer"
@@ -330,7 +330,7 @@
     {
       "name": "DEFENSECLAW_J43_LOAD",
       "category": "test_fixture",
-      "purpose": "Opt-in for the wall-clock J43 flood measurement of the gateway hook route (substrate-1 GAP-0565); unset skips it.",
+      "purpose": "Opt-in for the wall-clock flood measurement of the gateway hook route; unset skips it.",
       "default": "unset",
       "accepted_values": [
         "1",
@@ -350,7 +350,7 @@
     {
       "name": "DEFENSECLAW_J43_PHASE_SECS",
       "category": "test_fixture",
-      "purpose": "Seconds per phase of the opt-in J43 flood measurement of the gateway hook route (substrate-1 GAP-0565).",
+      "purpose": "Seconds per phase of the opt-in flood measurement of the gateway hook route.",
       "default": "6",
       "accepted_values": [
         "positive integer"
@@ -369,7 +369,7 @@
     {
       "name": "DEFENSECLAW_J43_SECS",
       "category": "test_fixture",
-      "purpose": "Seconds each simulated actor runs in the J43 leader load test (substrate-1 GAP-0564).",
+      "purpose": "Seconds each simulated actor runs in the leader load test.",
       "default": "4",
       "accepted_values": [
         "positive integer"
@@ -452,7 +452,7 @@
     {
       "name": "DEFENSECLAW_TASK_FAULTS",
       "category": "hook_internal",
-      "purpose": "Path of the fault file the Agent Substrate relay gives a --task run; the actor kit hook adds one line for each hook call the gateway did not answer, so an agent that still exits 0 is not reported as a success (GAP-0326). Set by the relay, not by people.",
+      "purpose": "Path of the fault file the Agent Substrate relay gives a --task run; the actor kit hook adds one line for each hook call the gateway did not answer, so an agent that still exits 0 is not reported as a success. Set by the relay, not by people.",
       "default": "unset (no task run)",
       "accepted_values": [
         "absolute file path",
@@ -470,9 +470,89 @@
       "since": "1.0.10"
     },
     {
+      "name": "DEFENSECLAW_TEST_GAP1733_LOCALSYSTEM_CHILD",
+      "category": "test_fixture",
+      "purpose": "Marks the LocalSystem child run that the elevated Windows test TestGAP1733PerUserInstallFoldersWithTheirOwnDACLAreSkipped starts, so the child runs the per-user install folder checks as LocalSystem.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/enterprisehooks/target_runtime_peruser_dacl_gap1733_windows_test.go",
+          "description": "TestGAP1733PerUserInstallFoldersWithTheirOwnDACLAreSkipped sets it on the LocalSystem child process it starts"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_GAP1885_CHILD_DATA_DIR",
+      "category": "test_fixture",
+      "purpose": "Data folder of the second guardian state writer that the Windows test TestGAP1885SecondGuardianWriterWaitsForTheFirst starts as a child process; the child writes the guardian state of that folder.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined absolute path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/enterprise_hooks_guardian_state_lock_gap1885_windows_test.go",
+          "description": "TestGAP1885SecondGuardianWriterWaitsForTheFirst sets it on the child it starts; TestGAP1885GuardianStateChildWriter reads it"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_GAP1885_CHILD_STARTED",
+      "category": "test_fixture",
+      "purpose": "File the child guardian state writer of the Windows test TestGAP1885SecondGuardianWriterWaitsForTheFirst writes its process id to, so the parent knows the child has started.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined absolute path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/enterprise_hooks_guardian_state_lock_gap1885_windows_test.go",
+          "description": "TestGAP1885SecondGuardianWriterWaitsForTheFirst sets it on the child it starts; TestGAP1885GuardianStateChildWriter writes its pid there"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_GAP1911_FOLDER",
+      "category": "test_fixture",
+      "purpose": "Folder of the Administrators-owned plugin tree that the elevated Windows test TestGAP1911AdministratorsOwnedFolderInTheProfileKeepsItsCommandWhenNotElevated hands to the filtered-token child process it starts, so the child judges that folder without elevation.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined absolute path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/plugin_custody_admin_scope_windows_test.go",
+          "description": "TestGAP1911AdministratorsOwnedFolderInTheProfileKeepsItsCommandWhenNotElevated sets it on the filtered-token child it starts; the child reads it and judges the folder"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
       "name": "DEFENSECLAW_TEST_SIDECAR_HOOK_PRIORITY",
       "category": "test_fixture",
-      "purpose": "Marks the child process of the Windows gateway priority-class test (GAP-0050), so the class checks run in a child and the test binary keeps its own priority class.",
+      "purpose": "Marks the child process of the Windows gateway priority-class test, so the class checks run in a child and the test binary keeps its own priority class.",
       "default": "unset",
       "accepted_values": [
         "1",
@@ -513,7 +593,7 @@
     {
       "name": "DEFENSECLAW_WRITE_CLI_SNAPSHOT",
       "category": "test_fixture",
-      "purpose": "Makes the actionfacts CLI-command drift test rewrite its reviewed snapshot of registered command names (testdata/defenseclaw_cli_commands.txt) instead of comparing against it, so a developer can classify a newly added command (GAP-0705).",
+      "purpose": "Makes the actionfacts CLI-command drift test rewrite its reviewed snapshot of registered command names (testdata/defenseclaw_cli_commands.txt) instead of comparing against it, so a developer can classify a newly added command.",
       "default": "unset",
       "accepted_values": [
         "1",
@@ -669,7 +749,7 @@
     {
       "name": "DEFENSECLAW_CLI_TEST_GUARDED_PARENT",
       "category": "test_fixture",
-      "purpose": "Set by the top-level internal/cli test run to its own PID, so the helper child processes it starts with os.Args[0] inherit it and skip the TestMain process-state guard; a helper changes its priority class or environment on purpose and exits (GAP-0079).",
+      "purpose": "Set by the top-level internal/cli test run to its own PID, so the helper child processes it starts with os.Args[0] inherit it and skip the TestMain process-state guard; a helper changes its priority class or environment on purpose and exits.",
       "default": "unset",
       "accepted_values": [
         "parent test process PID",
@@ -693,7 +773,7 @@
     {
       "name": "DEFENSECLAW_CLI_TEST_REGISTRY_SANDBOX",
       "category": "test_fixture",
-      "purpose": "Passes the internal/cli Windows test run's HKCU sandbox key (Software\\DefenseClaw-test-<id>) to its helper child processes, so every registry write of the run lands in one per-run sandbox instead of the machine registry (GAP-0079).",
+      "purpose": "Passes the internal/cli Windows test run's HKCU sandbox key (Software\\DefenseClaw-test-<id>) to its helper child processes, so every registry write of the run lands in one per-run sandbox instead of the machine registry.",
       "default": "unset",
       "accepted_values": [
         "HKCU subkey under Software\\DefenseClaw-test-",
@@ -2165,6 +2245,26 @@
       "since": "0.8.8"
     },
     {
+      "name": "DEFENSECLAW_HOOK_BYTES_PAIRS",
+      "category": "test_fixture",
+      "purpose": "Sets the number of tool-call pairs the audit-bytes-per-hook-post measurement posts (default 150).",
+      "default": "unset",
+      "accepted_values": [
+        "positive integer",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_audit_bytes_per_post_test.go",
+          "description": "Hook audit bytes-per-post measurement fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
       "name": "DEFENSECLAW_HOOK_BURST_CALLS",
       "category": "test_fixture",
       "purpose": "Sets the number of hook calls in the probe burst.",
@@ -2488,7 +2588,7 @@
       "name": "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR",
       "category": "runtime_path",
       "purpose": "Select the administrator-owned directory containing the hook guardian protected-target authorization ledger.",
-      "default": "${DEFENSECLAW_HOME}-hook-guardian",
+      "default": "the standalone layout's hook-guardian-state folder when DEFENSECLAW_HOME is that layout's data folder (Windows, macOS), else ${DEFENSECLAW_HOME}-hook-guardian",
       "accepted_values": [
         "any-absolute-admin-owned-path",
         "unset"
@@ -4233,6 +4333,26 @@
       "security_note": "Installer-only override — treated as untrusted operator input, so the referenced plist must be root-owned and never group/world-writable. The bundled default plist next to install.sh is accepted regardless of extraction owner (content originates from the trusted bundle) but group/world-writable is still refused."
     },
     {
+      "name": "DEFENSECLAW_PIN_REACHABILITY",
+      "category": "test_fixture",
+      "purpose": "Opt-in for the release and nightly check that every pinned vendor harness archive (Cursor, Devin, Kiro) is still served; unset skips it, because it needs the network and fails on a day a vendor withdraws an old build.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/openshell/harness/pin_reachability_test.go",
+          "description": "TestPinnedArchivesAreReachable runs only when the variable is 1"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
       "name": "DEFENSECLAW_PLUGIN_AGENT_ID",
       "category": "hook_internal",
       "purpose": "Plugin-side agent ID. Falls back to DEFENSECLAW_AGENT_ID when unset.",
@@ -4520,6 +4640,66 @@
       "since": "0.3.0"
     },
     {
+      "name": "DEFENSECLAW_RG",
+      "category": "test_fixture",
+      "purpose": "Path of the ripgrep 14.1.0 binary the live ripgrep tests of the action-fact resolver run against, instead of rg on PATH.",
+      "default": "unset (rg on PATH)",
+      "accepted_values": [
+        "absolute path to ripgrep 14.1.0",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/actionfacts/gap0679_gap0682_test.go",
+          "description": "g0679LiveRG picks the rg binary the live ripgrep checks run"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
+      "name": "DEFENSECLAW_RG_FUZZ_SEED",
+      "category": "test_fixture",
+      "purpose": "Seed of the random ripgrep glob and type-add shapes in the live glob fuzz tests; unset uses a fixed seed.",
+      "default": "unset (fixed seed)",
+      "accepted_values": [
+        "unsigned integer",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/actionfacts/gap0683_test.go",
+          "description": "The glob fuzz tests read the seed to replay or widen a run"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
+      "name": "DEFENSECLAW_RG_REQUIRED",
+      "category": "test_fixture",
+      "purpose": "Makes the live ripgrep tests fail instead of skip when no ripgrep 14.1.0 is available (the local gates set it).",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/actionfacts/gap0679_gap0682_test.go",
+          "description": "g0679LiveRG fails the test instead of skipping when there is no matching rg"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
       "name": "DEFENSECLAW_RUN_ID",
       "category": "telemetry",
       "purpose": "Correlation ID stamped on every event for cross-sink joins. Auto-generated per gateway boot if unset; explicit value is useful for E2E test runs.",
@@ -4722,7 +4902,7 @@
       "consumers": [
         {
           "location": "internal/scanner/scanner_runtime.go",
-          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime (GAP-0132)"
+          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime"
         },
         {
           "location": "cmd/defenseclaw-scanners/main.go",
@@ -4746,7 +4926,7 @@
       "consumers": [
         {
           "location": "internal/scanner/scanner_runtime.go",
-          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime (GAP-0132)"
+          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime"
         },
         {
           "location": "cmd/defenseclaw-scanners/main.go",
@@ -4770,7 +4950,7 @@
       "consumers": [
         {
           "location": "internal/scanner/scanner_runtime.go",
-          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime (GAP-0132)"
+          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime"
         },
         {
           "location": "cmd/defenseclaw-scanners/main.go",
@@ -4794,7 +4974,7 @@
       "consumers": [
         {
           "location": "internal/scanner/scanner_runtime.go",
-          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime (GAP-0132)"
+          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime"
         },
         {
           "location": "cmd/defenseclaw-scanners/main.go",
@@ -4821,7 +5001,7 @@
       "consumers": [
         {
           "location": "internal/scanner/scanner_runtime.go",
-          "description": "Gateway writer: addBedrockAuthEnv derives it from config for the scanner runtime (GAP-1460)"
+          "description": "Gateway writer: addBedrockAuthEnv derives it from config for the scanner runtime"
         },
         {
           "location": "cmd/defenseclaw-scanners/main.go",
@@ -4845,7 +5025,7 @@
       "consumers": [
         {
           "location": "internal/scanner/scanner_runtime.go",
-          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime (GAP-0132)"
+          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime"
         },
         {
           "location": "cmd/defenseclaw-scanners/main.go",
@@ -4869,7 +5049,7 @@
       "consumers": [
         {
           "location": "internal/scanner/scanner_runtime.go",
-          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime (GAP-0132)"
+          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime"
         },
         {
           "location": "cmd/defenseclaw-scanners/main.go",
@@ -4893,7 +5073,7 @@
       "consumers": [
         {
           "location": "internal/scanner/scanner_runtime.go",
-          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime (GAP-0132)"
+          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime"
         },
         {
           "location": "cmd/defenseclaw-scanners/main.go",
@@ -5145,7 +5325,7 @@
         },
         {
           "location": "cli/defenseclaw/tui/panels/setup.py",
-          "description": "The TUI Setup wizard passes the token in the child process environment instead of argv (GAP-1888)"
+          "description": "The TUI Setup wizard passes the token in the child process environment instead of argv"
         }
       ],
       "since": "0.8.0"
@@ -5169,7 +5349,7 @@
         },
         {
           "location": "cli/defenseclaw/tui/panels/setup.py",
-          "description": "The TUI Setup wizard passes the secret in the child process environment instead of argv (GAP-1888)"
+          "description": "The TUI Setup wizard passes the secret in the child process environment instead of argv"
         }
       ],
       "since": "1.0.0"
@@ -5193,7 +5373,7 @@
         },
         {
           "location": "cli/defenseclaw/tui/panels/setup.py",
-          "description": "The TUI Setup wizard passes the secret in the child process environment instead of argv (GAP-1888)"
+          "description": "The TUI Setup wizard passes the secret in the child process environment instead of argv"
         }
       ],
       "since": "1.0.0"
@@ -5217,7 +5397,7 @@
         },
         {
           "location": "cli/defenseclaw/tui/panels/setup.py",
-          "description": "The TUI Setup wizard passes the secret in the child process environment instead of argv (GAP-1888)"
+          "description": "The TUI Setup wizard passes the secret in the child process environment instead of argv"
         }
       ],
       "since": "1.0.0"
@@ -5241,7 +5421,7 @@
         },
         {
           "location": "cli/defenseclaw/tui/panels/setup.py",
-          "description": "The TUI Setup wizard passes the secret in the child process environment instead of argv (GAP-1888)"
+          "description": "The TUI Setup wizard passes the secret in the child process environment instead of argv"
         }
       ],
       "since": "1.0.0"
@@ -5693,6 +5873,26 @@
       "security_note": "The kubeconfig user's token is sent to the cluster's admin listener, which checks it with a TokenReview. Nothing is stored by the launcher."
     },
     {
+      "name": "DEFENSECLAW_SUBSTRATE_MCP",
+      "category": "test_fixture",
+      "purpose": "Set by the substrate --mcp unit test to prove that --mcp is a per-run flag only: the variable is never read, so setting it changes nothing.",
+      "default": "unset",
+      "accepted_values": [
+        "name=command",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/substrate_mcp_test.go",
+          "description": "TestSubstrateMCPIsNotASetting sets it and checks that substrate run still bridges no MCP server"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
       "name": "DEFENSECLAW_SUBSTRATE_PROFILE",
       "category": "runtime_path",
       "purpose": "Guard profile that substrate run uses when --profile is not given.",
@@ -5941,7 +6141,7 @@
     {
       "name": "DEFENSECLAW_TEST_ROUTE_WORKER_HELPER",
       "category": "test_fixture",
-      "purpose": "Selects the test helper process that stands in for the per-user enterprise hook worker of a route-only render (GAP-1311).",
+      "purpose": "Selects the test helper process that stands in for the per-user enterprise hook worker of a route-only render.",
       "default": "unset",
       "accepted_values": [
         "1",
@@ -7374,6 +7574,29 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_VAULT_STORE",
+      "category": "runtime_path",
+      "purpose": "Where the CLI keeps the sandbox credential vault: auto seals it with a key in the operating system keystore (macOS Keychain, Linux Secret Service) when one is usable; keychain requires that, and a vault change or sandbox run stops when the keystore cannot keep the key; file keeps it in a file readable only by you, not encrypted.",
+      "default": "unset (auto: sealed when a keystore is usable, else the owner-only file)",
+      "accepted_values": [
+        "auto",
+        "keychain",
+        "file",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/vault/keys.go",
+          "description": "Selects the vault keystore for the CLI"
+        }
+      ],
+      "since": "1.0.11",
+      "security_note": "file keeps new vault values unencrypted in a 0600 file; a vault already sealed stays sealed, and changes that need its values fail until the variable is unset."
+    },
+    {
       "name": "DEFENSECLAW_VENV",
       "category": "runtime_path",
       "purpose": "Absolute Python runtime path selected by the macOS app and passed to its upgrade and gateway actions so each action stays on the selected installation.",
@@ -7876,7 +8099,7 @@
     {
       "name": "DEFENSECLAW_EXPLICIT_CODEX_SETUP",
       "category": "hook_internal",
-      "purpose": "Set by the Python CLI to the absolute Codex home while a Codex setup restarts the gateway, so that gateway binds Codex to the home the user just chose instead of the root recorded in the managed backup (GAP-1106). The gateway uses it only when it names the Codex home the gateway itself resolves.",
+      "purpose": "Set by the Python CLI to the absolute Codex home while a Codex setup restarts the gateway, so that gateway binds Codex to the home the user just chose instead of the root recorded in the managed backup. The gateway uses it only when it names the Codex home the gateway itself resolves.",
       "default": "unset",
       "accepted_values": [
         "absolute-path",
@@ -7900,7 +8123,7 @@
     {
       "name": "DEFENSECLAW_SCAN_RECORDED_BY_CALLER",
       "category": "hook_internal",
-      "purpose": "Set to 1 by the gateway when it runs a defenseclaw plugin scan child whose result it records itself, so the CLI child does not write a second scan row and scan-finding alert (GAP-2482).",
+      "purpose": "Set to 1 by the gateway when it runs a defenseclaw plugin scan child whose result it records itself, so the CLI child does not write a second scan row and scan-finding alert.",
       "default": "unset",
       "accepted_values": [
         "1",
@@ -8743,7 +8966,7 @@
     {
       "name": "DEFENSECLAW_HOOK_POST_STARTUP_HELPER",
       "category": "test_fixture",
-      "purpose": "Marks the child process TestHookPostStartupInitBudget starts from its own test binary, so the child only reports package init cost (GODEBUG=inittrace=1) and does not start another child (GAP-1225, GAP-1283).",
+      "purpose": "Marks the child process TestHookPostStartupInitBudget starts from its own test binary, so the child only reports package init cost (GODEBUG=inittrace=1) and does not start another child.",
       "default": "unset",
       "accepted_values": [
         "1",
@@ -8796,7 +9019,7 @@
       "consumers": [
         {
           "location": "internal/testenv/hostslowdown.go",
-          "description": "HostSlowdown returns the value (capped at MaxHostSlowdown) when it is set; the GAP-0558 hook tests stretch their windows by it"
+          "description": "HostSlowdown returns the value (capped at MaxHostSlowdown) when it is set; the hook tests stretch their windows by it"
         }
       ],
       "since": "1.0.10"
@@ -8907,26 +9130,6 @@
         {
           "location": "internal/substrate/setup/chart_test.go",
           "description": "Go test"
-        }
-      ],
-      "since": "1.0.10"
-    },
-    {
-      "name": "DEFENSECLAW_RELAY_FILES_MAX_BYTES",
-      "category": "runtime_path",
-      "purpose": "Cap in bytes on the file content one upload or download through the Agent Substrate actor relay's file routes may carry. Read by the relay process in the actor; the launcher has its own download cap.",
-      "default": "(relay.DefaultFilesMaxBytes)",
-      "accepted_values": [
-        "positive integer (bytes)",
-        "unset"
-      ],
-      "security_impact": "low",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "internal/substrate/relay/files.go",
-          "description": "FilesMaxBytesEnv overrides DefaultFilesMaxBytes"
         }
       ],
       "since": "1.0.10"
@@ -9127,6 +9330,66 @@
         }
       ],
       "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_SLIM_HOOK_EXE",
+      "category": "test_fixture",
+      "purpose": "Names the prebuilt Windows defenseclaw-hook.exe the native slim-hook size test measures; unset, the test looks in the folders above its own (the native build zip root).",
+      "default": "unset",
+      "accepted_values": [
+        "<path to defenseclaw-hook.exe>",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "cmd/defenseclaw-hook/slim_test.go",
+          "description": "slimHookPrebuiltWindowsBudget measures this executable against the size budget"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_LAUNCHER_EXIT",
+      "category": "test_fixture",
+      "purpose": "Exit code of the default mode of the Windows launcher test copy (default 7).",
+      "default": "unset",
+      "accepted_values": [
+        "<exit code>",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/claudecode_launcher_guard_helper_test.go",
+          "description": "answerAsGuardPassthroughLauncher exits with this code"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_LAUNCHER_MODE",
+      "category": "test_fixture",
+      "purpose": "Selects the answer of the Windows launcher test copy: unset prints its arguments and copies stdin, review answers like the GAP-0322 review fixture.",
+      "default": "unset",
+      "accepted_values": [
+        "review",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/claudecode_launcher_guard_helper_test.go",
+          "description": "answerAsGuardPassthroughLauncher picks its answer by this mode"
+        }
+      ],
+      "since": "1.0.11"
     }
   ]
 }

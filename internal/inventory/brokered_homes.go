@@ -510,10 +510,6 @@ func (s *ContinuousDiscoveryService) brokeredChildrenSignal(sig AISignature, cat
 			if hermesRoot {
 				break
 			}
-			if len(evidence) >= maxEvidencePerSignal {
-				partial, coverageReason = true, CoverageReasonCapExceeded
-				break
-			}
 			name := sanitizeBasenameValue(child.Name)
 			if name == "" {
 				continue
@@ -523,6 +519,13 @@ func (s *ContinuousDiscoveryService) brokeredChildrenSignal(sig AISignature, cat
 			if detector == "skill" && strings.HasPrefix(child.Name, ".") && child.Regular {
 				continue
 			}
+			if detector == "plugin" && strings.HasPrefix(child.Name, ".") {
+				continue
+			}
+			if len(evidence) >= maxEvidencePerSignal {
+				partial, coverageReason = true, CoverageReasonCapExceeded
+				break
+			}
 			if detector == "skill" && strings.EqualFold(strings.TrimSpace(sig.ID), "codex") &&
 				enforce.IsBundledSkillContainerName(child.Name) {
 				partial = true
@@ -531,7 +534,9 @@ func (s *ContinuousDiscoveryService) brokeredChildrenSignal(sig AISignature, cat
 				}
 				continue
 			}
-			evidence = append(evidence, s.directoryChildEvidence(detector, path, child.Name, name))
+			// No skill folder facts: hashing would open the files of a home
+			// that is closed to the gateway (the helper sends no contents).
+			evidence = append(evidence, s.childEvidenceRow(detector, path, child.Name, name))
 		}
 		if entry.ChildrenTruncated && !partial {
 			partial, coverageReason = true, CoverageReasonCapExceeded

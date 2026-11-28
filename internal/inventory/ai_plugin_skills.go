@@ -50,7 +50,7 @@ func (s *ContinuousDiscoveryService) detectPluginSkills() []AISignal {
 			copilotPlugins(s.agentHome(home, "COPILOT_HOME"))...)
 		for _, plugin := range append(plugins, cursorPlugins(home)...) {
 			sig := s.signatureByID(plugin.signature)
-			if sig == nil {
+			if sig == nil || !s.pluginFolderReal(home, plugin.dir) {
 				continue
 			}
 			version, author, folders := pluginManifest(plugin.dir)
@@ -84,12 +84,29 @@ func (s *ContinuousDiscoveryService) detectPluginSkills() []AISignal {
 						ev.Skill.Scope, ev.Skill.Plugin = SkillScopePlugin, info
 					}
 				}
-				signal.EvidenceHash = hashEvidence(signal.Evidence)
+				// The evidence hash keeps the facts, so a content, version or
+				// enabled-state change reads as changed; the fingerprint, built
+				// from the fact-free identity evidence, keeps the skill's id.
+				signal.EvidenceHash = hashObservedEvidence(signal.Evidence)
 				out = append(out, signal)
 			}
 		}
 	}
 	return out
+}
+
+// pluginFolderReal reports whether a managed scan may read the plugin folder
+// dir of home: every folder from home down to dir is a real folder, not a
+// link or junction. A managed gateway reads every account's home, so a link
+// such as ~/.claude/plugins/cache -> another folder would have that folder's
+// skills read and reported as this user's (the no-follow rule of GAP-0694).
+// A per-user scan reads only its own user's files and follows their links.
+func (s *ContinuousDiscoveryService) pluginFolderReal(home, dir string) bool {
+	if !s.opts.ManagedEnterprise {
+		return true
+	}
+	rel, err := filepath.Rel(home, dir)
+	return err == nil && pathBelow(home, dir) && realDirsBelow(home, filepath.ToSlash(rel)+"/x")
 }
 
 func (s *ContinuousDiscoveryService) signatureByID(id string) *AISignature {

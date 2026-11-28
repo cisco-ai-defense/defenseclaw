@@ -174,7 +174,8 @@ type sedBackupScope struct {
 const sedBackupDepth = 8
 
 func (r *sedBackupReader) read(command string, scope sedBackupScope, depth int) {
-	file, parsed := parseShell(command)
+	// The reader only reads the tree: both readings of a decision share it.
+	file, parsed := r.memo.parsedShell(command)
 	if !parsed {
 		return
 	}
@@ -319,19 +320,17 @@ func (r *sedBackupReader) run(words []string, scope sedBackupScope, implicit boo
 
 // sedProgram is the program a command word names, as the readers of this
 // file know it: the last element of its path in lower case, with the GNU
-// prefix of the macOS ports (gsed, gxargs, gfind) and the version of perl
-// (perl5.38.2) dropped.
+// prefix of the macOS ports (gsed, gxargs, gfind) dropped; programBase
+// already drops the version of perl (perl5.38.2).
 func sedProgram(word string) string {
 	name := programBase(word)
-	switch {
-	case name == "gsed":
+	switch name {
+	case "gsed":
 		return "sed"
-	case name == "gxargs":
+	case "gxargs":
 		return "xargs"
-	case name == "gfind":
+	case "gfind":
 		return "find"
-	case strings.HasPrefix(name, "perl") && strings.Trim(name[len("perl"):], "0123456789.") == "":
-		return "perl"
 	}
 	return name
 }

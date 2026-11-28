@@ -44,6 +44,7 @@ func saveDuringSwap(t *testing.T, path string, times int, edit func(string) stri
 // compare-and-swap of what was read, and the reconcile or removal renders
 // again over the newer file, so the save is kept with DefenseClaw's entries.
 func TestSharedPolicyWritesKeepAConcurrentAdministratorSave(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	type subject struct {
 		name   string
 		target Target

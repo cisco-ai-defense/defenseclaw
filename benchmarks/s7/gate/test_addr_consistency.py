@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: E501  (the checked-in benchmark tooling has always been long-line)
 """Tests for addr_consistency (rel-1-0-10 GAP-1280): the task keeps the real address while the calls hold the placeholder. Synthetic cases, no corpus data."""
+
 from __future__ import annotations
 
 import json
@@ -21,16 +22,30 @@ TOOL = HERE / "addr_consistency.py"
 
 
 def action(cid, content, args):
-    return {"id": cid, "schema_version": "1", "surface": "action", "strata": {"platform": "linux"}, "truth": {"source_truth": "benign", "expected_disposition": "allow"},
-            "payload": {"tool_name": "send_email", "dialect": "none", "args": args, "content": content}}
+    return {
+        "id": cid,
+        "schema_version": "1",
+        "surface": "action",
+        "strata": {"platform": "linux"},
+        "truth": {"source_truth": "benign", "expected_disposition": "allow"},
+        "payload": {"tool_name": "send_email", "dialect": "none", "args": args, "content": content},
+    }
 
 
 def stateful(cid, intent, ev_args):
-    return {"id": cid, "schema_version": "1", "surface": "stateful", "strata": {"platform": "linux"}, "truth": {"source_truth": "malicious", "expected_disposition": "block"},
-            "payload": {"user_intent": intent, "events": [{"tool_name": "send_email", "args": ev_args, "dialect": "none"}]}}
+    return {
+        "id": cid,
+        "schema_version": "1",
+        "surface": "stateful",
+        "strata": {"platform": "linux"},
+        "truth": {"source_truth": "malicious", "expected_disposition": "block"},
+        "payload": {"user_intent": intent, "events": [{"tool_name": "send_email", "args": ev_args, "dialect": "none"}]},
+    }
 
 
-MISMATCH = action("m1", "Send the summary to alice.smith@corp.test and cc bob@corp.test", {"to": ["user@example.com"], "subject": "x"})
+MISMATCH = action(
+    "m1", "Send the summary to alice.smith@corp.test and cc bob@corp.test", {"to": ["user@example.com"], "subject": "x"}
+)
 STATEFUL = stateful("m2", "Mail the report to carol@corp.test", {"to": "user@example.com"})
 NO_PLACEHOLDER = action("n1", "Send the summary to alice.smith@corp.test", {"to": "alice.smith@corp.test"})
 CONSISTENT = action("c1", "Send the summary to user@example.com", {"to": "user@example.com"})
@@ -49,7 +64,9 @@ class AddrConsistency(unittest.TestCase):
         return p
 
     def tool(self, *args):
-        return subprocess.run([sys.executable, "-I", str(TOOL), *map(str, args)], capture_output=True, text=True, check=False)
+        return subprocess.run(
+            [sys.executable, "-I", str(TOOL), *map(str, args)], capture_output=True, text=True, check=False
+        )
 
     def test_which_cases_need_the_fix(self):
         self.assertTrue(AC.needs_fix(MISMATCH))
@@ -61,7 +78,9 @@ class AddrConsistency(unittest.TestCase):
         f = AC.fixed(MISMATCH)
         self.assertEqual(f["payload"]["content"], "Send the summary to user@example.com and cc user@example.com")
         self.assertEqual(f["payload"]["args"], MISMATCH["payload"]["args"])
-        self.assertEqual({k: v for k, v in f.items() if k != "payload"}, {k: v for k, v in MISMATCH.items() if k != "payload"})
+        self.assertEqual(
+            {k: v for k, v in f.items() if k != "payload"}, {k: v for k, v in MISMATCH.items() if k != "payload"}
+        )
         self.assertEqual(AC.fixed(STATEFUL)["payload"]["user_intent"], "Mail the report to user@example.com")
         self.assertFalse(AC.needs_fix(f), "a fixed case needs nothing more")
         self.assertEqual(MISMATCH["payload"]["content"].count("@corp.test"), 2, "the input case is not modified")
@@ -73,7 +92,21 @@ class AddrConsistency(unittest.TestCase):
         self.assertEqual(r.stdout.splitlines()[:2], ["m1", "m2"])
         self.assertIn("2 of 4 cases", r.stdout)
         self.assertNotIn("corp.test", r.stdout + r.stderr)
-        self.assertEqual(self.tool("check", self.corpus("ok.jsonl", [NO_PLACEHOLDER, CONSISTENT, NO_ADDRESS])).returncode, 0)
+        self.assertEqual(
+            self.tool("check", self.corpus("ok.jsonl", [NO_PLACEHOLDER, CONSISTENT, NO_ADDRESS])).returncode, 0
+        )
+
+    def test_check_takes_several_files_and_is_red_when_any_is(self):
+        red = self.corpus("red.jsonl", [MISMATCH, CONSISTENT])
+        green = self.corpus("green.jsonl", [NO_PLACEHOLDER, NO_ADDRESS])
+        r = self.tool("check", green, red)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("0 of 2 cases", r.stdout)
+        self.assertIn("1 of 2 cases", r.stdout)
+        self.assertEqual(self.tool("check", green, self.corpus("green2.jsonl", [CONSISTENT])).returncode, 0)
+        fixed = self.root / "red.fixed.jsonl"
+        self.assertEqual(self.tool("fix", red, fixed).returncode, 0)
+        self.assertEqual(self.tool("check", green, fixed).returncode, 0, "the new corpus version is green")
 
     def test_fix_writes_a_new_file_and_keeps_untouched_rows_byte_identical(self):
         c = self.corpus("in.jsonl", [MISMATCH, NO_PLACEHOLDER, STATEFUL, CONSISTENT])

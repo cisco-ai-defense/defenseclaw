@@ -37,6 +37,7 @@ func armAddDuringReprotect(t *testing.T, folder string, add func()) {
 // DefenseClaw does not move aside (an administrator's) refuses the folder by
 // name, and the change that was made is still reported.
 func TestSafeTransactionHandlesAFileAddedBetweenTheCheckAndTheStamp(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range vendorFolderCases() {
 		if !tc.siblings {
 			continue
@@ -119,6 +120,7 @@ func TestSafeTransactionHandlesAFileAddedBetweenTheCheckAndTheStamp(t *testing.T
 // put right by one Setup call. The inspection stops at the first weak folder
 // of a path, so the heal walks the path again until nothing is weak.
 func TestReprotectRecordedVendorFoldersHealsAWeakParentAndAWeakPolicyFolderInOnePass(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range vendorFolderCases() {
 		if tc.connector != ConnectorCopilot {
 			continue
@@ -151,6 +153,7 @@ func TestReprotectRecordedVendorFoldersHealsAWeakParentAndAWeakPolicyFolderInOne
 // gives no stale hook entry, even when the file behind it names DefenseClaw
 // and another account can change it; the same file in a plain folder does.
 func TestKeptUntrustedPolicyFilesSkipsALinkedVendorFolder(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range vendorFolderCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			pinReclaimStandalone(t, true)

@@ -136,28 +136,41 @@ func TestAPrereleaseComesBeforeItsRelease(t *testing.T) {
 // TestManagedVersionPinFloor covers exact pins and ranges in both managed
 // install modes. A range ending at the floor has no usable release.
 func TestManagedVersionPinFloor(t *testing.T) {
+	// An exact pin below the floor moves to the release setup installs, or,
+	// in prerequisite mode, to the floor the administrator's packages must
+	// meet (rel-1-0-6:GAP-0608). Red at 0.1.6/0.1.6, where the two agreed.
+	if InstallerVersion == SupportedMin {
+		t.Fatalf("InstallerVersion %s equals SupportedMin: the prerequisite rows below do not tell the modes apart", InstallerVersion)
+	}
 	for _, tc := range []struct {
 		pin      string
+		setup    bool
 		want     string
 		raised   bool
 		possible bool
 	}{
-		{"0.1.3", InstallerVersion, true, true},
-		{"0.1.1", InstallerVersion, true, true},
-		{"0.1.5", InstallerVersion, true, true},
-		{"0.01.5", InstallerVersion, true, true},
+		{"0.1.3", true, InstallerVersion, true, true},
+		{"0.1.1", true, InstallerVersion, true, true},
+		{"0.1.5", true, InstallerVersion, true, true},
+		{"0.01.5", true, InstallerVersion, true, true},
+		{"0.1.3", false, SupportedMin, true, true},
+		{"0.1.5", false, SupportedMin, true, true},
+		{"0.01.5", false, SupportedMin, true, true},
 		// A prerelease of SupportedMin runs no sandbox either.
-		{"0.1.5-pre.3", InstallerVersion, true, true},
-		{"0.1.6-pre.1", InstallerVersion, true, true},
-		{"0.1.6", "0.1.6", false, true},
-		{"0.1.7", "0.1.7", false, true},
-		{"", "", false, true},
-		{">=0.1.1 <0.2.0", ">=0.1.6 <0.2.0", true, true},
-		{">=0.1.6 <0.2.0", ">=0.1.6 <0.2.0", false, true},
-		{">=0.1.1 <0.1.6", ">=0.1.1 <0.1.6", false, false},
+		{"0.1.5-pre.3", true, InstallerVersion, true, true},
+		{"0.1.6-pre.1", true, InstallerVersion, true, true},
+		{"0.1.6-pre.1", false, SupportedMin, true, true},
+		{"0.1.6", true, "0.1.6", false, true},
+		{"0.1.6", false, "0.1.6", false, true},
+		{"0.1.7", true, "0.1.7", false, true},
+		{"", true, "", false, true},
+		{">=0.1.1 <0.2.0", true, ">=0.1.6 <0.2.0", true, true},
+		{">=0.1.1 <0.2.0", false, ">=0.1.6 <0.2.0", true, true},
+		{">=0.1.6 <0.2.0", true, ">=0.1.6 <0.2.0", false, true},
+		{">=0.1.1 <0.1.6", false, ">=0.1.1 <0.1.6", false, false},
 	} {
-		if got, raised, possible := ManagedVersionPin(tc.pin); got != tc.want || raised != tc.raised || possible != tc.possible {
-			t.Errorf("ManagedVersionPin(%q) = %q, %v, %v; want %q, %v, %v", tc.pin, got, raised, possible, tc.want, tc.raised, tc.possible)
+		if got, raised, possible := ManagedVersionPin(tc.pin, tc.setup); got != tc.want || raised != tc.raised || possible != tc.possible {
+			t.Errorf("ManagedVersionPin(%q, setup=%v) = %q, %v, %v; want %q, %v, %v", tc.pin, tc.setup, got, raised, possible, tc.want, tc.raised, tc.possible)
 		}
 	}
 }
@@ -183,9 +196,9 @@ func TestProvisioningTimedOut(t *testing.T) {
 // TestInstallerPin: setup installs InstallerVersion with the script of its
 // tag, whose digest is pinned, from inside the supported window; the advice names it.
 func TestInstallerPin(t *testing.T) {
-	if InstallerVersion != "0.1.6" || InstallerTag != "v"+InstallerVersion ||
-		InstallerURL != "https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.6/install.sh" ||
-		InstallerSHA256 != "04c1a437d4a4fc11930d75a336fc4f52bf0c95251e8469c306e407e203769ae7" {
+	if InstallerVersion != "0.1.9" || InstallerTag != "v"+InstallerVersion ||
+		InstallerURL != "https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.9/install.sh" ||
+		InstallerSHA256 != "6f64d77d289f7859868119bcb7d0617804b8687dd43010b0a3cadf95e2f44cd4" {
 		t.Fatalf("installer pin = %s %s %s", InstallerTag, InstallerURL, InstallerSHA256)
 	}
 	if v := mustParse(InstallerVersion); CheckSupported(v) != nil || v.Compare(mustParse(LegacyMin)) < 0 {
@@ -203,8 +216,8 @@ func TestInstallerPin(t *testing.T) {
 // checks it against that digest, without fetching a checksum file.
 func TestVMDriverDigestsArePinnedForTheInstallerRelease(t *testing.T) {
 	want := map[string]string{
-		"amd64": "855fdf50b9f1200a6fafd1474b725adff3e7bfe9f787252cdec01c16e90d717c",
-		"arm64": "f12c877d290638f67c3e54b1faed94a50b27f6404200b44c195e6dded6b9a994",
+		"amd64": "87bd26e5f49acdc4c6165aa463ad3964c40d5ef066125f99956f7e8eea0a0f65",
+		"arm64": "3d4a95329550472477ad1f5c108b10de194490e3404d2261e5556201a0d2d33d",
 	}
 	for goarch, digest := range want {
 		archive := vmDriverArchive(goarch)
@@ -331,6 +344,26 @@ func TestCheckSupportedWindow(t *testing.T) {
 		}
 		if strings.HasPrefix(want, "upgrade") && (strings.Contains(err.Error(), "remove") || strings.Contains(err.Error(), "destroy")) {
 			t.Errorf("%s message asks for a cleanup the installer does not need: %q", v, err)
+		}
+	}
+}
+
+// TestMicroVMStartsOnMac (GAP-1775): MicroVM sandboxes start on a Mac from
+// OpenShell 0.1.9; 0.1.6 to 0.1.8 and a prerelease of 0.1.9 are still refused
+// by the guest-root check, an empty version is the release setup installs.
+func TestMicroVMStartsOnMac(t *testing.T) {
+	for v, want := range map[string]bool{
+		"":              InstallerVersion == MicroVMStartsOnMacMin || mustParse(InstallerVersion).Compare(mustParse(MicroVMStartsOnMacMin)) > 0,
+		"0.1.6":         false,
+		"0.1.8":         false,
+		"0.1.9-pre.1":   false,
+		"0.1.9":         true,
+		"v0.1.9":        true,
+		"0.1.10":        true,
+		"not-a-version": false,
+	} {
+		if got := MicroVMStartsOnMac(v); got != want {
+			t.Errorf("MicroVMStartsOnMac(%q) = %t, want %t", v, got, want)
 		}
 	}
 }

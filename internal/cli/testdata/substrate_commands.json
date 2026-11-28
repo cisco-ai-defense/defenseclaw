@@ -6,11 +6,73 @@
     "long": "Run Claude Code, Codex and other coding agents in a Kubernetes cluster that runs\nAgent Substrate, with DefenseClaw guarding every tool call, model call and network\nrequest the same way it does on a laptop. The agent works on a copy of your folder\ninside a sandbox in the cluster; no keys are in it. It keeps running when you\ndetach, and you can come back from any machine.\n\nSign in once with \"defenseclaw substrate login\", then run \"defenseclaw substrate run claude\"\nin a project folder. These commands need no local DefenseClaw install."
   },
   {
+    "path": "substrate admin",
+    "use": "admin",
+    "short": "Administer people's access to the cluster (administrators)"
+  },
+  {
+    "path": "substrate admin revoke",
+    "use": "revoke",
+    "short": "End every sign-in of a person, list the ended ones, or lift an end",
+    "long": "--user PERSON ends every token of that person issued before now, on every device, and closes their open\nterminals (PERSON is a principal such as bob@example.com, or issuer#subject to end the sign-ins of a person who\nhas not signed in yet). A refresh token the person holds can still get new tokens from the sign-in server: to\nlock someone out, also end their sessions there. --list shows the people whose sign-ins are ended. --lift --user\nPERSON removes an end early; it is audited.",
+    "flags": [
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false",
+        "usage": "same as --output json"
+      },
+      {
+        "name": "lift",
+        "type": "bool",
+        "default": "false",
+        "usage": "remove the end of --user's sign-ins early"
+      },
+      {
+        "name": "list",
+        "type": "bool",
+        "default": "false",
+        "usage": "list the people whose sign-ins are ended"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text",
+        "usage": "output format: text or json",
+        "metavar": "FORMAT"
+      },
+      {
+        "name": "reason",
+        "type": "string",
+        "usage": "why (one line, up to 256 characters; kept with the end and audited)",
+        "metavar": "TEXT"
+      },
+      {
+        "name": "user",
+        "type": "string",
+        "usage": "the person: a principal (bob@example.com) or issuer#subject"
+      }
+    ]
+  },
+  {
     "path": "substrate approvals",
     "use": "approvals",
     "short": "List what your agents are waiting for you to approve",
-    "long": "Lists the questions your agents asked that nobody has answered yet. Answer with\n\"defenseclaw substrate approve ID\" or \"defenseclaw substrate reject ID\". An agent attached to your\nterminal shows the same question on its last line. An unattended run (--task, --batch)\ndenies its asks unless its profile sets unattended_asks: queue; a queued ask is marked\n\"unattended\" in the RUN column and is denied when its time runs out.",
+    "long": "Lists the questions your agents asked that nobody has answered yet. Answer with\n\"defenseclaw substrate approve ID\" or \"defenseclaw substrate reject ID\". An agent attached to your\nterminal shows the same question on its last line. An unattended run (--task, --batch)\ndenies its asks unless its profile sets unattended_asks: queue; a queued ask is marked\n\"unattended\" in the RUN column and is denied when its time runs out.\n\nWith --standing it lists the approvals given with \"approve --always\" that are still in force:\nthe agent, the host, what the approval covers, who approved it and when. Take one back with\n\"defenseclaw substrate revoke NAME HOST\".",
     "flags": [
+      {
+        "name": "all",
+        "type": "bool",
+        "default": "false",
+        "usage": "every person's, not only yours (administrators only)"
+      },
       {
         "name": "context",
         "type": "string",
@@ -30,6 +92,12 @@
         "default": "text",
         "usage": "output format: text or json",
         "metavar": "FORMAT"
+      },
+      {
+        "name": "standing",
+        "type": "bool",
+        "default": "false",
+        "usage": "list the approvals given with --always that are still in force"
       }
     ]
   },
@@ -37,7 +105,7 @@
     "path": "substrate approve",
     "use": "approve \u003cid\u003e",
     "short": "Approve a waiting question",
-    "long": "Approves one question from \"defenseclaw substrate approvals\" once, or with --always for every later run that asks the same thing.",
+    "long": "Approves one question from \"defenseclaw substrate approvals\" for one request: the next request asks again. With --always it covers every later request of the agent that asks the same thing.",
     "args": [
       {
         "name": "id",
@@ -49,7 +117,7 @@
         "name": "always",
         "type": "bool",
         "default": "false",
-        "usage": "keep this approval for later runs"
+        "usage": "keep this approval for every later request of the agent"
       },
       {
         "name": "context",
@@ -189,7 +257,7 @@
     "path": "substrate checkpoint",
     "use": "checkpoint \u003cname\u003e",
     "short": "Save the agent's work so you can undo back to it",
-    "long": "Saves a restore point of the agent's folder inside the agent. \"defenseclaw substrate undo NAME\"\ngoes back to the last one. With --every 1h it saves one on that schedule for as long as the command runs.",
+    "long": "Saves a restore point of the agent's folder inside the agent, then has the cluster store a snapshot of\nthe agent (it pauses for a few seconds), so the restore point survives a crash of the agent's worker.\n\"defenseclaw substrate undo NAME\" goes back to the last one; after a crash it first brings the agent back to\nthat snapshot. With --every 1h it saves one on that schedule for as long as the command runs.",
     "example": "defenseclaw substrate checkpoint fix-tests-7f3a\ndefenseclaw substrate checkpoint fix-tests-7f3a --every 1h",
     "args": [
       {
@@ -231,7 +299,7 @@
     "path": "substrate connect",
     "use": "connect \u003cname\u003e",
     "short": "Come back to an agent and put it on this terminal",
-    "long": "Attaches your terminal to a running or suspended agent from any machine you are signed in on.\nA suspended agent wakes in about a fifth of a second and shows the screen as you left it. Press Ctrl-]\nto detach again. If the connection drops, it reconnects by itself. NAME is the name \"defenseclaw substrate list\"\nshows, or the --name you gave run when only one agent has it.",
+    "long": "Attaches your terminal to a running or suspended agent from any machine you are signed in on.\nA suspended agent wakes in about a fifth of a second and shows the screen as you left it. Press Ctrl-]\nto detach again. If the connection drops, it reconnects by itself. NAME is the name \"defenseclaw substrate list\"\nshows, or the --name you gave run when only one agent has it.\n\nWith --mcp NAME=COMMAND (Preview, repeatable) the agent can use an MCP server that runs on this computer, while this\ncommand is attached. See \"defenseclaw substrate run --help\". An agent that is already running reads its MCP servers\nwhen it starts, so start a new session in it to see NAME.",
     "example": "defenseclaw substrate connect fix-tests-7f3a\ndefenseclaw substrate connect fix-tests",
     "args": [
       {
@@ -245,6 +313,17 @@
         "type": "string",
         "usage": "cluster to use (default: the one you signed in to last)",
         "metavar": "NAME"
+      },
+      {
+        "name": "key-replay",
+        "type": "string",
+        "usage": "keys typed while the connection is down: ask (show them, Enter sends), on (send) or off (drop); only tightens the cluster setting"
+      },
+      {
+        "name": "mcp",
+        "type": "stringArray",
+        "default": "[]",
+        "usage": "(Preview) start COMMAND on this computer and offer it to the agent as the MCP server NAME while this command is attached (repeatable)"
       },
       {
         "name": "no-asks",
@@ -265,7 +344,7 @@
     "path": "substrate delete",
     "use": "delete [name...]",
     "short": "Delete agents with their work and snapshots",
-    "long": "Deletes the named agents (or every agent of --batch) and the snapshots the cluster\nholds for them. Pull the changes first with \"defenseclaw substrate pull\": what is not pulled\nis gone.",
+    "long": "Deletes the named agents (or every agent of --batch), the snapshots the cluster\nholds for them and the checkpoints saved inside them. The question and the output say how\nmany snapshots each agent had. Pull the changes first with \"defenseclaw substrate pull\":\nwhat is not pulled is gone.",
     "args": [
       {
         "name": "name",
@@ -299,7 +378,7 @@
     "path": "substrate doctor",
     "use": "doctor",
     "short": "Check that this computer can run agents in the cluster",
-    "long": "Checks, from this computer, everything a run needs: the cluster is set up here, its admin address answers\nover TLS, you are signed in and the cluster accepts it, the sign-in server matches, attach through the gateway works and\nyou have what it asks for, your sign-in can be kept safely, and (for administrators, when the cluster uses signed policy\nbundles) every stage's bundle still verifies. Nothing needs to be installed here, and nothing in the\ncluster changes.\n\nAdministrators add the cluster's own checks (version, issuer, snapshot bucket, access policies, egress callout, router\nclients, routes, API access) with --install-file, the SubstrateInstall file you gave ate-setup: they are read with\nkubectl and your own cloud credentials, the same as defenseclaw substrate verify. --cluster without it says what is missing.\n\nThe last line is \"ready for agents\" when no check failed. Otherwise it is \"not ready\" and each failed check says how to fix\nit, and the exit code is 1.",
+    "long": "Checks, from this computer, everything a run needs: the cluster is set up here, its admin address answers\nover TLS, you are signed in and the cluster accepts it, the sign-in server matches, attach through the gateway works and\nyou have what it asks for, your sign-in can be kept safely, the cluster can check ended sign-ins (for administrators: whether\nit ends them at all), and (for administrators, when the cluster uses signed policy bundles) every stage's bundle still verifies. Nothing needs to be installed here, and nothing in the\ncluster changes.\n\nAdministrators add the cluster's own checks (version, issuer, snapshot bucket, access policies, egress callout, router\nclients, routes, API access) with --install-file, the SubstrateInstall file you gave ate-setup: they are read with\nkubectl and your own cloud credentials, the same as defenseclaw substrate verify. --cluster without it says what is missing.\n\nThe last line is \"ready for agents\" when no check failed and the cluster components (gateway, leader, controller,\ncallout) were checked, which needs --install-file. Without it the last line says that the checks on this computer pass\nand that the cluster components were not checked. Otherwise it is \"not ready\" and each failed check says how to fix\nit, and the exit code is 1.",
     "example": "defenseclaw substrate doctor\ndefenseclaw substrate doctor --cluster --json",
     "flags": [
       {
@@ -552,9 +631,15 @@
   {
     "path": "substrate logout",
     "use": "logout",
-    "short": "Sign out of a cluster and forget the stored sign-in",
-    "long": "Removes your stored sign-in for the cluster and, where the sign-in server supports it, ends it there too. Your agents keep running; sign in again to reach them.",
+    "short": "Sign out of a cluster: end the sign-in there and forget it",
+    "long": "Ends your sign-in on the cluster, so a copy of its token stops working there, then ends it at the sign-in server\nwhere that server supports it, and removes the stored sign-in. --all ends every token of yours issued before now, on\nevery device, and closes their open terminals. An end covers tokens already issued: a refresh token held on another\ndevice or in a copied store can still get new ones, so also end your sessions at the sign-in server (ask your\nadministrator). Your agents keep running; sign in again to reach them.",
     "flags": [
+      {
+        "name": "all",
+        "type": "bool",
+        "default": "false",
+        "usage": "end every token of yours issued before now, on every device"
+      },
       {
         "name": "context",
         "type": "string",
@@ -639,12 +724,13 @@
   },
   {
     "path": "substrate policy explain",
-    "use": "explain \u003cname\u003e",
-    "short": "Explain the rules and recent decisions for one agent",
+    "use": "explain [name]",
+    "short": "Explain the rules and recent decisions for one agent, or the profile you get",
+    "long": "With an agent name, explains the rules and recent decisions for that agent. With no name, explains the profile you get\nfor a new agent: the profile and where it came from (the profile assignment that selected you, or default_profile when none\ndid), default_profile, and the assignments that were checked first and did not select you (by place and the selector that\nfailed, never another person's group or account).",
     "args": [
       {
         "name": "name",
-        "required": true
+        "required": false
       }
     ],
     "flags": [
@@ -781,11 +867,51 @@
     ]
   },
   {
+    "path": "substrate port",
+    "use": "port \u003cname\u003e \u003cport[:local]\u003e...",
+    "short": "Open an agent's dev server in your browser (port forward)",
+    "long": "Forwards a port the agent's app listens on (127.0.0.1:PORT inside the agent) to 127.0.0.1:LOCAL on this\ncomputer, so you can open http://127.0.0.1:LOCAL in your browser. LOCAL is PORT unless you give PORT:LOCAL; when PORT\nis taken here, the next free port is used. The forward listens on 127.0.0.1 only and only you can open it. It stays\nin the foreground until you press Ctrl-C.\n\nPorts 1024-65535 can be forwarded, except the relay's own port; your administrator can allow fewer or turn port\nforwarding off. Every forward is recorded in the cluster's audit log. The forwarded app runs as \"localhost\" in your\nbrowser, like any local dev server: open only apps you trust there.",
+    "example": "defenseclaw substrate port web-3f2a 3000\ndefenseclaw substrate port web-3f2a 3000:8000 5173",
+    "args": [
+      {
+        "name": "name",
+        "required": true
+      },
+      {
+        "name": "port[:local]\u003e",
+        "required": true,
+        "many": true
+      }
+    ],
+    "flags": [
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false",
+        "usage": "same as --output json"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text",
+        "usage": "output format: text or json",
+        "metavar": "FORMAT"
+      }
+    ]
+  },
+  {
     "path": "substrate pull",
     "use": "pull \u003cname\u003e",
     "short": "Review what the agent changed and bring it home",
-    "long": "Reads the agent's work back to this machine and shows what changed, with the files that need a\ncareful look first (scripts, CI and hook files, dotfiles, secrets in the text, large or binary files,\nlinks that leave the folder, agent settings, MCP servers, shell startup files). Nothing touches your folder\nuntil you choose: --apply writes the changes into the folder, --branch NAME puts them on a new git branch,\n--patch-out FILE writes a patch.\n\nWhen a change can run code on this machine, --apply asks first (the default answer is no). --yes takes\nthat safe answer, so --apply --yes writes nothing and says why; after you reviewed the flagged files,\n--allow-flagged writes them too.",
-    "example": "defenseclaw substrate pull fix-tests-7f3a\ndefenseclaw substrate pull fix-tests-7f3a --branch agent/fix-tests",
+    "long": "Reads the agent's work back to this machine and shows what changed, with the files that need a\ncareful look first (scripts, CI and hook files, dotfiles, secrets in the text, large or binary files,\nlinks that leave the folder, agent settings, MCP servers, shell startup files). Nothing touches your folder\nuntil you choose: --apply writes the changes into the folder, --branch NAME puts them on a new git branch,\n--patch-out FILE writes a patch. --push-branch NAME (Preview) pushes the agent's work from inside the\nagent to its checkout's origin as a new branch, with the credential the cluster adds for that host; it\nasks first unless your profile allows it, and never forces.\n\nWhen a change can run code on this machine, --apply asks first (the default answer is no). --yes takes\nthat safe answer, so --apply --yes writes nothing and says why; after you reviewed the flagged files,\n--allow-flagged writes them too.\n\nOn the computer you started the agent from, it compares the changes with the folder you sent. On\nanother computer, run it in a git checkout of that folder: it compares the agent's work with the\ncheckout's last commit, so files sent that were not committed show as added. That computer cannot know\nwhat run left out with --exclude, so repeat it (--exclude GLOB, once for each) or say there was none\n(--no-exclude) before --apply or --branch; until then they refuse, and --patch-out still works.",
+    "example": "defenseclaw substrate pull fix-tests-7f3a\ndefenseclaw substrate pull fix-tests-7f3a --branch agent/fix-tests\ndefenseclaw substrate pull fix-tests-7f3a --push-branch agent/fix-tests",
     "args": [
       {
         "name": "name",
@@ -797,7 +923,7 @@
         "name": "allow-flagged",
         "type": "bool",
         "default": "false",
-        "usage": "with --apply: also write the files flagged as able to run code (review them first)"
+        "usage": "with --apply or --push-branch: also take the flagged files (review them first)"
       },
       {
         "name": "apply",
@@ -824,10 +950,23 @@
         "usage": "print the full diff"
       },
       {
+        "name": "exclude",
+        "type": "stringArray",
+        "default": "[]",
+        "usage": "on another computer: a path or glob run was given with --exclude, held back on both sides (repeatable)",
+        "metavar": "GLOB"
+      },
+      {
         "name": "json",
         "type": "bool",
         "default": "false",
         "usage": "same as --output json"
+      },
+      {
+        "name": "no-exclude",
+        "type": "bool",
+        "default": "false",
+        "usage": "on another computer: run was given no --exclude"
       },
       {
         "name": "output",
@@ -844,6 +983,17 @@
         "metavar": "FILE"
       },
       {
+        "name": "push-branch",
+        "type": "string",
+        "usage": "push the agent's work to its origin as a new branch of this name (Preview)"
+      },
+      {
+        "name": "restore-secret-lines",
+        "type": "bool",
+        "default": "false",
+        "usage": "in files uploaded with credentials replaced, keep the agent's changed lines with the value put back (default: keep your line)"
+      },
+      {
         "name": "timeout",
         "type": "duration",
         "default": "0s",
@@ -856,6 +1006,118 @@
         "type": "bool",
         "default": "false",
         "usage": "take the safe default at each question"
+      }
+    ]
+  },
+  {
+    "path": "substrate push",
+    "use": "push \u003cname\u003e [path...]",
+    "short": "Send your newer changes into a running agent (Preview)",
+    "long": "Sends the changes you made in this folder since the last send (the run or an earlier push) into the\nagent's copy. Paths limit it to those files or folders. The rules of run apply: secret files are held\nback (share one with --unmask), --exclude holds more back, and the cluster's upload limit counts.\n\nBefore it writes, it saves a restore point: \"defenseclaw substrate undo NAME --to N\" goes back to it.\nWhen the agent also changed a file you changed, nothing is sent and the files are listed (exit 3).\nThen choose: --mine sends yours (the agent's version stays in the restore point), --theirs keeps the\nagent's and sends the rest, and --patch-out FILE keeps the agent's and writes your change to FILE.\nWhen sending yours would remove an agent file or folder in its way (a file where you made a folder, or\na folder where you made a file), --mine names it and sends nothing; add --replace to send yours anyway.\nWhat you send is not shown as the agent's work in a later pull. This command is a Preview.",
+    "example": "defenseclaw substrate push fix-tests-7f3a\ndefenseclaw substrate push fix-tests-7f3a src/app.py --mine",
+    "args": [
+      {
+        "name": "name",
+        "required": true
+      },
+      {
+        "name": "path",
+        "required": false,
+        "many": true
+      }
+    ],
+    "flags": [
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "dry-run",
+        "type": "bool",
+        "default": "false",
+        "usage": "show what would be sent and the conflicts; send nothing"
+      },
+      {
+        "name": "exclude",
+        "type": "stringArray",
+        "default": "[]",
+        "usage": "hold a path or glob back too (repeatable, for example 'data/**')",
+        "metavar": "GLOB"
+      },
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false",
+        "usage": "same as --output json"
+      },
+      {
+        "name": "mine",
+        "type": "bool",
+        "default": "false",
+        "usage": "on a conflict, send your version (the agent's stays in the restore point)"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text",
+        "usage": "output format: text or json",
+        "metavar": "FORMAT"
+      },
+      {
+        "name": "patch-out",
+        "type": "string",
+        "usage": "on a conflict, keep the agent's version and write your change to this file",
+        "metavar": "FILE"
+      },
+      {
+        "name": "replace",
+        "type": "bool",
+        "default": "false",
+        "usage": "with --mine, also remove an agent file or folder in the way of yours (it stays in the restore point)"
+      },
+      {
+        "name": "theirs",
+        "type": "bool",
+        "default": "false",
+        "usage": "on a conflict, keep the agent's version and send the rest"
+      },
+      {
+        "name": "unmask",
+        "type": "stringArray",
+        "default": "[]",
+        "usage": "send a held-back secret file or pattern anyway (repeatable)",
+        "metavar": "GLOB"
+      }
+    ]
+  },
+  {
+    "path": "substrate recover",
+    "use": "recover \u003cname\u003e",
+    "short": "Let the agent's relay get a new certificate; bring a crashed agent back",
+    "long": "Clears the cluster's record of the agent's relay certificate, so the relay's next request\ngets a first certificate and no certificate issued before it can renew. Use it when\n\"defenseclaw substrate connect\" fails because the relay restarted inside the agent, or after an\nemergency relay CA rotation, while substrate.relay_cert_reissue is refuse (the managed default).\nA crashed agent is also brought back to its last snapshot, as \"defenseclaw substrate undo\" does;\nwhat it did after that snapshot is lost, so it asks first. Only the agent's owner or an\nadministrator can run it.",
+    "example": "defenseclaw substrate recover fix-tests-7f3a",
+    "args": [
+      {
+        "name": "name",
+        "required": true
+      }
+    ],
+    "flags": [
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "yes",
+        "shorthand": "y",
+        "type": "bool",
+        "default": "false",
+        "usage": "do not ask"
       }
     ]
   },
@@ -886,11 +1148,36 @@
     ]
   },
   {
+    "path": "substrate revoke",
+    "use": "revoke \u003cname\u003e \u003chost\u003e",
+    "short": "Take back an approval given with --always",
+    "long": "Takes back what \"defenseclaw substrate approve --always\" allowed for one agent and host: the agent's\nnext request to the host asks you again. The cluster drops the host from the agent's network rules\nwithin about a minute. List the approvals in force with \"defenseclaw substrate approvals --standing\".\nAn administrator names another person's agent as ATESPACE/NAME; the revoke is recorded under their\nown name.",
+    "example": "defenseclaw substrate revoke fix-tests-7f3a registry.example.test",
+    "args": [
+      {
+        "name": "name",
+        "required": true
+      },
+      {
+        "name": "host",
+        "required": true
+      }
+    ],
+    "flags": [
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      }
+    ]
+  },
+  {
     "path": "substrate run",
     "use": "run \u003cagent\u003e [agent_args...]",
     "short": "Run a coding agent in the cluster on a copy of this folder",
-    "long": "Starts the coding agent in a sandbox in the cluster, on a copy of the current folder (secret\nfiles such as .env and keys are held back), and puts the agent on your terminal. The agent is claude,\ncodex, copilot, opencode, hermes, kiro, antigravity, cursor-agent, amp or devin. The agents that sign in to a\nvendor account (kiro, antigravity, cursor-agent, amp, devin) run with a warning in open source, because the\nsign-in token stays in the agent and its snapshots; a managed cluster refuses them. A banner shows the guard profile, model, allowed hosts and how to leave. When the\nguard asks before a step, the question appears on the last line: press Ctrl-\\ to answer once, always or deny.\n\nPress Ctrl-] to detach; the agent keeps running and suspends when idle. Come back from any machine with\n\"defenseclaw substrate connect NAME\". Bring the changes home with \"defenseclaw substrate pull NAME\".\n\nWith --task the agent runs headless without you: asks are denied, or queued for approval when the profile's\nunattended_asks is queue, and the run is checked as strictly as an unattended job. Add --detach to leave it\nrunning and follow it with \"defenseclaw substrate logs -f NAME\".\nWith --batch FILE every task gets its own agent on the same folder; --parallel limits how many run at once.\nWith --clone URL the agent starts from a repository instead of a copy of the folder. Arguments after -- go\nto the agent.",
-    "example": "defenseclaw substrate run claude\ndefenseclaw substrate run codex --task \"fix the failing tests\" --detach\ndefenseclaw substrate run claude --batch tasks.yaml --parallel 5\ndefenseclaw substrate run claude --clone https://git.example.test/team/app.git",
+    "long": "Starts the coding agent in a sandbox in the cluster, on a copy of the current folder (secret\nfiles such as .env and keys are held back), and puts the agent on your terminal. The agent is claude,\ncodex, copilot, opencode, hermes, kiro, antigravity, cursor-agent, amp or devin. The agents that sign in to a\nvendor account (kiro, antigravity, cursor-agent, amp, devin) start in open source only after you say yes to a\nwarning (or pass --yes), because the sign-in token stays in the agent and its snapshots; a managed cluster refuses them. A banner shows the guard profile, model, allowed hosts and how to leave. When the\nguard asks before a step, the question appears on the last line: press Ctrl-\\ to answer once, always or deny.\n\nPress Ctrl-] to detach; the agent keeps running and suspends when idle. Come back from any machine with\n\"defenseclaw substrate connect NAME\". Bring the changes home with \"defenseclaw substrate pull NAME\".\n\nWith --task the agent runs headless without you: asks are denied, or queued for approval when the profile's\nunattended_asks is queue, and the run is checked as strictly as an unattended job. Add --detach to leave it\nrunning and follow it with \"defenseclaw substrate logs -f NAME\".\nWith --batch FILE every task gets its own agent on the same folder; --parallel limits how many run at once.\nWith --clone URL the agent starts from a repository instead of a copy of the folder. With --clone . (Preview)\nit starts from this checkout: the agent fetches the branch's history from its remote, and only the unpushed\ncommits and uncommitted changes are sent from here. Arguments after -- go to the agent.\n\nWith --mcp NAME=COMMAND (Preview, repeatable) the agent can use an MCP server that runs on this computer. This command\nstarts COMMAND when the agent opens the server NAME and carries its messages through the cluster while this command is\nattached; every tool call goes through the cluster's guard first. COMMAND is split like a shell would split it, with\nquotes and backslashes only, and runs without a shell. NAME is a-z, 0-9, _ and -, up to 32 characters. --mcp does not\ngo with --detach or --batch.",
+    "example": "defenseclaw substrate run claude\ndefenseclaw substrate run codex --task \"fix the failing tests\" --detach\ndefenseclaw substrate run claude --batch tasks.yaml --parallel 5\ndefenseclaw substrate run claude --clone https://git.example.test/team/app.git\ndefenseclaw substrate run claude --clone .\ndefenseclaw substrate run claude --mcp \"files=npx -y @modelcontextprotocol/server-filesystem .\"",
     "args": [
       {
         "name": "agent",
@@ -912,7 +1199,7 @@
       {
         "name": "clone",
         "type": "string",
-        "usage": "start from this repository instead of a copy of the folder",
+        "usage": "start from this repository instead of a copy of the folder; . for this checkout with its history (Preview)",
         "metavar": "URL"
       },
       {
@@ -932,7 +1219,7 @@
         "name": "exclude",
         "type": "stringArray",
         "default": "[]",
-        "usage": "hold a path or pattern back from the copy (repeatable)",
+        "usage": "exclude a path or glob from the copy (repeatable, for example 'data/**')",
         "metavar": "GLOB"
       },
       {
@@ -948,10 +1235,21 @@
         "usage": "keep the agent after a finished --task (default: it stays until you delete it)"
       },
       {
+        "name": "key-replay",
+        "type": "string",
+        "usage": "keys typed while the connection is down: ask (show them, Enter sends), on (send) or off (drop); only tightens the cluster setting"
+      },
+      {
         "name": "max-upload-mb",
         "type": "int",
         "default": "0",
-        "usage": "refuse a copy larger than this many MB (default 500)"
+        "usage": "lower the cluster upload limit for this copy, in MiB"
+      },
+      {
+        "name": "mcp",
+        "type": "stringArray",
+        "default": "[]",
+        "usage": "(Preview) start COMMAND on this computer and offer it to the agent as the MCP server NAME while this command is attached (repeatable)"
       },
       {
         "name": "name",
@@ -996,6 +1294,12 @@
         "type": "string",
         "usage": "with --clone, the branch, tag or commit",
         "metavar": "REF"
+      },
+      {
+        "name": "remote-dir",
+        "type": "string",
+        "usage": "where in the agent to put the copy (default: the image's working folder)",
+        "hidden": true
       },
       {
         "name": "secret",
@@ -1048,7 +1352,7 @@
         "shorthand": "y",
         "type": "bool",
         "default": "false",
-        "usage": "answer questions with their defaults"
+        "usage": "say yes to the vendor sign-in warning without asking"
       }
     ]
   },
@@ -1057,6 +1361,96 @@
     "use": "secrets",
     "short": "Manage the secrets your agents may use (values never enter an agent)",
     "long": "A secret is a key an agent can use without ever seeing it: the cluster adds the real value\nto requests to the hosts the secret is bound to. These commands list the names you can use,\nstore your own, and remove or test them. Values are never shown."
+  },
+  {
+    "path": "substrate secrets add",
+    "use": "add \u003cname\u003e",
+    "short": "Add a secret of your own for one host, under a template",
+    "long": "Creates your own secret NAME for HOST under TEMPLATE (see secrets templates) and stores its\nvalue. A host the template covers is used from your agents' next request; any other host waits\nuntil an administrator approves it. For a basic template (git hosts, PyPI) give only the token:\nthe cluster adds the user name. generic-basic needs --user.\n\nThe value comes from exactly one source: the terminal without echo (no flag), --from-gh (the\nGitHub CLI's sign-in), --from-keychain SERVICE (macOS keychain), --from-op op://vault/item/field\n(1Password CLI), --from-file PATH, --stdin or --from-env VAR. It is never put on a command line\nand never printed.",
+    "example": "defenseclaw substrate secrets add gl-work --template gitlab --host gitlab.com --from-op op://eng/gitlab/token\ndefenseclaw substrate secrets add nexus --template generic-basic --host nexus.corp.example --user ci-bot --from-file ~/.nexus-token",
+    "args": [
+      {
+        "name": "name",
+        "required": true
+      }
+    ],
+    "flags": [
+      {
+        "name": "account",
+        "type": "string",
+        "usage": "with --from-keychain: the item's account"
+      },
+      {
+        "name": "allow-echo",
+        "type": "bool",
+        "default": "false",
+        "usage": "allow a host that returns the requests it gets (only when your administrator allows it)"
+      },
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "expires",
+        "type": "string",
+        "usage": "when the secret stops being used: 90d, 12h or a date (2027-01-31); at most 400 days"
+      },
+      {
+        "name": "from-env",
+        "type": "string",
+        "usage": "read the value from this environment variable"
+      },
+      {
+        "name": "from-file",
+        "type": "string",
+        "usage": "read the value from this file"
+      },
+      {
+        "name": "from-gh",
+        "type": "bool",
+        "default": "false",
+        "usage": "read the value from the GitHub CLI's sign-in (gh auth token)"
+      },
+      {
+        "name": "from-keychain",
+        "type": "string",
+        "usage": "read the value from this macOS keychain item (its service name)"
+      },
+      {
+        "name": "from-op",
+        "type": "string",
+        "usage": "read the value from 1Password (op://vault/item/field)"
+      },
+      {
+        "name": "gh-host",
+        "type": "string",
+        "usage": "with --from-gh: the GitHub host to read the sign-in of (default: gh's own)"
+      },
+      {
+        "name": "host",
+        "type": "string",
+        "usage": "the one host the secret is for"
+      },
+      {
+        "name": "stdin",
+        "type": "bool",
+        "default": "false",
+        "usage": "read the value from standard input"
+      },
+      {
+        "name": "template",
+        "type": "string",
+        "usage": "the template to use (see secrets templates)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "user",
+        "type": "string",
+        "usage": "the user name for a basic template (generic-basic needs it)"
+      }
+    ]
   },
   {
     "path": "substrate secrets list",
@@ -1112,7 +1506,8 @@
         "name": "mine",
         "type": "bool",
         "default": "true",
-        "usage": "your own secret (the only kind this command acts on)"
+        "usage": "your own secret (the only kind this command acts on)",
+        "hidden": true
       },
       {
         "name": "yes",
@@ -1127,7 +1522,8 @@
     "path": "substrate secrets set",
     "use": "set \u003cname\u003e",
     "short": "Store one of your own secrets",
-    "long": "Stores the value for NAME, bound to the hosts your administrator allowed for it. The value\nis read from the terminal without echo, from standard input with --stdin, or from an environment\nvariable with --from-env VAR. It is never put on the command line.",
+    "long": "Stores the value for NAME, bound to the hosts your administrator allowed for it.\n\nThe value comes from exactly one source: the terminal without echo (no flag), --from-gh (the\nGitHub CLI's sign-in), --from-keychain SERVICE (macOS keychain), --from-op op://vault/item/field\n(1Password CLI), --from-file PATH, --stdin or --from-env VAR. It is never put on a command line\nand never printed.",
+    "example": "defenseclaw substrate secrets set GITHUB_TOKEN --from-gh\ndefenseclaw substrate secrets set GITLAB_TOKEN --from-op op://eng/gitlab/token\ndefenseclaw substrate secrets set NPM_TOKEN --from-keychain npm-publish",
     "args": [
       {
         "name": "name",
@@ -1135,6 +1531,11 @@
       }
     ],
     "flags": [
+      {
+        "name": "account",
+        "type": "string",
+        "usage": "with --from-keychain: the item's account"
+      },
       {
         "name": "context",
         "type": "string",
@@ -1147,10 +1548,37 @@
         "usage": "read the value from this environment variable"
       },
       {
+        "name": "from-file",
+        "type": "string",
+        "usage": "read the value from this file"
+      },
+      {
+        "name": "from-gh",
+        "type": "bool",
+        "default": "false",
+        "usage": "read the value from the GitHub CLI's sign-in (gh auth token)"
+      },
+      {
+        "name": "from-keychain",
+        "type": "string",
+        "usage": "read the value from this macOS keychain item (its service name)"
+      },
+      {
+        "name": "from-op",
+        "type": "string",
+        "usage": "read the value from 1Password (op://vault/item/field)"
+      },
+      {
+        "name": "gh-host",
+        "type": "string",
+        "usage": "with --from-gh: the GitHub host to read the sign-in of (default: gh's own)"
+      },
+      {
         "name": "mine",
         "type": "bool",
         "default": "true",
-        "usage": "your own secret (the only kind this command acts on)"
+        "usage": "your own secret (the only kind this command acts on)",
+        "hidden": true
       },
       {
         "name": "stdin",
@@ -1161,9 +1589,37 @@
     ]
   },
   {
+    "path": "substrate secrets templates",
+    "use": "templates",
+    "short": "List the templates you may use to add your own secrets",
+    "long": "Lists the templates your administrator approved for your own secrets: the hosts each one\ncovers without an approval and how the value goes into the request. Use one with secrets add.",
+    "flags": [
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false",
+        "usage": "same as --output json"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text",
+        "usage": "output format: text or json",
+        "metavar": "FORMAT"
+      }
+    ]
+  },
+  {
     "path": "substrate secrets test",
     "use": "test \u003cname\u003e",
-    "short": "Check that a secret is bound and the cluster can use it",
+    "short": "Check that a secret is stored and usable, and whether an agent gets it",
     "args": [
       {
         "name": "name",
@@ -1171,6 +1627,11 @@
       }
     ],
     "flags": [
+      {
+        "name": "agent",
+        "type": "string",
+        "usage": "also say whether this agent's policy carries the secret"
+      },
       {
         "name": "context",
         "type": "string",
@@ -1187,7 +1648,8 @@
         "name": "mine",
         "type": "bool",
         "default": "true",
-        "usage": "your own secret (the only kind this command acts on)"
+        "usage": "your own secret (the only kind this command acts on)",
+        "hidden": true
       },
       {
         "name": "output",
@@ -1203,8 +1665,8 @@
     "path": "substrate setup",
     "use": "setup",
     "short": "Add DefenseClaw's settings to the SubstrateInstall file (administrators)",
-    "long": "Reads the SubstrateInstall document you give to ate-setup and adds the settings DefenseClaw needs: the egress\ncallout, the router client the gateway attaches launchers through, and, only when you say your Substrate build has them,\nthe callout body opt-in and the long-stream timeouts. It refuses when Substrate already sends egress to another callout,\nand says what to do. Nothing here changes the cluster. With --issuer it reads, with kubectl when it can, the key set the\ngateway verifies actor tokens with (--keys-url, the idp Service by default) and warns when it does not answer.\n\nThe result is written next to the file as FILE.new (mode 0600) for you to read. With --yes it replaces the file and keeps\nthe old one as FILE.bak. With --dry-run it only shows the changes. With --remove it takes DefenseClaw's settings out again.\n\nWith --print-access-policies and --plan FILE it prints the access policies the install would write, as commands and\nmanifests a global owner can apply, and reads no install file.\n\nNext: run ate-setup deploy with the new file, then install the chart with helm install.",
-    "example": "defenseclaw substrate setup --install-file install.yaml --namespace defenseclaw --dry-run\ndefenseclaw substrate setup --install-file install.yaml --capability route-timeouts --yes\ndefenseclaw substrate setup --print-access-policies --plan plan.json",
+    "long": "Reads the SubstrateInstall document you give to ate-setup and adds the settings DefenseClaw needs: the egress\ncallout, the router client the gateway attaches launchers through, and, only when you say your Substrate build has them,\nthe callout body opt-in and the long-stream timeouts. It refuses when Substrate already sends egress to another callout,\nand says what to do. Nothing here changes the cluster. With --issuer it reads, with kubectl when it can, the key set the\ngateway verifies actor tokens with (--keys-url, the idp Service by default) and warns when it does not answer.\n\nThe result is written next to the file as FILE.new (mode 0600) for you to read. With --yes it replaces the file and keeps\nthe old one as FILE.bak. With --dry-run it only shows the changes. With --remove it takes DefenseClaw's settings out again.\n\nWith --print-access-policies and --plan FILE it prints the access policies the install would write, as commands and\nmanifests a global owner can apply, and reads no install file.\n\nNext: run ate-setup deploy with the new file, then install the chart with helm install.\n\nWith --overlay-only (also spelled --no-chart) the chart belongs to Argo CD or Flux, not to this command. It makes the same\nchecks and writes the same file, and then names the chart values the overlay assumes so the values in your repo can match.\nIt never runs helm. The next step is to commit the file and let ate-setup deploy apply it.",
+    "example": "defenseclaw substrate setup --install-file install.yaml --namespace defenseclaw --dry-run\ndefenseclaw substrate setup --install-file install.yaml --capability route-timeouts --yes\ndefenseclaw substrate setup --install-file install.yaml --overlay-only --issuer https://cluster-a.example --yes\ndefenseclaw substrate setup --print-access-policies --plan plan.json",
     "flags": [
       {
         "name": "callout-port",
@@ -1265,12 +1727,25 @@
         "usage": "the namespace DefenseClaw is installed in"
       },
       {
+        "name": "no-chart",
+        "type": "bool",
+        "default": "false",
+        "usage": "same as --overlay-only",
+        "hidden": true
+      },
+      {
         "name": "output",
         "shorthand": "o",
         "type": "string",
         "default": "text",
         "usage": "output format: text or json",
         "metavar": "FORMAT"
+      },
+      {
+        "name": "overlay-only",
+        "type": "bool",
+        "default": "false",
+        "usage": "GitOps: write the overlay only and name the chart values it assumes; Argo CD or Flux owns the chart"
       },
       {
         "name": "plan",
@@ -1398,6 +1873,53 @@
     ]
   },
   {
+    "path": "substrate sync",
+    "use": "sync \u003cname\u003e",
+    "short": "Keep sending your changes into a running agent while you work (Preview)",
+    "long": "Watches this folder and sends each change into the agent's copy, one way, until Ctrl-C, --for, or\nthe agent is deleted. It sends 1 second after the last change, and at most 5 seconds after the first.\nEach batch follows the rules of push: secret files are held back, ignored files, .git and package\ncaches are not sent, and a file the agent also changed keeps the agent's version (it is named once;\nsend yours with push NAME --mine FILE). It saves a restore point at the start, then one every\n10 minutes in which something was sent. A suspended agent is not woken: changes wait until it is back.\nNothing keeps running after it stops. --watch is required. This command is a Preview.",
+    "example": "defenseclaw substrate sync fix-tests-7f3a --watch\ndefenseclaw substrate sync fix-tests-7f3a --watch --for 2h",
+    "args": [
+      {
+        "name": "name",
+        "required": true
+      }
+    ],
+    "flags": [
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "exclude",
+        "type": "stringArray",
+        "default": "[]",
+        "usage": "hold a path or glob back too (repeatable, for example 'data/**')",
+        "metavar": "GLOB"
+      },
+      {
+        "name": "for",
+        "type": "duration",
+        "default": "0s",
+        "usage": "stop after this long, for example 2h"
+      },
+      {
+        "name": "unmask",
+        "type": "stringArray",
+        "default": "[]",
+        "usage": "send a held-back secret file or pattern anyway (repeatable)",
+        "metavar": "GLOB"
+      },
+      {
+        "name": "watch",
+        "type": "bool",
+        "default": "false",
+        "usage": "watch the folder and send changes as you save (required)"
+      }
+    ]
+  },
+  {
     "path": "substrate template",
     "use": "template",
     "short": "Build, check and publish actor images with their attestation (administrators)",
@@ -1407,7 +1929,7 @@
     "path": "substrate template build",
     "use": "build [flags]",
     "short": "Build an actor image from a base image and push it with its attestation",
-    "long": "Builds a coding-agent image for the cluster from a base image: adds the DefenseClaw hook and relay, scans what is\ninside, and pushes it with a signed attestation that the cluster checks before it runs the image.\n\nUsage: defenseclaw substrate template build --from IMAGE --to REPO:TAG --hook-binary FILE --relay-binary FILE --key FILE [flags]\n\nFlags:\n  --connector NAME                connector to build: claudecode, codex, opencode, copilot, hermes, kiro, antigravity,\n                                  cursor, amp or devin (default claudecode)\n  --from IMAGE                    base image (the OpenShell harness image for the connector, with tmux)\n  --to REPO:TAG                   target repository and tag\n  --kit-version VERSION           kit version (default dev)\n  --hook-binary FILE              defenseclaw-actor-hook (linux static)\n  --relay-binary FILE             defenseclaw-actor-relay (linux static)\n  --key FILE                      attestation private key (PEM, mode 0600); not needed with --dry-run\n  --anchors FILE                  trust anchors, to let an attested base count as trusted\n  --allow-unverified-base         build on a base that is not trusted (the cluster will refuse it by default)\n  --block-at LEVEL                lowest finding severity that blocks the build: critical, high, medium, low or none (default high)\n  --policy-generation N           policy generation recorded in the attestation (default 1)\n  --builder-id ID                 builder id recorded in the attestation\n  --provider NAME                 model route (claudecode: bedrock or anthropic; codex: bedrock or openai; default from substrate.llm.providers)\n  --model ID                      default model id\n  --gateway-url URL               actor listener URL (default http://\u003csubstrate.services.actor\u003e of --config)\n  --fail-mode MODE                interactive outage mode: open or closed\n  --task-stall DURATION           end a --task run that makes no progress for this long (1m to 24h; default 10m)\n  --no-mcp-static                 do not run mcp-scanner over tool descriptions\n  --mcp-analyzers LIST            mcp-scanner analyzers (default yara)\n  --keep-entrypoint               keep the base image ENTRYPOINT and CMD (tests; a real actor image starts the relay)\n  --dry-run                       scan the composed image and stop before pushing\n  --trusted-base sha256:DIGEST    base image digest the admin trusts (repeatable)\n  --mcp-host HOST                 remote MCP host that is allowed (repeatable)\n  --session-key FILE              the gateway's relay session public key (public.pem of the relay session Secret);\n                                  KID=FILE is checked against the key's own id (repeatable)\n  --session-issuer URL            iss of the session tokens the keys verify (default https://\u003csubstrate.services.admin\u003e\n                                  of --config, the issuer the gateway signs with)\n  --session-audience AUD          aud of the session tokens (default: the one the gateway signs)\n  --verify-url URL                ask the gateway to check each session token, instead of --session-key\n                                  An image that starts the relay needs --session-key or --verify-url.\n\nFlags build, verify, scan and publish all take:\n  --json                          print JSON\n  --insecure-registry HOST:PORT   registry reached over plain HTTP (repeatable)\n  --registry-user USER            registry user\n  --registry-password-file FILE   file with the registry password\n  --registry-auth-host HOST       registry or token host that gets the login (repeatable; build adds the --to host,\n                                  never the --from host)\n  --config FILE                   DefenseClaw config.yaml (scanner and admission settings)\n  --platform OS/ARCH              image platform (default linux/amd64)\n\nExit code: 0 built, 1 blocked, 2 usage error.",
+    "long": "Builds a coding-agent image for the cluster from a base image: adds the DefenseClaw hook and relay, scans what is\ninside, and pushes it with a signed attestation that the cluster checks before it runs the image.\n\nUsage: defenseclaw substrate template build --from IMAGE --to REPO:TAG --hook-binary FILE --relay-binary FILE --key FILE [flags]\n\nFlags:\n  --connector NAME                connector to build: claudecode, codex, opencode, copilot, hermes, kiro, antigravity,\n                                  cursor, amp or devin (default claudecode)\n  --from IMAGE                    base image (the OpenShell harness image for the connector, with tmux)\n  --to REPO:TAG                   target repository and tag\n  --kit-version VERSION           kit version (default dev)\n  --hook-binary FILE              defenseclaw-actor-hook (linux static)\n  --relay-binary FILE             defenseclaw-actor-relay (linux static)\n  --key FILE                      attestation private key (PEM, mode 0600); not needed with --dry-run\n  --anchors FILE                  trust anchors, to let an attested base count as trusted\n  --allow-unverified-base         build on a base that is not trusted (the cluster will refuse it by default)\n  --block-at LEVEL                lowest finding severity that blocks the build: critical, high, medium, low or none (default high)\n  --policy-generation N           policy generation recorded in the attestation (default 1)\n  --builder-id ID                 builder id recorded in the attestation\n  --provider NAME                 model route (claudecode: bedrock or anthropic; codex: bedrock or openai; default from substrate.llm.providers)\n  --model ID                      default model id\n  --gateway-url URL               actor listener URL (default http://\u003csubstrate.services.actor\u003e of --config)\n  --fail-mode MODE                interactive outage mode: open or closed\n  --task-stall DURATION           end a --task run that makes no progress for this long (1m to 24h; default 10m)\n  --no-mcp-static                 do not run mcp-scanner over tool descriptions\n  --mcp-analyzers LIST            mcp-scanner analyzers (default yara)\n  --keep-entrypoint               keep the base image ENTRYPOINT and CMD (tests; a real actor image starts the relay)\n  --dry-run                       scan the composed image and stop before pushing\n  --trusted-base sha256:DIGEST    base image digest the admin trusts (repeatable)\n  --mcp-host HOST                 remote MCP host that is allowed (repeatable)\n  --session-key FILE              the gateway's relay session public key (public.pem of the relay session Secret);\n                                  KID=FILE is checked against the key's own id (repeatable)\n  --session-issuer URL            iss of the session tokens the keys verify (default https://\u003csubstrate.services.admin\u003e\n                                  of --config, the issuer the gateway signs with)\n  --session-audience AUD          aud of the session tokens (default: the one the gateway signs)\n  --verify-url URL                gateway URL the relay checks each session token with (default\n                                  the relay verify endpoint of \u003cgateway-url\u003e; --session-key keys are checked first)\n\nFlags build, verify, scan and publish all take:\n  --json                          print JSON\n  --insecure-registry HOST:PORT   registry reached over plain HTTP (repeatable)\n  --registry-user USER            registry user\n  --registry-password-file FILE   file with the registry password\n  --registry-auth-host HOST       registry or token host that gets the login (repeatable; build adds the --to host,\n                                  never the --from host)\n  --config FILE                   DefenseClaw config.yaml (scanner and admission settings)\n  --platform OS/ARCH              image platform (default linux/amd64)\n\nExit code: 0 built, 1 blocked, 2 usage error.",
     "example": "defenseclaw substrate template build --connector claudecode --from REGISTRY/base:TAG --to REGISTRY/actor:TAG --hook-binary hook --relay-binary relay --key attestation.key",
     "passthrough": true
   },
@@ -1447,7 +1969,7 @@
     "path": "substrate undo",
     "use": "undo \u003cname\u003e",
     "short": "Put the agent's folder back to a restore point",
-    "long": "Goes back to the last restore point (or --to ID) inside the agent and discards what the agent changed since. It asks first.",
+    "long": "Goes back to the last restore point (or --to ID) inside the agent and discards what the agent changed since. It asks first. After a crash it first brings the agent back to its last snapshot; a --task agent this computer started whose task was lost then starts that task again from the beginning, on a fresh copy of its folder.",
     "args": [
       {
         "name": "name",
@@ -1480,7 +2002,8 @@
     "path": "substrate usage",
     "use": "usage",
     "short": "Show what your agents used: model calls, tokens and cost",
-    "long": "Shows the model use of your agents, grouped the way the cluster reports it. You see only your own use.",
+    "long": "Shows the model use of your agents and what it cost, rolled up by agent (the default),\nmodel, batch, atespace, day, connector or provider. You see only your own use; an\nadministrator adds --all for everyone and --by person for one line per person.\nCalls whose model is not in the price table show no cost and are not in the total.",
+    "example": "  defenseclaw substrate usage\n  defenseclaw substrate usage --by model --since 24h\n  defenseclaw substrate usage --all --by person",
     "flags": [
       {
         "name": "all",
@@ -1493,6 +2016,12 @@
         "type": "string",
         "usage": "only this batch",
         "metavar": "ID"
+      },
+      {
+        "name": "by",
+        "type": "string",
+        "default": "actor",
+        "usage": "roll up by actor, model, batch, atespace, day, connector, provider or person (person needs --all)"
       },
       {
         "name": "context",
@@ -1513,6 +2042,12 @@
         "default": "text",
         "usage": "output format: text or json",
         "metavar": "FORMAT"
+      },
+      {
+        "name": "since",
+        "type": "string",
+        "default": "7d",
+        "usage": "window, as \u003cn\u003eh or \u003cn\u003ed (at most 31d)"
       }
     ]
   },
@@ -1594,6 +2129,39 @@
         "default": "30s",
         "usage": "give up on the cluster after this long",
         "metavar": "DURATION"
+      }
+    ]
+  },
+  {
+    "path": "substrate watch",
+    "use": "watch [name]",
+    "short": "Say when one of your agents needs an answer or finishes its task",
+    "long": "Follows your agents (all of them, or the one you name) and prints a line when one raises an ask\nor when a --task run ends. With notifications on (notifications.enabled and notifications.substrate in config.yaml),\nit also shows a desktop notification, once per ask. A notification names the kind and the host or tool of an ask,\nnever its arguments. An administrator can turn notifications off for the cluster (substrate.activity.notifications: off).\nCtrl-C stops it.",
+    "args": [
+      {
+        "name": "name",
+        "required": false
+      }
+    ],
+    "flags": [
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "every",
+        "type": "duration",
+        "default": "10s",
+        "usage": "how often to look (at least 2s)",
+        "metavar": "DURATION"
+      },
+      {
+        "name": "once",
+        "type": "bool",
+        "default": "false",
+        "usage": "look once, print what is new and stop"
       }
     ]
   },

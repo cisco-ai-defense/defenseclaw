@@ -43,6 +43,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -250,18 +251,28 @@ func TestEmitManagedAgentInventoryUsesCompleteCanonicalSafeSnapshot(t *testing.T
 	}
 }
 
-func TestEmitManagedAgentInventoryOutsideManagedIsNoOp(t *testing.T) {
+// Outside Secure Client the agent inventory goes to the operator's own
+// destinations under agent_inventory.
+func TestEmitAgentInventoryOutsideSecureClientUsesTheOperatorAction(t *testing.T) {
 	withManagedEnterprise(t, false)
 	capture := &endpointInventoryCapture{}
-	api := &APIServer{observabilityV8: capture}
+	cfg := &config.Config{}
+	cfg.AIDiscovery.Enabled = true
+	api := &APIServer{observabilityV8: capture, scannerCfg: cfg}
 	if err := api.emitManagedAgentInventory(t.Context(), &agentDiscoveryReport{
 		Source: "cli", ScannedAt: "2026-07-11T00:00:00Z",
 		Agents: map[string]agentDiscoverySignal{"codex": {Installed: true}},
 	}, 1, false); err != nil {
 		t.Fatal(err)
 	}
-	if records := capture.snapshot(); len(records) != 0 {
-		t.Fatalf("non-managed agent inventory emitted %d records", len(records))
+	records := capture.snapshot()
+	if len(records) == 0 {
+		t.Fatal("no agent inventory outside Secure Client")
+	}
+	for _, record := range records {
+		if record.Action() != "agent_inventory" {
+			t.Fatalf("agent inventory action = %q, want agent_inventory", record.Action())
+		}
 	}
 }
 
@@ -1106,7 +1117,8 @@ func canonicalObjectArray(t *testing.T, value any) []map[string]any {
 	return objects
 }
 
-func TestEmitEndpointInventoryOutsideManagedIsNoOp(t *testing.T) {
+// Outside Secure Client the endpoint inventory follows ai_discovery.enabled.
+func TestEmitEndpointInventoryOutsideSecureClientNeedsAIDiscovery(t *testing.T) {
 	withManagedEnterprise(t, false)
 	capture := &endpointInventoryCapture{}
 	if err := EmitEndpointInventory(t.Context(), &config.Config{}, connector.NewDefaultRegistry(), capture); err != nil {
@@ -1363,16 +1375,13 @@ func TestPerConnectorMCPInventoryCountsCollisionsAcrossClaudeFiles(t *testing.T)
 }
 
 func TestMCPHomeReaderMarksDanglingConfigSymlinkPartial(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink creation requires elevated Windows permissions")
-	}
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(home, "missing.toml"), filepath.Join(home, ".codex", "config.toml")); err != nil {
-		t.Fatal(err)
-	}
+	// GAP-1533: runs on Windows under an elevated token (the symlink right is
+	// held there); a standard-user token skips with the privilege reason.
+	testenv.Symlink(t, filepath.Join(home, "missing.toml"), filepath.Join(home, ".codex", "config.toml"))
 	_, partial := readMCPServersUnderHomeForOSWithStatus("codex", home, runtime.GOOS)
 	if !partial {
 		t.Fatal("dangling MCP config symlink was treated as an authoritative empty listing")
@@ -1947,9 +1956,6 @@ func TestPerConnectorMCPEntriesForbiddenProfileIsPartial(t *testing.T) {
 // must report which person configured each MCP server, not just that the
 // endpoint has one.
 func TestPerConnectorMCPEntriesAttributeEachHomeToItsOwner(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("profile ownership on Windows comes from ProfileList, which a temp dir has no entry in")
-	}
 	withManagedEnterprise(t, true)
 	withUserEmailCollection(t, true)
 	// The first pass also reads the gateway's own Claude config: a real
@@ -1962,6 +1968,25 @@ func TestPerConnectorMCPEntriesAttributeEachHomeToItsOwner(t *testing.T) {
 	}
 
 	home := t.TempDir()
+	if runtime.GOOS == "windows" {
+		// On Windows a profile's owner is its ProfileList entry, and
+		// ProfileList has none for a temporary folder: the lookup answers
+		// for it as ProfileList does for the running user's own profile
+		// (useridentity's tests cover that read). Everything after the
+		// lookup, the row attribution and the address read, runs natively
+		// (rel-1-0-10:GAP-1690). The gateway's own profile is a temporary
+		// folder as HOME is on Unix.
+		t.Setenv("USERPROFILE", t.TempDir())
+		self := useridentity.Current()
+		lookup := inventoryIdentityForHome
+		inventoryIdentityForHome = func(dir string) useridentity.Identity {
+			if strings.EqualFold(filepath.Clean(dir), filepath.Clean(home)) {
+				return self
+			}
+			return lookup(dir)
+		}
+		t.Cleanup(func() { inventoryIdentityForHome = lookup })
+	}
 	claudeConfig := filepath.Join(home, ".claude.json")
 	body := `{"oauthAccount":{"emailAddress":"owner@example.com"},` +
 		`"mcpServers":{"github":{"command":"github-mcp"}}}`

@@ -258,10 +258,11 @@ const splitGapOwnTwinNeutral = "split-gap-twin.txt"
 // files it changes. The twin is that prefix on the files of one folder, in
 // their resolved spelling, and its neutral the prefix on an ordinary file
 // of that folder. The change is a finding of a file only when the twin is
-// one and its neutral is not: a world-writable mode outside the folder the
-// command runs in (CMD-CHMOD-WORLD on chmod 777 /tmp/x) is one of any file,
-// while chown of a credentials file or chmod 644 of a key is one of that
-// file, and chmod +x of a project's git hook is none (substrate-1:GAP-0703).
+// one and its neutral is not: chown of a credentials file or chmod 644 of a
+// key is one of that file (the unknown tier), and chmod +x of a project's
+// git hook is none (substrate-1:GAP-0703). A world-writable mode
+// (CMD-CHMOD-WORLD on chmod 777 or 666) is one of any file: the findings
+// the twin and its neutral share are the call's (substrate-1:GAP-1078).
 // Every such command of the call is judged, many of one shape in one twin
 // (substrate-1:GAP-0712). It is "" for a command whose words are not all
 // known.
@@ -295,14 +296,54 @@ func splitGapShellWord(path string) string {
 	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
 }
 
+// splitGapJudged is what the reading of a sandbox call's twins placed as the
+// host places it leaves for the reading placed in the guest's folder
+// (withSandboxGuestSplitGapEffects): each twin text it judged, true when it
+// added that twin's findings (an exact twin), and whether it decided the
+// unknown tier. A copy-mode call spells its absolute operands the same in
+// both placements, and both judge them lexically: before, the guest reading
+// judged each such twin a second time within the call's one budget, so a
+// call of many absolute operands spent the budget the laptop leaves for its
+// later twins (substrate-1 GAP-0725).
+type splitGapJudged struct {
+	texts   map[string]bool
+	unknown bool
+}
+
+// judgedBefore reports a twin the host-placed reading already judged as
+// this reading would judge it: the same text, added as an exact twin when
+// this one is, and naming no folder (guestFolderMayChangeJudgment), so the
+// working directory of its child request changes nothing.
+func (j *splitGapJudged) judgedBefore(request trustedActionRequest, twin splitGapEffectTwin) bool {
+	if j == nil {
+		return false
+	}
+	proof, ok := j.texts[twin.text]
+	if !ok || twin.proof && !proof {
+		return false
+	}
+	input := request.Input
+	input.Command, input.Args, input.Argv = twin.text, nil, nil
+	return !guestFolderMayChangeJudgment(actionfacts.Analyze(input))
+}
+
 // withSplitGapEffects adds to findings the judgment of the files a call with
 // a parse gap in its split touches: the unknown tier when a twin is a finding
 // the pack enforces, and the findings of an exact twin of a file its operand
-// spells.
+// spells. prior is the host-placed reading's record for the guest-placed
+// reading of the same call (nil otherwise); the record returned is for the
+// guest-placed reading, and is kept only for a lexical sandbox call that
+// reading follows.
 func withSplitGapEffects(ctx context.Context, request trustedActionRequest, generation *compiledRulePackCategories,
-	budget *trustedActionBudget, facts actionfacts.Facts, wholeCommand string, findings []RuleFinding) []RuleFinding {
+	budget *trustedActionBudget, facts actionfacts.Facts, wholeCommand string, findings []RuleFinding, prior *splitGapJudged) ([]RuleFinding, *splitGapJudged) {
 	if facts.Parse.Dialect != actionfacts.DialectPOSIX {
-		return findings
+		return findings, nil
+	}
+	var record *splitGapJudged
+	if prior == nil && request.SandboxGuestCWD != "" && request.Input.CWD != request.SandboxGuestCWD && request.SkipLocalFilesystemResolution {
+		// The guest reading judges lexically; a host reading that reads
+		// this host's files is another judgment, and is not shared.
+		record = &splitGapJudged{texts: make(map[string]bool)}
 	}
 	var set splitGapTwinSet
 	// Both readings of the call: as the walk places it, and as rel placed
@@ -326,7 +367,8 @@ func withSplitGapEffects(ctx context.Context, request trustedActionRequest, gene
 		}
 	}
 	twins := set.statements()
-	unknown := set.over && hookpaths.BoundCallMayNameProtected(wholeCommand, request.Input.CWD, request.Input.ActiveHome)
+	unknown := prior != nil && prior.unknown ||
+		set.over && hookpaths.BoundCallMayNameProtected(wholeCommand, request.Input.CWD, request.Input.ActiveHome)
 	judge := func(text string) []RuleFinding {
 		child := request
 		child.Input.Command, child.Input.Args, child.Input.Argv = text, nil, nil
@@ -345,14 +387,38 @@ func withSplitGapEffects(ctx context.Context, request trustedActionRequest, gene
 			// The tier is decided; only an exact twin still adds findings.
 			continue
 		}
+		if prior.judgedBefore(request, twin) {
+			continue
+		}
 		childFindings := judge(twin.text)
+		if record != nil {
+			record.texts[twin.text] = record.texts[twin.text] || twin.proof
+		}
 		if twin.proof {
 			findings = withSimpleCommandFindings(findings, childFindings)
 		}
 		if unknown || !slices.ContainsFunc(childFindings, splitGapEnforcedFinding) {
 			continue
 		}
-		unknown = twin.neutral == "" || !slices.ContainsFunc(judge(twin.neutral), splitGapEnforcedFinding)
+		if twin.neutral == "" {
+			unknown = true
+			continue
+		}
+		neutral := judge(twin.neutral)
+		if !slices.ContainsFunc(neutral, splitGapEnforcedFinding) {
+			unknown = true
+			continue
+		}
+		// The change is a finding of any file of that folder, the file
+		// itself aside (a world-writable mode: CMD-CHMOD-WORLD on chmod 777
+		// or 666): the call's own command makes it, so the enforced findings
+		// the twin and its neutral share are the call's, as they are of its
+		// plain spelling. Before, such a twin added nothing, and the split
+		// gap made the world-writable chmod of a credentials file a clean
+		// allow where its plain spelling alerts (substrate-1:GAP-1078). A
+		// finding of the file alone (PATH-AWS-CREDS) still only decides the
+		// tier: the operand is a candidate (rel-1-0-10:GAP-0871).
+		findings = withSimpleCommandFindings(findings, splitGapSharedFindings(childFindings, neutral))
 	}
 	if !unknown && moverRead {
 		// rel's reading: an operand after a mover call, in a folder the call
@@ -365,7 +431,25 @@ func withSplitGapEffects(ctx context.Context, request trustedActionRequest, gene
 	if unknown {
 		findings = withUnknownFinding(findings, unknownReasonFinding(splitGapEffectTitle, splitGapEffectReason, request.EnforcementCapable))
 	}
-	return findings
+	if record != nil {
+		record.unknown = unknown
+	}
+	return findings, record
+}
+
+// splitGapSharedFindings is the enforced findings of a twin whose rule its
+// neutral also finds.
+func splitGapSharedFindings(twin, neutral []RuleFinding) []RuleFinding {
+	var shared []RuleFinding
+	for _, finding := range twin {
+		key := trustedActionFindingKey(finding.RuleID)
+		if splitGapEnforcedFinding(finding) && slices.ContainsFunc(neutral, func(other RuleFinding) bool {
+			return splitGapEnforcedFinding(other) && trustedActionFindingKey(other.RuleID) == key
+		}) {
+			shared = append(shared, finding)
+		}
+	}
+	return shared
 }
 
 // splitGapEnforcedFinding is a finding of an effect twin that the pack
@@ -373,7 +457,7 @@ func withSplitGapEffects(ctx context.Context, request trustedActionRequest, gene
 // (persistence.shell_profile_write is MEDIUM: an alert in default, a block
 // in strict).
 func splitGapEnforcedFinding(finding RuleFinding) bool {
-	if finding.dataWordRecord || canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID {
+	if finding.boundRecord || canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID {
 		return false
 	}
 	if !finding.contributesToEnforcement() && !finding.contributesToAlertOnly() {

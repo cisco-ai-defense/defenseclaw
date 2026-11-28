@@ -38,7 +38,9 @@ const (
 	WorkerClaim = "worker-for-actor.ate.dev"
 	// DefaultAudience is the audience DefenseClaw asks egress to mint.
 	DefaultAudience = "defenseclaw"
-	// DefaultSkew is the clock skew allowed on exp and nbf.
+	// DefaultSkew is the clock skew allowed on nbf and iat (an issuer
+	// whose clock runs ahead of ours) and on the lifetime cap. exp gets
+	// none: a token is refused from the second it expires (GAP-0569).
 	DefaultSkew = 60 * time.Second
 	// MaxActorTokenLifetime is upstream's longest expiration_seconds.
 	MaxActorTokenLifetime = time.Hour
@@ -119,7 +121,7 @@ type ActorVerifierOptions struct {
 	KeySet *KeySet
 	// Audience defaults to DefaultAudience.
 	Audience string
-	// Skew defaults to DefaultSkew.
+	// Skew defaults to DefaultSkew. It never extends exp (GAP-0569).
 	Skew time.Duration
 	// Lookup checks that the token's actor UID is live. Required: an actor
 	// token names an actor, not one incarnation (a recreated same-name
@@ -290,13 +292,17 @@ func validUID(s string) bool {
 	return true
 }
 
-// checkTimes applies exp, nbf and iat with skew, and caps the lifetime.
+// checkTimes applies exp, nbf and iat, and caps the lifetime. A token is
+// refused from the second it expires (now >= exp, RFC 7519 4.1.4), with no
+// grace: a 60 s grace let an expired actor, person, workload or session
+// token through (GAP-0569). skew covers an issuer whose clock runs ahead
+// of ours, so it applies only to nbf, iat and the lifetime cap.
 func checkTimes(now time.Time, skew time.Duration, exp, nbf, iat *int64, maxLife time.Duration) error {
 	if exp == nil || iat == nil {
 		return reasonf(ReasonClaims, "token has no exp or iat")
 	}
 	e, i := time.Unix(*exp, 0), time.Unix(*iat, 0)
-	if now.After(e.Add(skew)) {
+	if !now.Before(e) {
 		return reasonf(ReasonExpired, "token expired")
 	}
 	if nbf != nil && now.Add(skew).Before(time.Unix(*nbf, 0)) {

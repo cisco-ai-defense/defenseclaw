@@ -18,6 +18,8 @@ package enterprisehooks
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -30,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/version"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // installOwnedHooksPresent is the registration read-back used during Install.
@@ -178,8 +181,11 @@ type InstallResult struct {
 	// RouteOnly is RouteOnlyUnverified when verify could not read the route-only
 	// agent files of the account: on Windows only LocalSystem reads them as the
 	// account, so the verify of an elevated administrator proves the render
-	// neither present nor drifted (GAP-1111). Empty otherwise, and always
-	// empty in the results of the guardian, which runs as LocalSystem.
+	// neither present nor drifted (GAP-1111). In the results of the
+	// guardian, which runs as LocalSystem, it is the RouteOnlyProof of the
+	// render it read back exact, which the guardian moves to its own record
+	// before it publishes its state (GAP-1975); RouteOnlyGuardianVerified on
+	// a Setup readiness row that record covers. Empty otherwise.
 	RouteOnly string `json:"route_only,omitempty"`
 }
 
@@ -190,6 +196,33 @@ const RouteOnlyUnverified = "unverified"
 // RouteConfigUnverifiedCode is the error code of a target whose route-only
 // render verify could not read: not ok, and not route_config_drift.
 const RouteConfigUnverifiedCode = "route_config_unverified"
+
+// RouteOnlyGuardianVerified is InstallResult.RouteOnly of a Setup readiness
+// row whose route-only render the caller's token could not read
+// (RouteOnlyUnverified) and that the guardian, as LocalSystem, read back
+// exact for the same render in its recorded reconcile (RouteOnlyProof):
+// readiness counts that target as verified; verify does not (GAP-1975).
+const RouteOnlyGuardianVerified = "guardian_verified"
+
+// routeOnlyProofPrefix starts every RouteOnlyProof value.
+const routeOnlyProofPrefix = "verified-sha256:"
+
+// RouteOnlyProof is the InstallResult.RouteOnly the Windows guardian records
+// for a route-only render it read back as the account and found exact: a
+// digest of the render the config selects (endpoint, flags and route
+// credential), so the render of another config, endpoint or credential
+// epoch never matches it. The credential itself is never recorded. Empty
+// for no render (nil) and for one whose credential cannot be derived.
+func RouteOnlyProof(route *connector.RouteOnlySetup) string {
+	if route == nil || route.Unavailable != "" {
+		return ""
+	}
+	sum := sha256.New()
+	fmt.Fprintf(sum, "defenseclaw route-only proof v1\x00%d:%s\x00%d:%s\x00%t\x00%t\x00%t",
+		len(route.BaseURL), route.BaseURL, len(route.Token), route.Token,
+		route.Bedrock, route.GatewaySigning, route.Custody)
+	return routeOnlyProofPrefix + hex.EncodeToString(sum.Sum(nil))
+}
 
 // agentConfigReadOnVerify reports a guardian that verifies the accounts'
 // agent configs without writing in their data folders: the Windows
@@ -975,12 +1008,12 @@ func standaloneInHomeConfigLink(home, path string, uid int) (string, bool) {
 	if err != nil || info.Mode()&os.ModeSymlink == 0 {
 		return "", false
 	}
-	resolved, err := filepath.EvalSymlinks(path)
+	resolved, err := winpath.EvalLinks(path)
 	if err != nil {
 		return "", false
 	}
 	cleanHome := filepath.Clean(home)
-	realHome, err := filepath.EvalSymlinks(cleanHome)
+	realHome, err := winpath.EvalLinks(cleanHome)
 	if err != nil {
 		return "", false
 	}

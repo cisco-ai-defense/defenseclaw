@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 import tempfile
 import zipfile
 from pathlib import Path
@@ -148,11 +149,39 @@ exit 0
     return result.stdout
 
 
+def _short_base(tmp_path_factory) -> Path:
+    # Windows PowerShell 5.1 stops at MAX_PATH (260), and the longest archived
+    # receipt (a GC name, 112 characters) sits below backups\connector-
+    # recovery-<32 hex>, so the fixture folder may take 86 characters at most.
+    # The runner temp folder alone can be that long (pytest-of-<account> and a
+    # state folder of the harness), and the move then failed with "Could not
+    # find a part of the path" whatever the installer does (GAP-2173). On
+    # Windows the fixture lives in a short folder of the system drive when
+    # the account can create one there, and in the runner temp folder when it
+    # cannot.
+    if os.name == "nt":
+        root = Path(os.environ.get("SystemDrive", "C:") + "\\")
+        for _ in range(5):
+            candidate = root / ("dcrf-" + os.urandom(3).hex())
+            try:
+                candidate.mkdir()
+            except OSError:
+                break
+            return candidate
+    return tmp_path_factory.mktemp("cas")
+
+
 @pytest.fixture
 def recovery_dirs(tmp_path_factory):
     # Short names also exercise real GC receipt names on Windows PowerShell
     # 5.1 without making the test's own path exceed MAX_PATH.
-    base = tmp_path_factory.mktemp("cas")
+    base = _short_base(tmp_path_factory)
+    yield from _recovery_dirs(base)
+    if base.name.startswith("dcrf-"):
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def _recovery_dirs(base: Path):
     data = base / "d"
     failed = data / ".failed-x"
     (failed / "data").mkdir(parents=True)
@@ -164,7 +193,7 @@ def recovery_dirs(tmp_path_factory):
     (external / ".tmp-cas-v2-old-external").write_bytes(b"external old config")
     active = data / (".defenseclaw-cas-v2-" + "a" * 24 + ".intent")
     active.write_bytes(b"restored active receipt")
-    return data, failed, external, active
+    yield data, failed, external, active
 
 
 def _assert_active_unchanged(external: Path, active: Path) -> None:
@@ -763,6 +792,11 @@ def _rollback_hook_backend(data: Path, settings: Path, receipt: Path, restore: s
 {_function('Convert-HooksForRollback')}
 {_function('Restore-HooksAfterAbortedRollback')}
 {_function('Test-HookRollbackRestoreAvailable')}
+# Restore-HooksAfterAbortedRollback asks whether the abort left the Claude Code
+# settings as saved (GAP-1092). Point it at this test's own agent folder so the
+# check never reads the test user's real settings.
+{_function('Test-ClaudeHooksUnchangedSinceConversion')}
+$env:CLAUDE_CONFIG_DIR = {_literal(settings.parent)}
 $script:events = @()
 $global:LASTEXITCODE = 0
 function Get-NativeOutput([string]$FilePath, [string[]]$Arguments) {{
@@ -1805,3 +1839,50 @@ if ($script:binRestores -ne 1) {{ throw 'Programs were not put back once before 
     assert (copies[0] / "data" / "config.yaml").read_bytes() == b"current config"
     assert (copies[0] / "data" / active.name).read_bytes() == b"restored active receipt"
     assert (external / "settings.json").read_bytes() == b'{"unchanged":"external"}'
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(
+    "case, expect_warning",
+    [
+        ("same_as_saved_copy", False),  # GAP-1092: a declined downgrade changed nothing
+        ("changed_since_saved_copy", True),
+        ("no_saved_copy", True),
+        ("other_connector_evidence", True),
+    ],
+)
+def test_aborted_rollback_says_unchanged_hooks_are_unchanged(tmp_path, case: str, expect_warning: bool) -> None:
+    # The current reader can refuse its restore check ("settings are not the
+    # exact witnessed rollback publication") when the abort changed nothing.
+    # The settings then equal the copy the gateway saved before converting, so
+    # the installer must not say the hook protection is unverified (GAP-1092).
+    agent = tmp_path / "agent"
+    agent.mkdir()
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "defenseclaw-gateway.exe").write_bytes(b"current runtime never executed")
+    (agent / "settings.json").write_bytes(b"current guarded hook")
+    if case != "no_saved_copy":
+        saved = b"current guarded hook" if case != "changed_since_saved_copy" else b"another hook"
+        (backups / "claudecode-settings.before-rollback.json").write_bytes(saved)
+    if case == "other_connector_evidence":
+        (backups / "codex-config.before-rollback.toml").write_bytes(b"codex copy")
+        (backups / "claudecode-settings.before-rollback.json").write_bytes(b"current guarded hook")
+    output = _run(
+        tmp_path,
+        f"""
+$BinDir = {_literal(tmp_path / 'bin')}
+$env:CLAUDE_CONFIG_DIR = {_literal(agent)}
+{_function('Get-Sha256')}
+{_function('Test-ClaudeHooksUnchangedSinceConversion')}
+{_function('Restore-HooksAfterAbortedRollback')}
+function Invoke-Native([string]$FilePath, [string[]]$Arguments) {{ return 1 }}
+Restore-HooksAfterAbortedRollback
+""",
+    )
+    assert ("Current hook protection is unverified" in output) is expect_warning, output
+    if not expect_warning:
+        assert "Hook protection is unchanged" in output, output
+    assert (agent / "settings.json").read_bytes() == b"current guarded hook"

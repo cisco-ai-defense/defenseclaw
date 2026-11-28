@@ -2423,10 +2423,45 @@ func failNativeDecision(opts Options, sp spec, reason string) int {
 		case "permissionRequest":
 			fmt.Fprintln(opts.Stdout, `{"behavior":"deny","message":`+message+`}`)
 			return 0
+		case "userPromptTransformed":
+			if sp.dialect != copilotVSCodeLocalSurface {
+				// The block of a Copilot CLI prompt is its replacement
+				// (GAP-1730). A block without one is refused with
+				// DefenseClaw's generic replacement: an error or no output
+				// lets Copilot send the prompt to the model (GAP-1752).
+				logHookFailure(opts, sp, reason, "response", "closed", true)
+				writeFailureDiagnostic(opts, true, "defenseclaw: %s hook error: %s\n", sp.errLabel, reason)
+				fmt.Fprintln(opts.Stdout, `{"modifiedTransformedPrompt":`+mustJSONString(CopilotBlockedPromptText)+`}`)
+				return 0
+			}
 		}
 	}
 	return failResponse(opts, sp, normalizeFailMode(opts.FailMode), reason)
 }
+
+// copilotCLIPromptEvent reports a Copilot CLI userPromptTransformed call:
+// its replacement is the only way to stop a prompt (GAP-1730), so a failure
+// that closes a tool call replaces the prompt too, as Claude Code, Codex,
+// Cursor and Kiro block a prompt on a closed outage (GAP-2131).
+func copilotCLIPromptEvent(opts Options, sp spec) bool {
+	return sp.connector == "copilot" && sp.dialect != copilotVSCodeLocalSurface && opts.Event == "userPromptTransformed"
+}
+
+// copilotFailedPromptReplacement is the userPromptTransformed answer of a
+// failure that closes: the model is told to reply only with the fail-closed
+// text, worded for a prompt.
+func copilotFailedPromptReplacement(text string) string {
+	text = strings.Replace(strings.TrimSpace(text), "DefenseClaw blocked this tool call", "DefenseClaw blocked this prompt", 1)
+	return `{"modifiedTransformedPrompt":` +
+		mustJSONString("DefenseClaw blocked the current user message. Do not answer it or call tools for it. Reply only: "+text) + `}`
+}
+
+// CopilotBlockedPromptText is what the model receives in place of a Copilot
+// CLI prompt DefenseClaw blocks without naming a Cisco AI Defense category:
+// the gateway's generic replacement (copilotBlockedPromptText), which the
+// native hook also writes when a block arrives without one (GAP-1752).
+const CopilotBlockedPromptText = "DefenseClaw blocked the current user message. Do not answer it or call tools for it. " +
+	"Reply only: DefenseClaw blocked this prompt under the configured security policy."
 
 func managedNativeBlockableEvent(connector, event string) bool {
 	switch connector {
@@ -2459,6 +2494,11 @@ func claudeTerminalStopEvent(event string) bool {
 // agent. A complete gateway response can still contain an allow-shaped native
 // directive beside a block action; the native directive wins at the agent.
 func nativeOutputAgrees(sp spec, event, action, output string) bool {
+	if sp.connector == "copilot" && sp.dialect != copilotVSCodeLocalSurface && event == "userPromptTransformed" && action == "block" {
+		// The block of a Copilot prompt is its replacement (GAP-1730).
+		var fields map[string]json.RawMessage
+		return json.Unmarshal([]byte(output), &fields) == nil && rawStringOr(fields, "modifiedTransformedPrompt", "") != ""
+	}
 	blockable := managedNativeBlockableEvent(sp.connector, event)
 	if sp.style == styleClaudeCode {
 		blockable = true
@@ -3897,6 +3937,10 @@ func copilotFailClosed(opts Options, sp spec, layer, reason string) (int, bool) 
 	case "permissionRequest":
 		body = `{"behavior":"deny","message":` + message + `}`
 	default:
+		if copilotCLIPromptEvent(opts, sp) {
+			body = copilotFailedPromptReplacement(text)
+			break
+		}
 		if sp.dialect != copilotVSCodeLocalSurface {
 			return 0, false
 		}
@@ -3930,13 +3974,16 @@ func perUserCopilotFailClosed(opts Options, sp spec, layer, reason string) (int,
 	if !perUserCopilotFailsClosed(opts, sp) {
 		return 0, false
 	}
-	message := mustJSONString(perUserFailClosedText(opts, layer, reason))
+	text := perUserFailClosedText(opts, layer, reason)
+	message := mustJSONString(text)
 	var body string
-	switch opts.Event {
-	case "preToolUse":
+	switch {
+	case opts.Event == "preToolUse":
 		body = `{"permissionDecision":"deny","permissionDecisionReason":` + message + `}`
-	case "permissionRequest":
+	case opts.Event == "permissionRequest":
 		body = `{"behavior":"deny","message":` + message + `}`
+	case copilotCLIPromptEvent(opts, sp):
+		body = copilotFailedPromptReplacement(text)
 	default:
 		return 0, false
 	}

@@ -13,7 +13,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
@@ -24,13 +26,24 @@ import (
 // admitted is trusted without a scan; other folders are scanned; when no
 // scanner can run, the fail mode decides, with an alert, never silently.
 
+// gap0164Scanner records the folders it scanned, under a lock: a post's
+// folders are scanned in parallel (GAP-1058). Read them with dirs.
 type gap0164Scanner struct {
+	mu          sync.Mutex
 	scanned     []string
 	unavailable bool
 }
 
+func (s *gap0164Scanner) dirs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Sorted(slices.Values(s.scanned))
+}
+
 func (s *gap0164Scanner) ScanSkillFolder(_ context.Context, name, dir string, files []SubstrateAttachedFile) (bool, string, error) {
+	s.mu.Lock()
 	s.scanned = append(s.scanned, dir)
+	s.mu.Unlock()
 	if s.unavailable {
 		return false, "", fmt.Errorf("%w: skill-scanner not found", ErrSubstrateSkillScannerUnavailable)
 	}
@@ -137,8 +150,8 @@ func TestGAP0164AttestedSkillIsTrustedWithoutAScan(t *testing.T) {
 	if q := quarantined(out); len(q) != 0 {
 		t.Fatalf("the template's own skill was quarantined: %+v", q)
 	}
-	if len(r.scan.scanned) != 0 {
-		t.Fatalf("an attested folder was scanned again: %v", r.scan.scanned)
+	if got := r.scan.dirs(); len(got) != 0 {
+		t.Fatalf("an attested folder was scanned again: %v", got)
 	}
 	if !receipted(out, gh) {
 		t.Fatalf("no receipt for the trusted folder: %s", out[substrateScannedField])
@@ -155,8 +168,8 @@ func TestGAP0164ChangedSkillIsScanned(t *testing.T) {
 	if q := quarantined(out); len(q) != 1 || q[0].Path != gh {
 		t.Fatalf("a changed, malicious folder was not quarantined: %+v", q)
 	}
-	if len(r.scan.scanned) != 1 {
-		t.Fatalf("scanned %v", r.scan.scanned)
+	if got := r.scan.dirs(); len(got) != 1 {
+		t.Fatalf("scanned %v", got)
 	}
 	if len(r.alerts) != 1 || r.alerts[0].sev != "HIGH" || r.alerts[0].folder != gh {
 		t.Fatalf("a quarantine without an alert: %+v", r.alerts)
@@ -175,7 +188,7 @@ func TestGAP0164NoScannerFollowsTheFailMode(t *testing.T) {
 		r := newGAP0164Rig(t, true)
 		r.scan.unavailable = true
 		out := r.post(t, dir, newSkill)
-		if q := quarantined(out); len(q) != 1 || !strings.Contains(q[0].Reason, "no skill scanner") {
+		if q := quarantined(out); len(q) != 1 || !strings.Contains(q[0].Reason, "the skill scanner is not running") {
 			t.Fatalf("not refused: %+v", q)
 		}
 		if len(r.alerts) != 1 || r.alerts[0].sev != "HIGH" {

@@ -32,7 +32,7 @@ import (
 	"strings"
 	"time"
 
-	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
+	v1 "github.com/ai-openshell/sdk-go/openshell/v1"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -87,6 +87,7 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	st := &sandboxapi.Status{
 		Enabled: cfg.OpenShell.Enabled, IngressAddr: m.opts.IngressAddr, EgressAddr: m.opts.EgressAddr,
 		IngressPort: m.opts.IngressPort, EgressPort: m.opts.EgressPort,
+		ImageBase: cfg.OpenShell.Image.Base, HarnessVersions: maps.Clone(cfg.OpenShell.Image.HarnessVersions),
 	}
 	gw, err := m.gateway(ctx)
 	if err == nil && m.now().Sub(time.Unix(0, m.gwCheckedAt.Load())) >= driverRecheck {

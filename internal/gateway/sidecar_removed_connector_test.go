@@ -113,7 +113,7 @@ func TestTeardownRemovedConnectorsDropsUnregistered(t *testing.T) {
 	codex := &recordingConnector{stubConnector: stubConnector{name: "codex"}}
 	reg := newRecordingRegistry(codex)
 
-	failed, dropped := teardownRemovedConnectorsReport(
+	failed, dropped, _ := teardownRemovedConnectorsWhy(
 		reg,
 		[]string{retiredExampleConnector, "codex"},
 		nil,
@@ -198,7 +198,7 @@ func TestTeardownRemovedConnectorsRetainsNameWhenPluginDiscoveryFailed(t *testin
 	if err := os.WriteFile(script, []byte("#!/bin/sh\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	failed, dropped := teardownRemovedConnectorsReport(
+	failed, dropped, _ := teardownRemovedConnectorsWhy(
 		registryWithFailedPluginDiscovery(t),
 		[]string{retiredExampleConnector},
 		nil,

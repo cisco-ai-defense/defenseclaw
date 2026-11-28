@@ -1,0 +1,14 @@
+{
+  "comment": "substrate.activity.notifications values and whether each is the administrator's off. Read by TestSubstrateNotificationsOffTable (Go NotificationsOn) and cli/tests/test_doctor_substrate_notifier.py (the Python doctor row), so both read the key the same way (GAP-1020).",
+  "cases": [
+    {"value": "off", "off": true},
+    {"value": "OFF", "off": true},
+    {"value": " Off ", "off": true},
+    {"value": "\toff\n", "off": true},
+    {"value": "auto", "off": false},
+    {"value": " AUTO ", "off": false},
+    {"value": "", "off": false},
+    {"value": "of f", "off": false},
+    {"value": "offline", "off": false}
+  ]
+}

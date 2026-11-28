@@ -75,6 +75,11 @@ func enterpriseHookWindowsRouteOnly(connectorName, account, sid, apiAddr string,
 	return enterpriseHookRouteOnlyFor(connectorName, account, sid, apiAddr, mint)
 }
 
+// enterpriseHookVerifyExpectedRouteOnly is the render verify and Setup
+// readiness expect for a target (enterpriseHookWindowsRouteOnly; replaceable
+// in tests).
+var enterpriseHookVerifyExpectedRouteOnly = enterpriseHookWindowsRouteOnly
+
 // enterpriseHookRouteOnlyGOOS selects the Windows guardian paths;
 // replaceable in tests.
 var enterpriseHookRouteOnlyGOOS = runtime.GOOS

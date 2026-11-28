@@ -1077,11 +1077,12 @@ func TestReadMCPServersForConnector_AntigravityMissingAndMalformedSafeNoOpenClaw
 	}
 }
 
-// TestSkillPluginDirs_OpenCodeEmptyAntigravityNativePaths pins that
-// opencode remains bridge-plugin-only while Antigravity exposes its own
-// documented skill and plugin discovery roots. Neither connector may fall
-// through to OpenClaw paths.
-func TestSkillPluginDirs_OpenCodeEmptyAntigravityNativePaths(t *testing.T) {
+// TestSkillPluginDirs_OpenCodeAntigravityNativePaths pins the skill and
+// plugin roots of both connectors; neither may fall through to OpenClaw
+// paths. OpenCode loads skills (GAP-0788): its list follows the one
+// agentpaths table and matches the Python mirror
+// (connector_paths._opencode_skill_dirs); it has no plugin folders.
+func TestSkillPluginDirs_OpenCodeAntigravityNativePaths(t *testing.T) {
 	home := t.TempDir()
 	testenv.SetHome(t, home)
 	workspace := filepath.Join(home, "repo")
@@ -1090,8 +1091,21 @@ func TestSkillPluginDirs_OpenCodeEmptyAntigravityNativePaths(t *testing.T) {
 	cfg.Claw.ConfigFile = "/tmp/should-not-appear/openclaw.json"
 	cfg.Claw.WorkspaceDir = workspace
 
-	if dirs := cfg.SkillDirsForConnector("opencode"); len(dirs) != 0 {
-		t.Errorf("SkillDirsForConnector(opencode) = %v, want empty", dirs)
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	wantOpenCode := []string{
+		filepath.Join(home, ".config", "opencode", "skill"),
+		filepath.Join(home, ".config", "opencode", "skills"),
+		filepath.Join(workspace, ".opencode", "skill"),
+		filepath.Join(workspace, ".opencode", "skills"),
+		filepath.Join(home, ".opencode", "skill"),
+		filepath.Join(home, ".opencode", "skills"),
+		filepath.Join(workspace, ".claude", "skills"),
+		filepath.Join(workspace, ".agents", "skills"),
+		filepath.Join(home, ".claude", "skills"),
+		filepath.Join(home, ".agents", "skills"),
+	}
+	if dirs := cfg.SkillDirsForConnector("opencode"); strings.Join(dirs, "|") != strings.Join(wantOpenCode, "|") {
+		t.Errorf("SkillDirsForConnector(opencode) = %v, want %v", dirs, wantOpenCode)
 	}
 	if dirs := cfg.PluginDirsForConnector("opencode"); len(dirs) != 0 {
 		t.Errorf("PluginDirsForConnector(opencode) = %v, want empty", dirs)

@@ -136,6 +136,9 @@ type App struct {
 	// returns sandboxapi.ErrNotManagedHost on any other computer.
 	HostClient func(goos string) (API, error)
 	IO         IO
+	// ReadSecret reads a secret without echoing it (vault add and
+	// replace); nil reads the terminal with echo off.
+	ReadSecret func(prompt string) (string, error)
 
 	Terminal Terminal
 	Streamer Streamer
@@ -173,8 +176,13 @@ type App struct {
 	DockerEngine func(ctx context.Context) (string, error)
 	// DockerVMLandlock is the Landlock ABI of Docker Desktop's Linux VM
 	// kernel, probed in a local image (openshell.DockerVMLandlockABI), which
-	// decides dockerDesktopRefusal.
+	// decides dockerDesktopRefusal. It is also the doctor's probe
+	// (defaultDoctor): one probe for both (rel-1-0-10:GAP-1746).
 	DockerVMLandlock func(ctx context.Context) (abi int, kernel string, err error)
+	// doctorLandlock is the probe the last report's Landlock row asked
+	// (defaultDoctor: DockerVMLandlock, asked at most once per report),
+	// which the doctor's last line reads again (doctorRunRefusal).
+	doctorLandlock func(ctx context.Context) (abi int, kernel string, err error)
 	// Sleep waits between polls (tests make it instant).
 	Sleep func(context.Context, time.Duration) error
 	// LifecycleDir is the OpenShell configuration directory whose gateway
@@ -220,6 +228,13 @@ type App struct {
 	// daemon, whose socket would start it: an account the organization does
 	// not allow sandboxes is refused with nothing started (GAP-0534).
 	ManagedAccountPolicy func(ctx context.Context, harness string) (*sandboxapi.ManagedExplain, error)
+	// ManagedOrganizationOff asks the managed gateway whether the
+	// organization turned sandboxes off (openshell.enabled false), without
+	// the account's sandbox daemon (nil, or false, when this is no managed
+	// computer or the gateway does not answer). A run reads it before it
+	// refuses an account its profile denies, so the organization's switch
+	// is the reason given first, as it is in status and doctor.
+	ManagedOrganizationOff func(ctx context.Context) bool
 	// ManagedAccountHome is the home path the managed gateway exec shim
 	// resolves for this account, including directory accounts.
 	ManagedAccountHome func() (string, error)
@@ -252,6 +267,9 @@ type App struct {
 	// managed computer: the caller's profile and request-access contact a
 	// refusal names (ManagedError).
 	managedSeen *sandboxapi.ManagedStatus
+	// vaultSealTried: this command tried to seal the vault on its way to a
+	// sandbox (a run that resumes its sandbox connects to it).
+	vaultSealTried bool
 }
 
 // ErrUnsupported is returned on platforms and setups sandboxes do not run
@@ -367,15 +385,7 @@ func (a *App) defaults() {
 		}
 		if a.DockerVMLandlock == nil {
 			a.DockerVMLandlock = func(ctx context.Context) (int, string, error) {
-				images := []string{openshell.DefaultBaseImage}
-				if a.Images != nil {
-					if recs, err := a.Images.List(); err == nil {
-						for _, r := range recs {
-							images = append(images, r.Tag)
-						}
-					}
-				}
-				return openshell.DockerVMLandlockABI(ctx, openshell.ExecRunner{}, images)
+				return openshell.DockerVMLandlockABI(ctx, openshell.ExecRunner{}, append([]string{openshell.DefaultBaseImage}, a.harnessImageTags()...))
 			}
 		}
 		if a.ConfigPath == "" && a.Cfg != nil {
@@ -667,9 +677,9 @@ func apiError(err error) error {
 				// is the organization's service, never a gateway command
 				// (GAP-0451).
 				if detail != "" {
-					return fmt.Errorf("your sandbox service does not answer (%s); %s", detail, managedServiceFix)
+					return fmt.Errorf("your sandbox service does not answer (%s); %s", detail, managedServiceFix())
 				}
-				return errors.New("your sandbox service does not answer; " + managedServiceFix)
+				return errors.New("your sandbox service does not answer; " + managedServiceFix())
 			}
 			if detail != "" {
 				return fmt.Errorf("the DefenseClaw daemon did not answer or could not be verified (%s); run `defenseclaw sandbox doctor`, and if it is stopped, start it with `defenseclaw-gateway start`", detail)
@@ -839,4 +849,23 @@ func adminNextStep(v *sandboxapi.Violation, why string) string {
 		}
 	}
 	return ""
+}
+
+// harnessImageTags are the harness images DefenseClaw built, all on the
+// OpenShell base image: Docker Desktop's Linux VM is probed for Landlock in
+// the first one on this machine after the base image, by sandbox run and
+// by the doctor alike.
+func (a *App) harnessImageTags() []string {
+	if a.Images == nil {
+		return nil
+	}
+	recs, err := a.Images.List()
+	if err != nil {
+		return nil
+	}
+	tags := make([]string, 0, len(recs))
+	for _, r := range recs {
+		tags = append(tags, r.Tag)
+	}
+	return tags
 }

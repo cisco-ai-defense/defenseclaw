@@ -20,15 +20,16 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"path"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/render"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/secretbind"
 )
 
 // SettingsFromConfig builds the render settings from the substrate section.
@@ -58,21 +59,45 @@ func SettingsFromConfig(cfg *config.Config) render.Settings {
 		RegistryHosts:        s.Egress.Registries,
 		PassthroughFor:       s.AllowPassthroughFor,
 		ProviderHosts:        providers,
+		NoSwapHosts:          s.Egress.NoSwapHosts,
 	}
 }
 
 // SecretsFromConfig converts substrate.secrets.
 func SecretsFromConfig(cfg *config.Config) []render.Secret {
-	out := make([]render.Secret, 0, len(cfg.Substrate.Secrets))
-	for _, s := range cfg.Substrate.Secrets {
+	return SecretsFrom(cfg.Substrate.Secrets)
+}
+
+// SecretsFrom converts substrate.secrets entries (and self-service
+// bindings in the same form) to render secrets.
+func SecretsFrom(in []config.SubstrateSecret) []render.Secret {
+	out := make([]render.Secret, 0, len(in))
+	for _, s := range in {
 		scope := s.Scope
 		if scope == "" {
 			scope = egressspec.ScopeShared
 		}
 		out = append(out, render.Secret{Name: s.Name, Source: s.Source, Hosts: s.Inject.Hosts, Header: s.Inject.Header,
-			Prefix: s.Inject.Prefix, Scope: scope, Profiles: s.Profiles})
+			Prefix: s.Inject.Prefix, Scope: scope, Profiles: s.Profiles, AllowEcho: s.Inject.AllowEcho})
 	}
 	return out
+}
+
+// BindingsFrom is Live.Bindings over the binding store: the person's
+// active, unexpired bindings under the templates of cfg.
+func BindingsFrom(store *secretbind.Store, cfg *config.Config, now func() time.Time) func(string) []render.Secret {
+	// values_only and off both close the bindings: no self-service binding
+	// reaches a policy (and so no new host opens through one), whatever the
+	// store holds. Live: a config change rebuilds this.
+	if store == nil || cfg.Substrate.SelfServiceSecrets.EffectiveMode() != config.SelfServiceBindings {
+		return nil
+	}
+	catalog := secretbind.Catalog(cfg.Substrate.SecretTemplates)
+	ss := cfg.Substrate.SelfServiceSecrets
+	return func(person string) []render.Secret {
+		return SecretsFrom(secretbind.Secrets(catalog, ss.EffectiveProvider(), ss.EffectiveNamespace(),
+			store.ForOwner(render.PersonKey(person)), ss.AllowEchoBindings, now()))
+	}
 }
 
 // LauncherSet is the set of launcher atespaces.
@@ -185,24 +210,10 @@ func (r *ConfigResolver) ManagedAtespaces() []string {
 	return out
 }
 
+// substrateMatches applies the shared match.substrate matcher
+// (config.ProfileMatchSubstrate.Matches) to a registration.
 func substrateMatches(m *config.ProfileMatchSubstrate, reg Registration, owned bool) (bool, string) {
-	warn := ""
-	if len(m.Atespaces) > 0 {
-		ok, w := MatchAtespace(m.Atespaces, reg.Atespace, owned)
-		if !ok {
-			return false, w
-		}
-	}
-	if len(m.Templates) > 0 && !slices.ContainsFunc(m.Templates, func(p string) bool {
-		ok, err := path.Match(p, reg.Template)
-		return err == nil && ok
-	}) {
-		return false, warn
-	}
-	if len(m.Workloads) > 0 && (reg.Workload == "" || !slices.Contains(m.Workloads, reg.Workload)) {
-		return false, warn
-	}
-	return true, ""
+	return m.Matches(config.SubstrateActorFacts{Atespace: reg.Atespace, Template: reg.Template, Workload: reg.Workload, AtespaceOwned: owned})
 }
 
 func (r *ConfigResolver) warnOnce(k string) bool {
@@ -216,27 +227,6 @@ func (r *ConfigResolver) warnOnce(k string) bool {
 	}
 	r.warned[k] = true
 	return true
-}
-
-// MatchAtespace applies E3: an exact name matches; a glob matches only an
-// owned atespace and otherwise returns a warning.
-func MatchAtespace(patterns []string, atespace string, owned bool) (bool, string) {
-	warn := ""
-	for _, p := range patterns {
-		if p == atespace {
-			return true, ""
-		}
-		if !strings.ContainsAny(p, "*?[") {
-			continue
-		}
-		if ok, err := path.Match(p, atespace); err == nil && ok {
-			if owned {
-				return true, ""
-			}
-			warn = fmt.Sprintf("atespace %s matches the glob %q but DefenseClaw neither created nor lists it; the profile does not apply (list it by name)", atespace, p)
-		}
-	}
-	return false, warn
 }
 
 // MemoryRegistry is an in-process Registry.

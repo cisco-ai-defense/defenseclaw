@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -136,6 +137,7 @@ func setWindowsRelaxTestDACL(t *testing.T, path, sddl string) {
 // resolver now waits out that exact shape and resolves the selected
 // generation once the guardian has put the canonical DACL back.
 func TestWindowsManagedRuntimeResolveWaitsOutGuardianSetupRelax(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	for _, tc := range []struct {
 		name string
 		pick func(windowsRelaxResolveFixture) []string
@@ -148,7 +150,7 @@ func TestWindowsManagedRuntimeResolveWaitsOutGuardianSetupRelax(t *testing.T) {
 			fixture := newWindowsRelaxResolveFixture(t)
 			relaxed := tc.pick(fixture)
 			for _, path := range relaxed {
-				setWindowsRelaxTestDACL(t, path, windowsSetupRelaxedDirectorySDDL)
+				setWindowsRelaxTestDACL(t, path, managed.WindowsSetupRelaxedDirectorySDDL)
 			}
 			hardened := make(chan error, 1)
 			go func() {

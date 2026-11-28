@@ -371,12 +371,12 @@ func TestObservedMCPToolCostsNothingWhenManagedInventoryIsOff(t *testing.T) {
 	}
 	ctx := withAuthenticatedToolResource(withAuthenticatedHookConnector(context.Background(), "claudecode"), req,
 		[]byte(`{"tool_name":"mcp__notes__search","mcp_server_name":"notes"}`))
-	api.recordObservedMCPToolIfManaged(ctx, req)
+	api.recordObservedMCPToolIfInventoryOn(ctx, req)
 	if rows, _ := tools.components([]endpointInventoryComponent{parent}, false, "observed"); len(rows) != 0 {
 		t.Fatalf("unmanaged hook recorded observed MCP evidence: %+v", rows)
 	}
 	SetManagedEnterpriseActive(true)
-	api.recordObservedMCPToolIfManaged(ctx, req)
+	api.recordObservedMCPToolIfInventoryOn(ctx, req)
 	if rows, _ := tools.components([]endpointInventoryComponent{parent}, false, "observed"); len(rows) != 1 {
 		t.Fatalf("managed hook did not record observed MCP evidence: %+v", rows)
 	}
@@ -394,14 +394,14 @@ func TestObservedMCPToolExactReplayDoesNotAdvanceTimestamp(t *testing.T) {
 	}
 	ctx := withAuthenticatedToolResource(withAuthenticatedHookConnector(context.Background(), "claudecode"), req,
 		[]byte(`{"tool_name":"mcp__notes__search","mcp_server_name":"notes"}`))
-	api.recordObservedMCPToolIfManaged(ctx, req)
+	api.recordObservedMCPToolIfInventoryOn(ctx, req)
 	rows, _ := tools.components([]endpointInventoryComponent{parent}, false, "observed")
 	if len(rows) != 1 {
 		t.Fatalf("first observation rows=%+v", rows)
 	}
 	first := rows[0].mcpToolObservedAt
 	req.SuppressCorrelationEmit = true
-	api.recordObservedMCPToolIfManaged(ctx, req)
+	api.recordObservedMCPToolIfInventoryOn(ctx, req)
 	rows, _ = tools.components([]endpointInventoryComponent{parent}, false, "observed")
 	if len(rows) != 1 || rows[0].mcpToolObservedAt != first {
 		t.Fatalf("exact replay advanced observation: first=%q rows=%+v", first, rows)
@@ -413,7 +413,7 @@ func TestObservedMCPToolExactReplayDoesNotAdvanceTimestamp(t *testing.T) {
 	unavailable.CorrelationUnavailable = true
 	unavailableCtx := withAuthenticatedToolResource(withAuthenticatedHookConnector(context.Background(), "claudecode"), unavailable,
 		[]byte(`{"tool_name":"mcp__notes__read","mcp_server_name":"notes"}`))
-	api.recordObservedMCPToolIfManaged(unavailableCtx, unavailable)
+	api.recordObservedMCPToolIfInventoryOn(unavailableCtx, unavailable)
 	rows, _ = tools.components([]endpointInventoryComponent{parent}, false, "observed")
 	if len(rows) != 2 || rows[0].itemName != "read" && rows[1].itemName != "read" {
 		t.Fatalf("correlation-unavailable event was lost: first=%q rows=%+v", first, rows)

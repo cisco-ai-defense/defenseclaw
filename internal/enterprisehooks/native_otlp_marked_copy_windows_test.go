@@ -146,6 +146,7 @@ func TestWindowsManagedMarkedTakeBackLeavesNoCopyPerRefusedRetry(t *testing.T) {
 // rolled the whole managed upgrade back. Once the account owns the file, the
 // next take-back removes the exporter.
 func TestWindowsManagedMarkedTakeBackLeavesAForeignOwnedConfigAlone(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	t.Setenv("CODEX_HOME", "")
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {

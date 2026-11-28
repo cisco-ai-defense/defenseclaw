@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"mvdan.cc/sh/v3/syntax"
@@ -499,6 +500,10 @@ var (
 // envelope binds no call.
 func patchShellInvocationsKnown(text string) (known bool, calls int, fedBody []bool) {
 	lines := strings.Split(text, "\n")
+	// An envelope-bearing script needs the conservative operator-line scan:
+	// malformed quoting or a staged feed can turn data into another call.
+	// Ordinary search patterns without a complete envelope stay shell data.
+	hasEnvelope := false
 	bound := make([]int, len(lines))
 	body := make([]bool, len(lines))
 	fedBody = make([]bool, len(lines))
@@ -517,6 +522,7 @@ func patchShellInvocationsKnown(text string) (known bool, calls int, fedBody []b
 		if end == len(lines) {
 			continue // patchEnvelopePaths already rejects an open envelope
 		}
+		hasEnvelope = true
 		inputLine, opener := start, lines[start][:begin]
 		if strings.TrimSpace(opener) == "" && start > 0 {
 			inputLine, opener = start-1, lines[start-1]
@@ -579,7 +585,8 @@ func patchShellInvocationsKnown(text string) (known bool, calls int, fedBody []b
 	}
 	for i, line := range lines {
 		if inert[i] ||
-			!body[i] && !invokesApplyPatch(line) && bound[i] == 0 && !strings.ContainsAny(line, ";|&") {
+			!body[i] && !invokesApplyPatch(line) && bound[i] == 0 &&
+				(!hasEnvelope || !strings.ContainsAny(line, ";|&")) {
 			continue
 		}
 		count := patchProgramWordCount(line)
@@ -832,11 +839,11 @@ func invokesApplyPatch(text string) bool {
 	if !tactics.MayNameProgram(text, applyPatchNames...) {
 		return false
 	}
-	if tactics.RunsProgram(text, applyPatchNames...) {
+	if tactics.RunsProgramIncludingLaunchers(text, applyPatchNames...) {
 		return true
 	}
 	for _, line := range strings.Split(text, "\n") {
-		if tactics.RunsProgram(line, applyPatchNames...) {
+		if tactics.RunsProgramIncludingLaunchers(line, applyPatchNames...) {
 			return true
 		}
 	}
@@ -864,10 +871,24 @@ func patchTargetPaths(path, cwd, home string, resolve patchResolution) ([]string
 		return nil, false
 	}
 	if !filepath.IsAbs(literal) {
-		if !filepath.IsAbs(cwd) || runtime.GOOS == "windows" && filepath.VolumeName(literal) != "" {
+		if !filepath.IsAbs(cwd) {
 			return nil, false
 		}
-		if runtime.GOOS == "windows" && (strings.HasPrefix(literal, "/") || strings.HasPrefix(literal, "\\")) {
+		if runtime.GOOS == "windows" && filepath.VolumeName(literal) != "" {
+			// A drive-relative name (C:name) names a file of the current
+			// folder of its drive: the working folder when that folder is
+			// on the same drive, as the path facts place it
+			// (actionfacts.PatchDriveRelativePlaced, rel-1-0-10:GAP-1078).
+			// The Copilot CLI check of a write call reads these targets, so
+			// an unplaced name there was an unparsed call even for a project
+			// file (rel-1-0-10:GAP-2283). Another drive's current folder and
+			// a bare C: are not known.
+			placed, ok := actionfacts.PatchDriveRelativePlaced(literal, cwd)
+			if !ok {
+				return nil, false
+			}
+			literal = placed
+		} else if runtime.GOOS == "windows" && (strings.HasPrefix(literal, "/") || strings.HasPrefix(literal, "\\")) {
 			// A rooted path uses the current drive or UNC share on Windows.
 			literal = filepath.VolumeName(cwd) + literal
 		} else {
@@ -912,7 +933,7 @@ func patchTargetPaths(path, cwd, home string, resolve patchResolution) ([]string
 // trimHomePrefix strips a leading home form: ~, $HOME, ${HOME}, $env:HOME,
 // $env:USERPROFILE or %USERPROFILE%, alone or followed by a separator.
 func trimHomePrefix(path string) (string, bool) {
-	lower := strings.ToLower(path)
+	lower := asciifold.Lower(path)
 	for _, prefix := range []string{"~", "${home}", "$home", "$env:userprofile", "$env:home", "%userprofile%"} {
 		if !strings.HasPrefix(lower, prefix) {
 			continue

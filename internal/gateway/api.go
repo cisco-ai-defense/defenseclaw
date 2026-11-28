@@ -65,6 +65,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/systemd"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
 )
 
@@ -175,6 +176,10 @@ type APIServer struct {
 	// preToolDecisions pairs audited Claude Code/Codex PreToolUse decisions
 	// with later post-tool observations, without a background worker.
 	preToolDecisions preToolDecisionTracker
+	// claudeDisplays holds the streamed MessageDisplay chunks of each Claude
+	// Code message until the message ends, so its llm_response row is
+	// redacted over the whole message (GAP-0511).
+	claudeDisplays claudeDisplayBuffer
 
 	// mcpAdmissionPending names an MCP server the install watcher admits
 	// but has not admitted yet (GAP-0112). Set once before serving.
@@ -2011,6 +2016,9 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		// per-user gateway serves it only in the authenticated /status.
 		// Secure Client keeps its health body (issue #1092).
 		body["hook_capacity"] = hookCapacity.snapshot()
+		// The hook decisions the managed hook took on its own in the last
+		// 24 h, counted from the host log (rel-1-0-10:GAP-2042).
+		body["host_records"] = hostRecords.snapshot()
 	}
 	if ledger := agentIdentityLedgerHealth(); ledger != nil {
 		body["agent_identities"] = ledger
@@ -2251,6 +2259,7 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 			if warnings := standaloneProfileWarnings(set, cfg); len(warnings) > 0 {
 				status["profile_warnings"] = warnings
 			}
+			status["host_records"] = hostRecords.snapshot() // GAP-2042
 			if broker := routePeerBrokerProbe(r, cfg); broker != nil {
 				status["route_peer_broker"] = broker
 			}
@@ -3776,7 +3785,7 @@ func isBundledSkillScanPath(path string) bool {
 	if enforce.IsBundledSkillPath(path) {
 		return true
 	}
-	resolved, err := filepath.EvalSymlinks(path)
+	resolved, err := winpath.EvalLinks(path)
 	return err == nil && enforce.IsBundledSkillPath(resolved)
 }
 
@@ -4004,7 +4013,7 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 	// receive a tarball of readable host files. Constrain req.Target
 	// to a directory under one of the configured skill or plugin
 	// roots, after fully resolving symlinks on both sides.
-	resolvedTarget, err := filepath.EvalSymlinks(req.Target)
+	resolvedTarget, err := winpath.EvalLinks(req.Target)
 	if err != nil {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": fmt.Sprintf("target directory not found: %s", req.Target),
@@ -4031,7 +4040,7 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 		if root == "" {
 			continue
 		}
-		rr, rerr := filepath.EvalSymlinks(root)
+		rr, rerr := winpath.EvalLinks(root)
 		if rerr != nil {
 			continue
 		}

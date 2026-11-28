@@ -22,7 +22,9 @@ several lines of the same shard, one go test run each.
 refreshed by scripts/update_test_timings.py). Test mode takes it more than
 once: the package's tests weigh the times of the first file that records
 that package, so the macOS gateway parts use go-darwin.json once a refresh
-has recorded them there and the Linux times until then. A slow test that
+has recorded them there and the Linux times until then, and a plain (no
+-race) gateway run passes go-linux-plain.json before go-linux.json (its
+-race times do not rank the plain tests, substrate-1 GAP-1107). A slow test that
 file does not name yet weighs its time in a later file, scaled to the first
 file (package_test_seconds), so a new slow test does not weigh the small
 "*" until the next refresh. Tests stay together by file
@@ -97,13 +99,21 @@ def discover_test_files(package_dir: Path) -> list[tuple[Path, tuple[str, ...]]]
     return discovered
 
 
-def built_test_files(files: list[tuple[Path, tuple[str, ...]]], package_dir: Path) -> list[tuple[Path, tuple[str, ...]]]:
+def built_test_files(
+    files: list[tuple[Path, tuple[str, ...]]], package_dir: Path
+) -> list[tuple[Path, tuple[str, ...]]]:
     """Keep the files `go list` builds into the package's test binary on this
     GOOS/GOARCH: a guarded run (go_test_report.py --expect-run) then expects
     only tests the binary has, not those of a _windows_test.go file or of a
     //go:build line that leaves this platform out."""
     listing = subprocess.run(
-        ["go", "list", "-f", "{{range .TestGoFiles}}{{println .}}{{end}}{{range .XTestGoFiles}}{{println .}}{{end}}", "."],
+        [
+            "go",
+            "list",
+            "-f",
+            "{{range .TestGoFiles}}{{println .}}{{end}}{{range .XTestGoFiles}}{{println .}}{{end}}",
+            ".",
+        ],
         cwd=package_dir,
         check=True,
         capture_output=True,
@@ -408,7 +418,10 @@ def main() -> int:
     parser.add_argument(
         "--built-files",
         action="store_true",
-        help="test mode: keep only the test files go list builds on this GOOS/GOARCH (for go_test_report.py --expect-run)",
+        help=(
+            "test mode: keep only the test files go list builds on this GOOS/GOARCH"
+            " (for go_test_report.py --expect-run)"
+        ),
     )
     parser.add_argument("--split-tests", action="store_true", help="test mode: balance each test separately")
     parser.add_argument(

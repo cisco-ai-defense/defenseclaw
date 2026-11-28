@@ -36,12 +36,13 @@ type generatedInboundCatalogSource struct {
 }
 
 func generatedInboundCatalogSourceValue() generatedInboundCatalogSource {
+	matches, targets := generatedInboundNativeCatalog()
 	return generatedInboundCatalogSource{
 		aliases:     generatedInboundAliases,
 		normalizers: generatedInboundSourceNormalizers,
 		projections: generatedInboundSourceProjectionPlans,
-		matches:     generatedInboundMatches,
-		targets:     generatedInboundTargets,
+		matches:     matches,
+		targets:     targets,
 		markers:     generatedInboundNativeMarkers,
 		echoes:      generatedInboundEchoRecognizers,
 		contexts:    generatedInboundImportContexts,

@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -46,19 +47,39 @@ func (s *shellDirectoryState) merge(branch shellDirectoryState) {
 // bodies. A branch or subshell gets its own directory state. unknown reports a
 // write that may name authorized_keys after an unresolved directory change.
 func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[string]string, record, strict bool) (operands []RedirectOccurrence, unknown bool) {
-	return shellDirectoryWriteOperandsWithParse(command, cwd, home, directoryFacts, record, strict, nil)
+	return shellDirectoryWriteOperandsWithFile(command, cwd, home, directoryFacts, record, strict, false, nil, nil)
 }
 
-// shellDirectoryWriteOperandsWithParse also reports whether the shared
-// shell parser accepted the command, so a client describing the same call
-// can reuse that result when the command has no output redirect.
-func shellDirectoryWriteOperandsWithParse(command, cwd, home string, directoryFacts map[string]string, record, strict bool, parsedOut *bool) (operands []RedirectOccurrence, unknown bool) {
-	return shellDirectoryWriteOperandsWithFile(command, cwd, home, directoryFacts, record, strict, parsedOut, nil)
+// GuestShellDirectoryWriteOperands is the strict ShellDirectoryWriteOperands
+// of a call that runs in a Linux sandbox guest (a Substrate actor) whose
+// files this gateway cannot open. The walk places the guest's folders by the
+// Linux guest layout on every gateway OS: the guest's home, /home, /tmp and
+// /var/tmp need a directory fact, and no folder is resolved on a gateway host
+// that is not Linux (nor Windows, which spells no POSIX folder), whose own
+// /tmp, /etc and /var (links into /private on macOS) say nothing of the
+// guest's. A macOS gateway read the guest's
+// cd /tmp && eval '... > $x' as an ordinary write where a Linux gateway fails
+// it closed (rel-1-0-10:GAP-2203).
+func GuestShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[string]string) (operands []RedirectOccurrence, unknown bool) {
+	return shellDirectoryWriteOperandsWithFile(command, cwd, home, directoryFacts, false, true, true, nil, nil)
+}
+
+// GuestStaticDirectoryWriteOperands places concrete writes in the guest
+// namespace without requiring a directory fact. Only exact protected names
+// from this result may confirm a finding; its unknown result is deliberately
+// ignored because the host-side strict walk owns that decision.
+func GuestStaticDirectoryWriteOperands(command, cwd, home string) []RedirectOccurrence {
+	operands, _ := shellDirectoryWriteOperandsWithFile(command, cwd, home, nil, false, false, true, nil, nil)
+	return operands
 }
 
 // shellDirectoryWriteOperandsWithFile reuses a previously parsed command
-// while preserving the same directory and literal-writer walk.
-func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFacts map[string]string, record, strict bool, parsedOut *bool, file *syntax.File) (operands []RedirectOccurrence, unknown bool) {
+// while preserving the same directory and literal-writer walk. parsedOut
+// reports whether the shared shell parser accepted the command, so a client
+// describing the same call can reuse that result when the command has no
+// output redirect. linuxGuest places folders by the Linux guest layout
+// (GuestShellDirectoryWriteOperands).
+func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFacts map[string]string, record, strict, linuxGuest bool, parsedOut *bool, file *syntax.File) (operands []RedirectOccurrence, unknown bool) {
 	parsed := file != nil
 	if !parsed {
 		file, parsed = parseShell(command)
@@ -71,16 +92,33 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 	}
 	physical := func(logical string) (string, bool) {
 		key := DirectoryFactPrefix + logical
+		// A guest's /proc/self/root/tmp is its /tmp and needs the same
+		// directory fact on every gateway OS (rel-1-0-10:GAP-2228).
+		named := logical
+		if linuxGuest {
+			named = GuestOwnRootPath(logical)
+		}
 		if !record && directoryFacts != nil {
 			if value, present := directoryFacts[key]; present {
 				return value, filepath.IsAbs(value)
 			}
-			if strict && directoryFactRequired(logical, home) {
+		}
+		if !record && strict && directoryFactRequired(named, home, linuxGuest) {
+			return "", false
+		}
+		if linuxGuest && runtime.GOOS != "linux" && runtime.GOOS != "windows" {
+			// The guest's folder, not this POSIX host's of the same name
+			// (on macOS /etc and /var are links into /private): placed as
+			// written, as a Linux gateway, whose same-named system folders
+			// are no links, places it (rel-1-0-10:GAP-2203). A Windows host
+			// spells no POSIX folder, so its walk is left as it was.
+			// The guest's own root link (/proc/self/root) is its /, as a
+			// Linux gateway reads its own (rel-1-0-10:GAP-2223).
+			placed := GuestOwnRootPath(logical)
+			if guestOtherProcessFolder(placed) {
 				return "", false
 			}
-		}
-		if !record && strict && directoryFactRequired(logical, home) {
-			return "", false
+			return placed, true
 		}
 		value, ok := ResolveWriteTarget(logical)
 		if record && directoryFacts != nil {
@@ -97,8 +135,24 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 	// (RV-c7-1); env --chdir=~/x does not expand it either.
 	setDirectory := func(s *shellDirectoryState, directory string, physicalMode bool) {
 		absolute := filepath.IsAbs(directory)
-		if absolute {
+		if linuxGuest {
+			// Retain link-boundary dot steps until the guest path is folded.
+			if absolute {
+				s.logical = directory
+			} else {
+				s.logical = s.logical + string(filepath.Separator) + directory
+			}
+		} else if absolute {
 			s.logical = filepath.Clean(directory)
+		} else if directory != "" && os.IsPathSeparator(directory[0]) && filepath.IsAbs(s.logical) {
+			// A rooted Windows name with no drive (cd /tmp) is on the
+			// volume of the folder, as OperandPath places it for every
+			// other reader of the command (the link walk and its copy
+			// scopes, the directory stack). Joined below the folder, a
+			// write after such a cd missed the copy scope the link walk
+			// keyed on the volume and an unread link was allowed
+			// (rel-1-0-10:GAP-2303).
+			s.logical = filepath.Clean(OperandPath(directory, s.logical))
 		} else {
 			s.logical = filepath.Join(s.logical, directory)
 		}
@@ -125,6 +179,21 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 	// so nested fan-out stays linear; past either bound a body that may write
 	// or change directory is unknown.
 	functionDepth, functionStatements := 0, 0
+	// The statement readings of the walk (write): the same statement text
+	// read in the same folder, while the hook call's state is as it was, has
+	// the same literal writes and facts. After a program word that is not
+	// static ($C), every later statement is read anew; an 8 KB loop of $C and
+	// : statements parsed and analyzed each again (FIX-F3PERF).
+	readings := map[shellDirectoryReadingKey]shellDirectoryReading{}
+	// The walk runs in one goroutine, so in one hook call (none: a fixed
+	// state): it looks the call up once, not twice per statement.
+	call := currentHookCall()
+	callState := func() CallState {
+		if call == nil {
+			return CallState{}
+		}
+		return call.state()
+	}
 	var walkList func([]*syntax.Stmt, *shellDirectoryState)
 	var walk func(*syntax.Stmt, *shellDirectoryState)
 	write := func(stmt *syntax.Stmt, s *shellDirectoryState) {
@@ -175,20 +244,33 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 				!strings.HasPrefix(name, "~/") && shellAuthorizedKeysBase(name) {
 				unknown = true
 			}
-			redirects = append(redirects, OperandPath(name, s.logical))
+			placed := OperandPath(name, s.logical)
+			if linuxGuest && !filepath.IsAbs(name) && strings.Contains(s.logical, "/proc/") {
+				// OperandPath cleans dot-dot before the guest root link is
+				// folded. Keep this relative write raw through that link.
+				placed = s.logical + string(filepath.Separator) + name
+			}
+			redirects = append(redirects, placed)
 			keys = append(keys, OperandPath(name, cwd))
 		}
 		if !s.changed {
 			redirectIndex += len(redirects)
 			return
 		}
-		literals, literalCopies := LiteralWriteOperandsWithCopies(statement, s.logical, home)
+		key := shellDirectoryReadingKey{statement: statement, logical: s.logical, call: callState()}
+		reading, read := readings[key]
+		if !read {
+			reading.literals, reading.copies = LiteralWriteOperandsWithCopies(statement, s.logical, home)
+			reading.facts = analyzeAtHookFolder(actionfacts.Input{Tool: "Bash", Command: statement, CWD: s.logical, ActiveHome: home})
+			if callState() == key.call {
+				readings[key] = reading
+			}
+		}
+		literals, literalCopies, facts := reading.literals, reading.copies, reading.facts
 		ownCopies := make(map[string]int, len(literalCopies))
 		for _, literal := range literalCopies {
 			ownCopies[literal]++
 		}
-		inner := actionfacts.Input{Tool: "Bash", Command: statement, CWD: s.logical, ActiveHome: home}
-		facts := analyzeAtHookFolder(inner)
 		writes := make([]RedirectOccurrence, 0, len(redirects)+len(literals))
 		for i, redirect := range redirects {
 			occurrence := RedirectOccurrence{Path: redirect}
@@ -196,6 +278,7 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 			// walk does not; only the same operand inherits its safety.
 			if redirectIndex < len(safety) && safety[redirectIndex].Path == keys[i] {
 				occurrence.Safe = safety[redirectIndex].Safe
+				occurrence.Absolute = safety[redirectIndex].Absolute
 			}
 			redirectIndex++
 			writes = append(writes, occurrence)
@@ -591,6 +674,21 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 	return operands, unknown
 }
 
+// shellDirectoryReadingKey is one statement reading of the directory walk:
+// the statement's text, the folder it is read in, and the hook call's state
+// when it was read (a reading that changed that state is not kept).
+type shellDirectoryReadingKey struct {
+	statement, logical string
+	call               CallState
+}
+
+// shellDirectoryReading is what the walk reads of one statement: its literal
+// writes, the copies among them, and its facts. The walk only reads them.
+type shellDirectoryReading struct {
+	literals, copies []string
+	facts            actionfacts.Facts
+}
+
 // maxFunctionStatements bounds the statements read inside function bodies
 // for one command.
 const maxFunctionStatements = 4096
@@ -788,8 +886,11 @@ func shellEnvChdir(call *syntax.CallExpr, home string) (directory, inner string,
 	return directory, inner, tail, true
 }
 
-func directoryFactRequired(directory, home string) bool {
-	if runtime.GOOS != "linux" {
+// directoryFactRequired reports a folder a strict walk places only by a
+// directory fact: on a Linux gateway, and for a Linux sandbox guest on every
+// gateway (rel-1-0-10:GAP-2203), the home, /home, /tmp and /var/tmp.
+func directoryFactRequired(directory, home string, linuxGuest bool) bool {
+	if runtime.GOOS != "linux" && !linuxGuest {
 		return false
 	}
 	for _, root := range []string{home, "/home", "/tmp", "/var/tmp"} {
@@ -798,6 +899,80 @@ func directoryFactRequired(directory, home string) bool {
 		}
 	}
 	return false
+}
+
+// guestOtherProcessFolder reports a guest folder below /proc/<pid> (or its
+// task/<tid>) that is another process's private entry: the root, cwd and exe
+// links and anything below its fd, fdinfo, map_files and ns folders. An
+// unprivileged Linux gateway cannot read those (EACCES), so its walk leaves
+// the directory unknown and a later write fails closed; the guest walk on a
+// gateway host that is not Linux gives the same answer instead of placing
+// the folder as written (RV-2203 P2-1, rel-1-0-10:GAP-2203). /proc/<pid>
+// itself, its other entries, /proc/self and /proc/thread-self are placed as
+// written: a Linux gateway reads them.
+func guestOtherProcessFolder(directory string) bool {
+	rest, ok := strings.CutPrefix(directory, "/proc/")
+	if !ok {
+		return false
+	}
+	parts := strings.Split(rest, "/")
+	for len(parts) >= 2 && allDigits(parts[0]) {
+		switch parts[1] {
+		case "root", "cwd", "exe":
+			return true
+		case "fd", "fdinfo", "map_files", "ns":
+			return len(parts) > 2
+		case "task":
+			parts = parts[2:]
+			continue
+		}
+		return false
+	}
+	return false
+}
+
+// GuestOwnRootPath folds guest-owned root links while walking the raw path.
+// A dot-dot after root stays at the guest root. The suffix after any other
+// process link stays raw for the process-link proof.
+// (GAP-2223, GAP-2227).
+func GuestOwnRootPath(path string) string {
+	if !strings.HasPrefix(path, "/") || !strings.Contains(path, "proc") {
+		return path
+	}
+	input := strings.Split(path, "/")
+	parts := make([]string, 0, len(input))
+	folded := false
+	for i := 1; i < len(input); i++ {
+		switch input[i] {
+		case "", ".":
+			continue
+		case "..":
+			if len(parts) > 0 {
+				parts = parts[:len(parts)-1]
+			}
+		default:
+			parts = append(parts, input[i])
+		}
+		if len(parts) == 3 && parts[0] == "proc" &&
+			(parts[1] == "self" || parts[1] == "thread-self") && parts[2] == "root" {
+			// A dot-dot following this link stays at the guest root.
+			parts = parts[:0]
+			folded = true
+			continue
+		}
+		if processLinkHead(parts) {
+			// A process link owns its raw suffix even before any root fold.
+			prefix := "/" + strings.Join(parts, "/")
+			if i+1 < len(input) {
+				return prefix + "/" + strings.Join(input[i+1:], "/")
+			}
+			return prefix
+		}
+	}
+	if !folded {
+		return path
+	}
+	return "/" + strings.Join(parts, "/")
 }
 
 // directoryCreationFact reports a path fact of a POSIX mkdir call.

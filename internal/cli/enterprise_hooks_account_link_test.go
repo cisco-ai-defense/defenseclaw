@@ -4,7 +4,9 @@
 package cli
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -193,5 +195,114 @@ func TestGAP0585OmittedDataDirNamesTheForeignLink(t *testing.T) {
 	target.DataDir = ""
 	if enterpriseHookTargetForeignLink(target, home, "S-1-5-21-1-2-3-1002") {
 		t.Fatal("another account was classified as linked")
+	}
+}
+
+// GAP-1733: an account whose canonical folder holds a per-user DefenseClaw
+// install fails only its own rows with the per-user install error, which
+// status, verify and the Setup adoption excuse like a foreign link and which
+// does not count against coverage. The same row once the install is gone,
+// with another failure beside it, or on Secure Client is not excused.
+func TestGAP1733PerUserInstallFolderExcusesOnlyItsOwnFailedRow(t *testing.T) {
+	previousCfg, previousOwned, previousForeign, previousPerUser, previousRemoved := cfg,
+		enterpriseHookAccountOwnedDataDirLink, enterpriseHookForeignDataDirLink, enterpriseHookPerUserInstallFolder,
+		enterpriseHookRemovedAccountRow
+	t.Cleanup(func() {
+		cfg, enterpriseHookAccountOwnedDataDirLink, enterpriseHookForeignDataDirLink, enterpriseHookPerUserInstallFolder,
+			enterpriseHookRemovedAccountRow = previousCfg, previousOwned, previousForeign, previousPerUser, previousRemoved
+	})
+	enterpriseHookRemovedAccountRow = func(enterpriseHookReconcileRow) bool { return false }
+	enterpriseHookAccountOwnedDataDirLink = func(string, string) bool { return false }
+	enterpriseHookForeignDataDirLink = func(string, string) bool { return false }
+	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise: config.EnterpriseConfig{Profile: managed.ProfileStandalone}}
+	home := filepath.Join(t.TempDir(), "alice")
+	const sid = "S-1-5-21-1-2-3-1001"
+	perUser := true
+	enterpriseHookPerUserInstallFolder = func(gotHome, gotSID string) bool {
+		return perUser && gotHome == home && gotSID == sid
+	}
+	target := enterprisehooks.ManifestTarget{UserHome: home, SID: sid, Connector: "claudecode", Deferred: true}
+	// The folder rule of one pass: a skip on an account never protected,
+	// tamper on an enrolled one
+	// (TestGAP1733PlantedPerUserEntryOnAnEnrolledAccountIsRepairedAndNotExcused).
+	perUserFolder := func(target enterprisehooks.ManifestTarget, home, sid string) bool {
+		skip, tamper := newEnterpriseHookPerUserInstallPass(t.TempDir()).classify(target, home, sid, false)
+		return skip || tamper
+	}
+	for _, dir := range []string{"", filepath.Join(home, ".defenseclaw")} {
+		target.DataDir = dir
+		if !perUserFolder(target, home, sid) || enterpriseHookTargetForeignLink(target, home, sid) {
+			t.Fatalf("data_dir %q: the per-user install folder was not classified apart from a link", dir)
+		}
+	}
+	otherDir := target
+	otherDir.DataDir = filepath.Join(home, "other")
+	if perUserFolder(otherDir, home, sid) || perUserFolder(target, home, "S-1-5-21-1-2-3-1002") {
+		t.Fatal("another folder or account was classified as the per-user install")
+	}
+	row := enterpriseHookReconcileRow{User: "alice", UserHome: home, SID: sid,
+		Connector: "claudecode", Error: enterpriseHookAccountPerUserInstallFailure}
+	healthy := enterpriseHookReconcileRow{User: "bob", UserHome: filepath.Join(t.TempDir(), "bob"),
+		SID: "S-1-5-21-1-2-3-1002", Connector: "codex", OK: true}
+	state := enterpriseHookGuardianState{FailureCount: 1, Results: []enterpriseHookReconcileRow{healthy, row}}
+	if removed, awaiting, linked := enterpriseHookExcusedFailures(state); removed != 0 || awaiting != 0 || linked != 1 {
+		t.Fatalf("per-user install counts = %d removed, %d awaiting, %d linked", removed, awaiting, linked)
+	}
+	if !enterpriseHookAccountLinkRow(row) || enterpriseHookAccountLinkRowStandalone(row) || enterpriseHookAccountForeignLinkRow(row) {
+		t.Fatal("the per-user install row joined another account-folder rule")
+	}
+	if note := enterpriseHookVerifyExcusedNote(enterpriseHookVerifyRun{}, row); !strings.Contains(note, "per-user DefenseClaw install") {
+		t.Fatalf("verify note = %q, want the per-user install named", note)
+	}
+	unrelated := state
+	unrelated.Results = []enterpriseHookReconcileRow{healthy, row, {User: "carol", Connector: "cursor", Error: "another target failed"}}
+	unrelated.FailureCount = 2
+	if removed, awaiting, linked := enterpriseHookExcusedFailures(unrelated); removed != 0 || awaiting != 0 || linked != 0 {
+		t.Fatalf("an unrelated failure was excused next to the per-user install: %d, %d, %d", removed, awaiting, linked)
+	}
+	// Removed per-user install: the recorded error is stale, not an excuse.
+	perUser = false
+	if removed, awaiting, linked := enterpriseHookExcusedFailures(state); removed != 0 || awaiting != 0 || linked != 0 {
+		t.Fatalf("a stale per-user install row was excused: %d, %d, %d", removed, awaiting, linked)
+	}
+	perUser = true
+	wrong := row
+	wrong.Error = "enterprise hooks: write managed Claude Code hook runtime: access is denied"
+	if enterpriseHookAccountLinkRow(wrong) {
+		t.Fatal("an ordinary failure on the per-user account was excused")
+	}
+	cfg.Enterprise.Profile = managed.ProfileSecureClient
+	if perUserFolder(target, home, sid) || enterpriseHookAccountLinkRow(row) {
+		t.Fatal("Secure Client adopted the standalone per-user install rule")
+	}
+}
+
+// Setup's manifest adoption excuses a guardian row only by its exact error
+// ($script:AccountLinkGuardianErrors). Without the per-user install error
+// there the first /ensure next to a per-user install failed (GAP-1733).
+func TestGAP1733SetupExcusesThePerUserInstallGuardianError(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "..", "packaging", "windows", "DefenseClawEnterprise.psm1"))
+	if err != nil {
+		t.Fatalf("read the Setup module: %v", err)
+	}
+	module := string(body)
+	start := strings.Index(module, "$script:AccountLinkGuardianErrors = @(")
+	if start < 0 {
+		t.Fatal("the Setup module has no AccountLinkGuardianErrors list")
+	}
+	end := strings.Index(module[start:], "\n)")
+	if end < 0 {
+		t.Fatal("the AccountLinkGuardianErrors list is not closed")
+	}
+	list := module[start : start+end]
+	for _, failure := range []string{
+		enterpriseHookAccountLinkFailure,
+		enterpriseHookAccountForeignLinkFailure,
+		enterpriseHookAccountPerUserInstallFailure,
+	} {
+		if !strings.Contains(list, "'"+strings.ReplaceAll(failure, "'", "''")+"'") {
+			t.Errorf("Setup does not excuse the guardian error %q", failure)
+		}
 	}
 }

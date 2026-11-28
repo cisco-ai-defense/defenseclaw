@@ -517,7 +517,7 @@ func TestMatchAtespace(t *testing.T) {
 		{[]string{"eng-*"}, "eng-evil", false, false, true},
 		{[]string{"ops"}, "eng-web", false, false, false},
 	} {
-		m, w := controller.MatchAtespace(tc.pats, tc.ns, tc.owned)
+		m, w := config.MatchAtespace(tc.pats, tc.ns, tc.owned)
 		if m != tc.match || (w != "") != tc.warn {
 			t.Errorf("%v %s owned=%v: match=%v warn=%q", tc.pats, tc.ns, tc.owned, m, w)
 		}

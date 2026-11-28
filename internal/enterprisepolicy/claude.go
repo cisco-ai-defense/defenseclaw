@@ -137,19 +137,16 @@ func renderClaudeHigherPrecedence(opts Options, policy config.ResolvedConnectorP
 // claudeHandlerIsOwned reports whether a decoded handler uses the current
 // managed form. Earlier forms need a policy refresh before they count.
 func claudeHandlerIsOwned(opts Options, raw any) bool {
-	command := stringField(raw, "command")
 	if opts.goos() == "windows" {
 		// Windows managed Setup registers the launcher through the guarded
 		// cmd.exe form; that is the current managed form on that host.
 		if fields := claudeHandlerFields(raw); fields != nil {
 			if launcher, _, guarded := connector.ClaudeCodeManagedGuardLauncher(fields); guarded {
-				return strings.EqualFold(launcher, opts.HookBinary)
+				return sameHookBinary(opts.goos(), launcher, opts.HookBinary)
 			}
 		}
-		if !strings.EqualFold(command, opts.HookBinary) {
-			return false
-		}
-	} else if command != opts.HookBinary {
+	}
+	if !sameHookBinary(opts.goos(), stringField(raw, "command"), opts.HookBinary) {
 		return false
 	}
 	var args []any
@@ -485,13 +482,21 @@ type claudeSource struct {
 }
 
 func readClaudeFileSources(opts Options) ([]claudeSource, error) {
+	return readClaudeFileSourcesWith(opts, readPolicyFile, nil)
+}
+
+// readClaudeFileSourcesWith is readClaudeFileSources reading each file with
+// read and handing the managed-settings.d listing to listed (when set): the
+// Windows version floor keeps both to check them again under the
+// transaction lock (GAP-1833).
+func readClaudeFileSourcesWith(opts Options, read func(Options, string) ([]byte, bool, error), listed func(dir string, exists bool, names []string)) ([]claudeSource, error) {
 	dir, err := ClaudeManagedDir(opts)
 	if err != nil {
 		return nil, err
 	}
 	var sources []claudeSource
 	base := joinFor(opts, dir, "managed-settings.json")
-	if data, exists, err := readPolicyFile(opts, base); err != nil {
+	if data, exists, err := read(opts, base); err != nil {
 		return nil, err
 	} else if exists {
 		doc, err := decodeOrderedObject(bytes.TrimPrefix(data, utf8BOM))
@@ -512,9 +517,12 @@ func readClaudeFileSources(opts Options) ([]claudeSource, error) {
 		}
 	}
 	sort.Strings(names)
+	if listed != nil {
+		listed(dropDir, err == nil, names)
+	}
 	for _, name := range names {
 		file := joinFor(opts, joinFor(opts, dir, "managed-settings.d"), name)
-		data, exists, err := readPolicyFile(opts, file)
+		data, exists, err := read(opts, file)
 		if err != nil {
 			return nil, err
 		}

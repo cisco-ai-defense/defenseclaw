@@ -1458,7 +1458,10 @@ BODY_FIELD_TEXT_BOXES = {
     ("defenseclaw-agent-360.json", "execution"),
     ("defenseclaw-blocked-events.json", "hook_event"),
 }
-_LABEL_VALUES = re.compile(r"^label_values\((\{[^{}|]*\}), ([A-Za-z_][A-Za-z0-9_]*)\)$")
+# A "|" may only sit inside a quoted matcher value (service_name=~"a|b", the
+# gateway and the Cowork VM sensor, rel-1-0-10 GAP-1751): outside quotes it
+# would start a pipeline stage, which the Loki label API refuses.
+_LABEL_VALUES = re.compile(r'^label_values\((\{(?:[^{}|"]|"[^"]*")*\}), ([A-Za-z_][A-Za-z0-9_]*)\)$')
 
 
 def _loki_variable_query(selector: str, label: str) -> dict[str, object]:
@@ -4180,6 +4183,25 @@ def test_tokenomics_dashboard_prometheus_queries_use_only_the_three_instruments(
     assert seen == set(_TOKENOMICS_METRICS)
 
 
+def test_tokenomics_interval_panels_count_the_first_sample_of_a_new_series() -> None:
+    """GAP-2030: increase() over a counter counts nothing for the first sample
+    of a series, so a model or connector used once vanished from every
+    per-interval panel and those panels totalled less than the stat panel. A
+    series with no value one interval earlier contributes its first value."""
+    checked = 0
+    for title, expression in _tokenomics_targets("prometheus"):
+        if "$__rate_interval" not in expression:
+            continue
+        calls = re.findall(
+            r"increase\((defenseclaw_[A-Za-z_]+_total(?:\{[^}]*\})?)\[\$__rate_interval\]\)", expression
+        )
+        assert calls and len(calls) == expression.count("increase("), title
+        for selector in calls:
+            assert f"{selector} unless {selector} offset $__interval" in expression, title
+        checked += 1
+    assert checked >= 10
+
+
 def test_tokenomics_dashboard_log_panels_read_registered_model_usage_fields() -> None:
     registry = _genai_registry()
     registered = {
@@ -4459,3 +4481,38 @@ def test_routing_board_fail_closed_panel_is_not_a_made_up_zero() -> None:
     # The leak path is visible with its own panel.
     leak = _panel(dashboard, "Sensitive requests that went to the original model")["targets"][0]["expr"]
     assert 'filtered_by="sensitive"' in leak and 'result="fallback"' in leak
+
+
+def _stream_selectors(node) -> list[str]:
+    """Every `service_name` matcher of every Loki query and variable of a dashboard."""
+    found: list[str] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in ("expr", "stream", "query") and isinstance(value, str):
+                found.extend(re.findall(r'service_name(=~|=)"([^"]*)"', value))
+            else:
+                found.extend(_stream_selectors(value))
+    elif isinstance(node, list):
+        for value in node:
+            found.extend(_stream_selectors(value))
+    return found
+
+
+@pytest.mark.parametrize("name", ["defenseclaw-ai-runtime.json", "defenseclaw-ai-discovery.json"])
+def test_cowork_vm_sensor_events_reach_the_ai_boards(name: str) -> None:
+    """rel-1-0-10 GAP-1751: the Cowork VM sensor sends its OTLP with the resource
+    service.name its package config sets, so a board that selects only
+    service_name="defenseclaw" showed nothing for it."""
+    config = (ROOT / "packaging/cowork-vm/config.yaml.tmpl").read_text(encoding="utf-8")
+    sensor = re.search(r"^\s*service\.name:\s*(\S+)\s*$", config, re.M)
+    assert sensor, "the Cowork VM package config no longer sets service.name"
+    sensor_name = sensor.group(1)
+    selectors = _stream_selectors(_dashboard(name))
+    assert selectors, f"{name} has no Loki stream selector; this test checks nothing"
+    for operator, value in selectors:
+        # Loki anchors a regex matcher; an equality matcher is the literal name.
+        selects = re.fullmatch(value, sensor_name) if operator == "=~" else value == sensor_name
+        assert selects, f'{name}: service_name{operator}"{value}" does not select {sensor_name}'
+        gateway = re.fullmatch(value, "defenseclaw") if operator == "=~" else value == "defenseclaw"
+        audit = value if operator == "=~" and "defenseclaw-audit" in value else None
+        assert gateway or audit, f'{name}: service_name{operator}"{value}" no longer selects the gateway'

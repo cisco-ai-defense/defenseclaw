@@ -51,7 +51,12 @@ type runLaunch struct {
 	Args []string `json:"args,omitempty"`
 	// Credentials are the --credential NAME=host[:port] flags.
 	Credentials []string `json:"credentials,omitempty"`
-	GitHubWrite bool     `json:"github_write,omitempty"`
+	// Vault are the --vault names.
+	Vault []string `json:"vault,omitempty"`
+	// VaultVersions are the vault entries' UpdatedAt (RFC3339Nano) at
+	// create: a start refuses an entry that changed or went away since.
+	VaultVersions map[string]string `json:"vault_versions,omitempty"`
+	GitHubWrite   bool              `json:"github_write,omitempty"`
 	// EnvNames are the --env names; EnvDigest tells two sets of --env
 	// flags apart without keeping their values.
 	EnvNames      []string `json:"env_names,omitempty"`
@@ -78,7 +83,7 @@ const runLaunchFile = "launch.json"
 // newRunLaunch is what a run with o remembers of sandbox sb.
 func newRunLaunch(sb *sandboxapi.Sandbox, spec *harness.Spec, o RunOptions, llm llmChoice) runLaunch {
 	rec := runLaunch{
-		SandboxID: sb.ID, Args: launchOptions(spec, o.Args), Credentials: o.Credentials, GitHubWrite: o.GitHubWrite,
+		SandboxID: sb.ID, Args: launchOptions(spec, o.Args), Credentials: o.Credentials, Vault: o.Vault, GitHubWrite: o.GitHubWrite,
 		EnvNames: envNames(o.Env), EnvDigest: envDigest(o.Env), LLM: firstNonEmpty(strings.ToLower(strings.TrimSpace(o.LLM)), llm.Configured),
 		BedrockRegion: o.BedrockRegion, Context: o.Context, Unmask: o.Unmask, HostPorts: o.HostPorts, NoMCP: o.NoMCP,
 		CPU: strings.TrimSpace(o.CPU), Memory: strings.TrimSpace(o.Memory), NoSnapshot: o.NoSnapshot,

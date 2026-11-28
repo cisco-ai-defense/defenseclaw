@@ -34,6 +34,24 @@ type Caller struct {
 	GroupsUnknown bool
 	// Matches answers a profile-style match against the caller facts.
 	Matches func(config.ProfileMatch) Tri
+	// Actor is the Agent Substrate actor the call comes from, read from
+	// its registration on the verified actor listener context (never a
+	// header). Nil for a host call.
+	Actor *Actor
+}
+
+// Actor is what routing.admin reads about an actor call: the
+// registration key (atespace plus actor UID, the actor budget key),
+// whether a person owns it, and the match.substrate facts.
+type Actor struct {
+	Key string
+	// Person is false for an attributed actor (D3): it is charged only to
+	// actor and connector budgets.
+	Person                       bool
+	Atespace, Template, Workload string
+	// BatchID is the registration batch id (from the launcher, never a
+	// header); scope batch budgets read it. Empty: not a batch call.
+	BatchID string
 }
 
 // Listener names where a request arrived.

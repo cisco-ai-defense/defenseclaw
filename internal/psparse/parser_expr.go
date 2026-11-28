@@ -125,7 +125,10 @@ func (p *parser) parsePostfix(e Expr) Expr {
 			e = p.parseMember(e, true)
 		case p.at(TokLBracket):
 			e = p.parseIndex(e)
-		case p.at(TokOperator) && (p.cur().Value == "++" || p.cur().Value == "--"):
+		case p.at(TokOperator) && (p.cur().Value == "++" || p.cur().Value == "--") && (p.exprMode || p.glued(e)):
+			// in command mode whitespace ends the argument: "msg" -- and
+			// 0x10 -- are an argument and the parameter "-", not a postfix
+			// decrement (rel-1-0-10:GAP-1854)
 			t := p.advance()
 			s0, _ := e.Span()
 			e = &Unary{span: span{s0, t.End}, Op: t.Value, Operand: e, Postfix: true}
@@ -134,6 +137,15 @@ func (p *parser) parsePostfix(e Expr) Expr {
 		}
 	}
 	return e
+}
+
+// glued reports the current token starting where e ends (no whitespace).
+func (p *parser) glued(e Expr) bool {
+	if e == nil {
+		return false
+	}
+	_, end := e.Span()
+	return p.cur().Start == end
 }
 
 func (p *parser) parseMember(target Expr, static bool) Expr {
@@ -212,7 +224,9 @@ func (p *parser) parseIndex(target Expr) Expr {
 	save := p.enter()
 	em := p.exprMode
 	p.exprMode = true
+	p.inIndex++
 	idx := p.parseExpression()
+	p.inIndex--
 	p.exprMode = em
 	p.leave(save)
 	s0 := 0

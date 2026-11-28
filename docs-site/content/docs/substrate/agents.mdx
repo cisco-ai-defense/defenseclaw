@@ -27,14 +27,14 @@ keywords:
 | Kiro CLI | `kiro-cli chat --no-interactive` | Vendor sign-in only | **Preview.** Hooks, tamper checks and refusals work. **Model access:** it needs a vendor sign-in or `KIRO_API_KEY` |
 | Antigravity CLI | `agy -p` | Vendor sign-in only | **Preview.** Hooks, tamper checks and refusals work. **Model access:** it needs a vendor sign-in or `GEMINI_API_KEY` |
 | Cursor Agent CLI | `cursor-agent -p` | Vendor key (`CURSOR_API_KEY`) | **Preview.** The hook path works. **Model access:** a vendor key or sign-in. `run` starts it, with the sign-in rules below |
-| Amp | `amp -x` | Vendor key (`AMP_API_KEY`) | Works against its API on a key, but **can't run**: it speaks WebSocket only, which Substrate's egress refuses (see below). `run` starts it in open source, with that note and the sign-in warning |
+| Amp | `amp -x` | Vendor key (`AMP_API_KEY`) | Works against its API on a key, but **can't run**: it speaks WebSocket only, which Substrate's egress refuses (see below). `run` starts it in open source after you say yes to the sign-in warning, with that note |
 | Devin CLI | `devin -p` | Vendor sign-in only | **Preview.** The hook path works. **Model access:** a vendor key or sign-in. `run` starts it, with the sign-in rules below |
 | OpenClaw, ZeptoClaw | No | No | Not in this release |
 | Claude desktop and Cowork, Cursor, Kiro and Antigravity editors, Copilot in VS Code | No | No | Desktop apps need a screen |
 
 **Supported** means a person can drive the agent in a real terminal, or a headless task runs, with DefenseClaw's hooks firing and a real model answering through the gateway. Only Claude Code is started through the launcher; the others run through the kit and a gateway. **Preview** means the hooks work, but the agent needs a vendor key or sign-in for a model.
 
-`defenseclaw substrate run` starts all ten agents. For Amp it first prints that Amp's WebSocket connections are not passed through yet, so it may not reach its model. Cursor, Kiro, Antigravity, Devin and Amp follow the sign-in rules below.
+`defenseclaw substrate run` starts all ten agents. For Amp it also prints that Amp's WebSocket connections are not passed through yet, so it may not reach its model. Cursor, Kiro, Antigravity, Devin and Amp follow the sign-in rules below.
 
 Each connector has a headless command; a connector that cannot run one is interactive only, and `run --task` says so. The full command lines the relay runs are:
 
@@ -64,9 +64,11 @@ Substrate's egress gateway can add an API key or token to an agent's requests, s
 | | Open source | Managed enterprise |
 |---|---|---|
 | Claude Code, Codex, OpenCode, Copilot CLI, Hermes | Model through the DefenseClaw gateway; no sign-in in the actor | Same |
-| Cursor, Kiro, Antigravity | Starts with a warning that the sign-in token will sit in the actor and its snapshots | Starts only when its key is bound as a Substrate secret; otherwise refused at create |
-| Devin | Starts with the warning. Devin has no API key route | Refused at create |
-| Amp | Starts with warnings | Refused even with a key: Amp rewrites its config folder at every start, so DefenseClaw's hook registration cannot be made root-owned |
+| Cursor, Kiro, Antigravity | Shows a warning that the sign-in token will sit in the actor and its snapshots, and starts only after you say yes | Starts only when its key is bound as a Substrate secret; otherwise refused at create |
+| Devin | Shows the warning and asks for a yes. Devin has no API key route | Refused at create |
+| Amp | Shows its warnings and asks for a yes | Refused even with a key: Amp rewrites its config folder at every start, so DefenseClaw's hook registration cannot be made root-owned |
+
+In open source the warning comes before anything is created or uploaded. The gateway answers the first create `428` with the reason `signin_ack_required` and the warning; `run` shows it and asks `Start Amp anyway? [y/N]`. No ends the run with nothing created. Yes, or `--yes` (which a script or a `--batch` needs), sends the create again with your acknowledgement, and the gateway writes a `signin_acknowledged` audit event with who you are, the agent and the actor.
 
 **Where the warning shows.** The launcher prints it when it creates the actor. While you are attached it stays on the bottom line, the launcher's own row, which the agent cannot draw on, so a full-screen agent such as Antigravity can't clear it (asks take that row while one is waiting). The launcher prints it again when you detach or the agent exits. With `--no-asks`, or when the launcher's output is not a terminal, there is no bottom line: the warning is printed at create and after the attachment, and the relay also writes it at the top of the agent's terminal, where an agent that clears the screen erases it.
 
@@ -81,14 +83,14 @@ A managed refusal comes back before any actor exists, as `403` with the reason `
 | Tool-call checks (hooks) | Yes | Yes | Yes, same rules and messages |
 | Tool chains and intent | Per session | Per session | Per session and per actor, kept across suspend and resume |
 | Model request and reply guardrails | Through the guardrail proxy, where the connector routes to it | The model call goes to the provider directly | **Always**, for the agents that route through the gateway, because the provider is only reachable through the proxy |
-| Routing, budgets and cost | Where the proxy is used | Where the proxy is used | Not merged yet. See [Feature coverage](/docs/substrate/features#routing-budgets-and-cost) |
+| Routing, budgets and cost | Where the proxy is used | Where the proxy is used | Preview. See [Feature coverage](/docs/substrate/features#routing-budgets-and-cost) |
 | Network control | Not isolated | Egress proxy, block and allow lists, asks | Denied by default; DefenseClaw writes each agent's allow list and checks each request; asks |
 | Secrets | In the user's environment | Placeholder key in the sandbox | No secret value in the actor; the egress gateway swaps placeholders on bound hosts only |
 | Asks and approvals | In the agent | In the activity feed and `approvals` | In your terminal session and `approvals`, so you can answer after detaching |
 | Unattended runs | n/a | n/a | `--task`, `--batch`, from CI |
 | Your project | In place | Live (Linux, Docker) or copy | Copy or git clone only |
 | Undo | No | Undo point, or pull from a copy | Restore points of the agent's folder (`checkpoint`, `undo`), and `pull` |
-| Your local MCP servers | Yes | Imported (Claude Code, Codex) | No. Only MCP servers in the image or reachable over the network |
+| Your local MCP servers | Yes | Imported (Claude Code, Codex) | **Preview.** Offered with `--mcp NAME=COMMAND` while the launcher is attached; the command runs on your computer. Other MCP servers are in the image or reachable over the network |
 | Ports on your machine | Yes | `--host-port`, after approval | No |
 | Process tree, kernel feed | Host feeds | Linux | No. Substrate reports CPU and memory per agent |
 | Interactive terminal | Yes | Yes, over SSH | Yes, through the launcher and the terminal relay in the kit |

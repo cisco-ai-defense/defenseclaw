@@ -167,6 +167,39 @@ func TestProxy_PerConnectorPrefixStrip(t *testing.T) {
 	}
 }
 
+// assertHermesSwitchRefusedWithoutReceipt is the native Windows cell of the
+// Hermes switch (rel-1-0-10:GAP-1618). Windows Hermes setup runs only on a
+// fresh protected executable-selection receipt of the installer path, or a
+// reusable protected contract lock (validateHermesWindowsSetupAdmission). The
+// gateway test has neither, and the admission seams that accept a test
+// executable belong to the connector package, so the contract here is the
+// refusal: Setup names the admission, nothing is written before it, and the
+// switch leaves codex active with no state persisted. The accepted path is
+// covered by the connector package's admission tests.
+func assertHermesSwitchRefusedWithoutReceipt(t *testing.T, p *GuardrailProxy, opts connector.SetupOpts) {
+	t.Helper()
+	if got := p.connector.Name(); got != "codex" {
+		t.Fatalf("a Hermes switch without a protected receipt left %q active, want codex", got)
+	}
+	if persisted := connector.LoadActiveConnector(opts.DataDir); persisted != "" {
+		t.Fatalf("a refused Hermes switch persisted state %q", persisted)
+	}
+	if _, err := os.Stat(filepath.Join(opts.DataDir, "agent_selection.json")); !os.IsNotExist(err) {
+		t.Fatalf("the test carries a selection receipt (err=%v); it checks the refusal without one", err)
+	}
+	hermes, ok := p.registry.Get("hermes")
+	if !ok {
+		t.Fatal("hermes is not in the registry")
+	}
+	err := hermes.Setup(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "Hermes executable admission") {
+		t.Fatalf("Hermes Setup without a protected receipt = %v, want the executable admission refusal", err)
+	}
+	if persisted := connector.LoadActiveConnector(opts.DataDir); persisted != "" {
+		t.Fatalf("a refused Hermes Setup persisted state %q", persisted)
+	}
+}
+
 // TestSwitchConnector_PerConnectorPersistsState parametrizes the
 // existing TestSwitchConnectorLocked_TearsDownOldAndSetsUpNew over
 // the full matrix (plan E1, item 2c). For each pair (from, to) the
@@ -190,9 +223,6 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 	cases := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "devin", "copilot", "antigravity", "opencode", "amp"}
 	for _, target := range cases {
 		t.Run(target, func(t *testing.T) {
-			if target == "hermes" && runtime.GOOS == "windows" {
-				t.Skip("native Windows Hermes setup requires a fresh protected executable-selection receipt; dedicated admission tests cover that authority path")
-			}
 			dir := t.TempDir()
 			// Copilot's Setup refuses any WorkspaceDir nested inside
 			// DataDir (audit DB / gateway config / secrets must not
@@ -256,6 +286,10 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 			}
 
 			p.switchConnectorLocked(target)
+			if target == "hermes" && runtime.GOOS == "windows" {
+				assertHermesSwitchRefusedWithoutReceipt(t, p, setupOpts)
+				return
+			}
 			if !connector.ConnectorSupportedOnHostOS(target) {
 				if p.connector.Name() != "codex" {
 					t.Fatalf("unsupported connector switch changed active connector to %q", p.connector.Name())
@@ -299,9 +333,6 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 
 	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "devin", "copilot", "antigravity", "opencode", "amp"} {
 		t.Run(target, func(t *testing.T) {
-			if target == "hermes" && runtime.GOOS == "windows" {
-				t.Skip("native Windows Hermes setup requires a fresh protected executable-selection receipt; dedicated admission tests cover that authority path")
-			}
 			dir := t.TempDir()
 			// See note in TestSwitchConnector_PerConnectorPersistsState:
 			// keep WorkspaceDir outside DataDir so copilot's Setup
@@ -356,6 +387,10 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 			p.rtMu.Lock()
 			p.switchConnectorLocked(target)
 			p.rtMu.Unlock()
+			if target == "hermes" && runtime.GOOS == "windows" {
+				assertHermesSwitchRefusedWithoutReceipt(t, p, setupOpts)
+				return
+			}
 			if !connector.ConnectorSupportedOnHostOS(target) {
 				if p.connector.Name() != "codex" {
 					t.Fatalf("unsupported runtime switch changed active connector to %q", p.connector.Name())

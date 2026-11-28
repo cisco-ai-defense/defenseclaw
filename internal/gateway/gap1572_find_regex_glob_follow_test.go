@@ -22,7 +22,18 @@ import (
 // link before the walk. The verdict with the file absent is the verdict with
 // it present, in every tier. Generic tests over a walk that does not follow
 // links (*, *.json, -regex '.*\.json', -P) still reach no absent hook file.
-func TestFindRegexGlobAndLinkFollowKeepTheHookFileFiveTiers(t *testing.T) {
+//
+// It runs as one test per connector (rel-1-0-10:GAP-1874): the ten cells took up
+// to 456 s under -race on a hosted runner, more than one gateway shard holds.
+func TestFindRegexGlobAndLinkFollowKeepTheHookFileFiveTiersClaudeCode(t *testing.T) {
+	findRegexGlobAndLinkFollowKeepTheHookFileFiveTiers(t, "claudecode")
+}
+
+func TestFindRegexGlobAndLinkFollowKeepTheHookFileFiveTiersCodex(t *testing.T) {
+	findRegexGlobAndLinkFollowKeepTheHookFileFiveTiers(t, "codex")
+}
+
+func findRegexGlobAndLinkFollowKeepTheHookFileFiveTiers(t *testing.T, conn string) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX find spellings; the hook route reads PowerShell on native Windows")
 	}
@@ -91,7 +102,7 @@ func TestFindRegexGlobAndLinkFollowKeepTheHookFileFiveTiers(t *testing.T) {
 	}
 	cells := []cell{{"default", "default", false}, {"permissive", "permissive", false}, {"strict", "strict", false},
 		{"managed", "default", true}, {"managed-strict", "strict", true}}
-	for _, conn := range []string{"claudecode", "codex"} {
+	{
 		for _, c := range cells {
 			t.Run(conn+"/"+c.name, func(t *testing.T) {
 				home := filepath.Join(t.TempDir(), "home")

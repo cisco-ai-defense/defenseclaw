@@ -98,6 +98,12 @@ type inReader struct {
 	// then the outage reader counts them as not sent.
 	gate     chan struct{}
 	gateOnce sync.Once
+	// replay is input typed while disconnected that goes before the live
+	// keys (B3.1); offer, in ask mode, is held until the person's next key:
+	// Enter sends it, anything else drops it (decided reports which). Both
+	// are set before the gate opens and zeroed once used.
+	replay, offer []byte
+	decided       func(sent bool)
 }
 
 // openGate lets the reader take keys.
@@ -105,6 +111,63 @@ func (r *inReader) openGate() {
 	if r.gate != nil {
 		r.gateOnce.Do(func() { close(r.gate) })
 	}
+}
+
+// gated reports that the reader waits for the gate, so what is set before
+// openGate is seen by Read.
+func (r *inReader) gated() bool { return r.gate != nil }
+
+// openGateReplay opens the gate with b sent first (ask false) or offered
+// (ask true). It must be called before the gate opens, once.
+func (r *inReader) openGateReplay(b []byte, ask bool, decided func(sent bool)) {
+	if ask {
+		r.offer, r.decided = b, decided
+	} else {
+		r.replay = b
+	}
+	r.openGate()
+}
+
+// next waits for the next chunk of live keys.
+func (r *inReader) next() ([]byte, error) {
+	select {
+	case <-r.stop:
+		return nil, io.EOF
+	case <-r.h.eof:
+		return nil, io.EOF
+	case b := <-r.h.ch:
+		return b, nil
+	}
+}
+
+// answerOffer reads the person's answer to the offer: Enter sends the kept
+// keys (the Enter itself is not sent), a lone Esc drops them, and any other
+// key drops them and goes on to the agent.
+func (r *inReader) answerOffer() error {
+	b, err := r.next()
+	if err != nil {
+		zero(r.offer)
+		r.offer = nil
+		if r.decided != nil {
+			r.decided(false)
+		}
+		return err
+	}
+	sent := len(b) > 0 && (b[0] == '\r' || b[0] == '\n')
+	switch {
+	case sent:
+		r.replay, r.pending = r.offer, b[1:]
+	case len(b) == 1 && b[0] == 0x1b:
+		zero(r.offer)
+	default:
+		zero(r.offer)
+		r.pending = b
+	}
+	r.offer = nil
+	if r.decided != nil {
+		r.decided(sent)
+	}
+	return nil
 }
 
 func (r *inReader) Read(p []byte) (int, error) {
@@ -117,21 +180,29 @@ func (r *inReader) Read(p []byte) (int, error) {
 			return 0, io.EOF
 		}
 	}
+	if r.offer != nil {
+		if err := r.answerOffer(); err != nil {
+			return 0, err
+		}
+	}
+	if len(r.replay) > 0 {
+		n := copy(p, r.replay)
+		zero(r.replay[:n])
+		r.replay = r.replay[n:]
+		return n, nil
+	}
 	if len(r.pending) > 0 {
 		n := copy(p, r.pending)
 		r.pending = r.pending[n:]
 		return n, nil
 	}
-	select {
-	case <-r.stop:
-		return 0, io.EOF
-	case <-r.h.eof:
-		return 0, io.EOF
-	case b := <-r.h.ch:
-		n := copy(p, b)
-		r.pending = b[n:]
-		return n, nil
+	b, err := r.next()
+	if err != nil {
+		return 0, err
 	}
+	n := copy(p, b)
+	r.pending = b[n:]
+	return n, nil
 }
 
 func (r *inReader) close() { r.once.Do(func() { close(r.stop) }) }

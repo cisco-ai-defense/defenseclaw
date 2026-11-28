@@ -16,13 +16,9 @@ import (
 // fault file (DEFENSECLAW_TASK_FAULTS) in which the hooks record each call
 // the gateway did not answer, and a run with faults is not a success.
 
-// faultScript stands in for an agent whose hook met the outage: it records
-// one unanswered call as the kit hook does, then exits with $1.
-const faultScript = `[ -n "$DEFENSECLAW_TASK_FAULTS" ] && printf '2026-11-15T06:32:10Z PostToolUse\n' >> "$DEFENSECLAW_TASK_FAULTS"; echo step-1-done; exit "$CODE"`
-
 func faultRun(t *testing.T, code string, extraEnv map[string]string) (TaskEnd, *eventLog) {
 	t.Helper()
-	cfg := stallConfig(faultScript)
+	cfg := stallConfig("fault")
 	cfg.Relay.Env = map[string]string{"CODE": code}
 	for k, v := range extraEnv {
 		cfg.Relay.Env[k] = v
@@ -63,7 +59,7 @@ func TestGAP0326AgentFailureAfterAnOutageKeepsItsCode(t *testing.T) {
 }
 
 func TestGAP0326TaskWithoutFaultsIsUnchanged(t *testing.T) {
-	cfg := stallConfig(`echo "faults=${DEFENSECLAW_TASK_FAULTS:+set}"; exit 0`)
+	cfg := stallConfig("faults-env")
 	var log eventLog
 	end := runWithin(t, 30*time.Second, func() TaskEnd {
 		return RunHeadless(context.Background(), cfg, TaskRequest{Prompt: "x"},

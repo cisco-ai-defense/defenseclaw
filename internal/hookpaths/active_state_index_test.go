@@ -66,13 +66,17 @@ func TestGAP1409OrdinaryHardlinksShareOneStateIndex(t *testing.T) {
 		}
 		words = append(words, name+".link")
 	}
+	// One request is one hook call: the fixture was just written, so the
+	// index is kept for the call (its folders have not settled).
+	end := HookCall()
+	defer end()
 	before := activeStateIndexWalks.Load()
 	command := "cat " + strings.Join(words, " ") + " > report.txt"
 	if ActionStateTargetMention(command, cwd, home) {
 		t.Fatal("ordinary hard links were treated as active state")
 	}
 	for _, word := range words {
-		if mapped, same := ResolveActiveStateHardlinkTarget(filepath.Join(cwd, word), home); same {
+		if mapped, same, _ := ResolveActiveStateHardlinkTarget(filepath.Join(cwd, word), home); same {
 			t.Fatalf("ordinary hard link %s mapped to %s", word, mapped)
 		}
 	}
@@ -84,7 +88,7 @@ func TestGAP1409OrdinaryHardlinksShareOneStateIndex(t *testing.T) {
 	if err := os.Link(filepath.Join(home, ".defenseclaw", "config.yaml"), alias); err != nil {
 		t.Fatal(err)
 	}
-	if mapped, same := ResolveActiveStateHardlinkTarget(alias, home); !same ||
+	if mapped, same, _ := ResolveActiveStateHardlinkTarget(alias, home); !same ||
 		mapped != filepath.Join(home, ".defenseclaw", "config.yaml") {
 		t.Fatalf("active config hard link mapped=%q same=%t", mapped, same)
 	}
@@ -111,29 +115,29 @@ func TestGAP1409ActiveStateIndexIsBounded(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, same := ResolveActiveStateHardlinkTarget(configAlias, home); !same {
+	if _, same, _ := ResolveActiveStateHardlinkTarget(configAlias, home); !same {
 		t.Fatal("bounded index lost the active config")
 	}
-	if _, same := ResolveActiveStateHardlinkTarget(hookAlias, home); !same {
+	if _, same, _ := ResolveActiveStateHardlinkTarget(hookAlias, home); !same {
 		t.Fatal("bounded index lost the installed hook")
 	}
-	if files := activeStateIdentities(mustResolve(t, filepath.Join(home, ".defenseclaw"))); len(files) > activeStateIndexEntries {
+	if files, _ := activeStateIdentities(mustResolve(t, filepath.Join(home, ".defenseclaw"))); len(files) > activeStateIndexEntries {
 		t.Fatalf("index holds %d files over the %d entry bound", len(files), activeStateIndexEntries)
 	}
-	if _, same := ResolveActiveStateHardlinkTarget(lateAlias, home); same {
+	if _, same, _ := ResolveActiveStateHardlinkTarget(lateAlias, home); same {
 		t.Fatal("walk did not stop at the entry bound")
 	}
 
 	resetActiveStateIndex(t)
-	budget := activeStateIndexBudget
-	activeStateIndexBudget = -time.Second
-	t.Cleanup(func() { activeStateIndexBudget = budget })
+	savedEntries := activeStateIndexEntries
+	activeStateIndexEntries = 0
+	t.Cleanup(func() { activeStateIndexEntries = savedEntries })
 	start := time.Now()
-	if _, same := ResolveActiveStateHardlinkTarget(configAlias, home); same {
-		t.Fatal("expired walk budget still indexed files")
+	if _, same, _ := ResolveActiveStateHardlinkTarget(configAlias, home); same {
+		t.Fatal("an exhausted entry bound still indexed files")
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("expired walk budget took %s", elapsed)
+		t.Fatalf("an exhausted entry bound took %s", elapsed)
 	}
 }
 
@@ -147,7 +151,7 @@ func TestGAP1409ActiveStateIndexConfirmsCurrentFile(t *testing.T) {
 	if err := os.Link(config, alias); err != nil {
 		t.Fatal(err)
 	}
-	if _, same := ResolveActiveStateHardlinkTarget(alias, home); !same {
+	if _, same, _ := ResolveActiveStateHardlinkTarget(alias, home); !same {
 		t.Fatal("active config alias not mapped")
 	}
 	replacement := config + ".new"
@@ -157,7 +161,7 @@ func TestGAP1409ActiveStateIndexConfirmsCurrentFile(t *testing.T) {
 	if err := os.Rename(replacement, config); err != nil {
 		t.Fatal(err)
 	}
-	if mapped, same := ResolveActiveStateHardlinkTarget(alias, home); same {
+	if mapped, same, _ := ResolveActiveStateHardlinkTarget(alias, home); same {
 		t.Fatalf("alias of the replaced config still mapped to %s", mapped)
 	}
 }

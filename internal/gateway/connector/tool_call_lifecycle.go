@@ -18,6 +18,7 @@ package connector
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -982,7 +983,7 @@ func openCodeToolCallLifecycle() ToolCallLifecycleContract {
 			StructuredActionEvents: []string{"tool.execute.before"},
 			ResultContentEvents:    []string{"tool.execute.after"},
 			StateTransitionEvents:  []string{},
-			AuditOnlyEvents:        []string{"session.created", "session.status", "session.idle", "session.error", "session.deleted"},
+			AuditOnlyEvents:        []string{"session.created", "session.status", "session.idle", "session.error", "session.deleted", "session.prompt"},
 		},
 		CoveredToolSurfaces: []ToolSurface{
 			ToolSurfaceGeneric, ToolSurfaceShell, ToolSurfaceFileRead,
@@ -1032,4 +1033,24 @@ func ampToolCallLifecycle() ToolCallLifecycleContract {
 			"tool.result gating can withhold or replace model-bound content but cannot undo completed tool side effects; skill invocation and remote Orb execution do not have separately certified lifecycle coverage.",
 		},
 	}
+}
+
+// StructuredActionEvents returns, sorted, every hook event that one of the
+// connector's hook contracts (the built-in ones of this OS and the
+// sandbox-only ones) routes to structured action evaluation: the events that
+// carry a tool call before it runs. A Substrate actor's kit makes its
+// file-system proofs for a shell call on these events.
+func StructuredActionEvents(connectorName string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, contract := range append(KnownHookContracts(connectorName), sandboxOnlyHookContracts(connectorName)...) {
+		for _, event := range contract.ToolCallLifecycle.Routing.StructuredActionEvents {
+			if !seen[event] {
+				seen[event] = true
+				out = append(out, event)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }

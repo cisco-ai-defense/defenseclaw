@@ -200,6 +200,7 @@ func (a *App) Status(ctx context.Context, name string, format OutputFormat) erro
 		if err != nil {
 			return apiError(err)
 		}
+		st = a.accountStatus(ctx, st, "")
 		if format == OutputJSON {
 			return writeJSON(a.IO.Out, neutralStatus(st))
 		}
@@ -264,19 +265,17 @@ func (a *App) printStatus(st *sandboxapi.Status) {
 		// Setup would stop at the other account's gateway (GAP-0307).
 		state = "off: another account runs this machine's OpenShell gateway (" + st.GatewayElsewhere + "); see `" + CommandName + " doctor`"
 	}
-	if st.Enabled {
+	if st.Enabled && st.ManagedOff() != sandboxapi.ManagedOffProfile && st.ManagedOff() != sandboxapi.ManagedOffOrganization {
 		state = "on"
 	}
 	row("Sandboxes", state)
 	if st.Enabled {
 		if st.Available {
 			row("OpenShell", "connected")
-		} else if st.Managed != nil && st.PortConflict != nil {
-			row("OpenShell", "unavailable: "+st.PortConflict.Message())
-		} else if st.Managed != nil && st.GatewayElsewhere != "" {
-			row("OpenShell", managedAccountBusyText)
-		} else if st.Managed != nil && st.Managed.Unavailable == "" {
-			row("OpenShell", a.managedFirstRunText(st.Managed))
+		} else if st.Managed != nil {
+			if text, ok := a.managedOpenShellRow(st); ok {
+				row("OpenShell", text)
+			}
 		} else {
 			row("OpenShell", "unavailable: "+firstNonEmpty(st.Reason, "not connected"))
 		}
@@ -620,6 +619,10 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	}
 	started, kept := false, sb.Phase == "ready"
 	if sb.Phase != "ready" {
+		// The vault is sealed before the sandbox can capture into it.
+		if err := a.sealVault(); err != nil {
+			return err
+		}
 		a.note("starting " + sb.Name + "…")
 		before := sb
 		startedSandbox, retained, startErr := a.startSandbox(ctx, api, before, StartOptions{}, true)
@@ -1292,6 +1295,10 @@ func (a *App) Start(ctx context.Context, name string, o StartOptions) error {
 		a.ok(sb.Name + " is already running → attach with `" + CommandName + " connect " + sb.Name + "`")
 		return nil
 	}
+	// The vault is sealed before the sandbox can capture into it.
+	if err := a.sealVault(); err != nil {
+		return err
+	}
 	kept := false
 	if sb, kept, err = a.startSandbox(ctx, api, sb, o, false); err != nil {
 		return err
@@ -1356,7 +1363,14 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 		if st != nil && !st.Enabled {
 			// Concatenated, so the hint scan reads the suggested command
 			// (TestSandboxHintsNameCommandsThatExist).
-			return errors.New("the administrator has turned sandboxes off (openshell.enabled); kept sandboxes cannot be deleted until the account gateway runs. Ask the administrator to turn sandboxes on temporarily, then run `" + CommandName + " delete " + strings.Join(o.Names, " ") + "` again")
+			again := "run `" + CommandName + " delete " + strings.Join(o.Names, " ") + "` again"
+			if st.Managed != nil {
+				// Why sandboxes are off is sandboxapi.Status.ManagedOff, in the
+				// words of `sandbox status`, never "the administrator turned
+				// them off" for a profile's denial or another account's gateway.
+				return errors.New(st.OffMessage() + " Kept sandboxes cannot be deleted until the account gateway runs; once sandboxes are on for your account, " + again)
+			}
+			return errors.New("the administrator has turned sandboxes off (openshell.enabled); kept sandboxes cannot be deleted until the account gateway runs. Ask the administrator to turn sandboxes on temporarily, then " + again)
 		}
 	}
 	var errs []error

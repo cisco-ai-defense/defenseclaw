@@ -69,6 +69,7 @@ func reconcileClaude(t *testing.T, opts Options) State {
 // The floor is its own drop-in: the hook drop-in keeps its exact bytes and
 // never carries requiredMinimumVersion.
 func TestClaudeVersionFloorWrittenWhenNoSourceSetsIt(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	withHigherSources(t)
 	opts := testOptions(t)
 	adminSettings := `{"permissions": {"deny": ["Bash(rm -rf /)"]}}` + "\n"
@@ -134,6 +135,7 @@ func TestClaudeVersionFloorWrittenWhenNoSourceSetsIt(t *testing.T) {
 // byte, DefenseClaw withdraws its own drop-in at the next reconcile, and the
 // floor returns when the administrator removes the key.
 func TestClaudeVersionFloorKeepsAnAdministratorValue(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	cases := []struct {
 		name   string
 		file   string
@@ -215,6 +217,7 @@ func TestClaudeVersionFloorKeepsAnAdministratorValue(t *testing.T) {
 // drop-in stays (its later value applies), verify passes, and the
 // administrator file is untouched.
 func TestClaudeVersionFloorReportsBelowFloorAndInvalidValues(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, file := range []string{"managed-settings.json", "managed-settings.d/00-admin.json"} {
 		for _, tc := range []struct {
 			value   string
@@ -269,6 +272,7 @@ func TestClaudeVersionFloorReportsBelowFloorAndInvalidValues(t *testing.T) {
 // and Claude Code then ignores it: no floor applies. Under enforce and merge
 // that fails verify; DefenseClaw never edits the source.
 func TestClaudeVersionFloorInvalidValueAfterTheDropInFailsVerify(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	const hklm = `HKLM\SOFTWARE\Policies\ClaudeCode\Settings`
 	for _, higher := range []bool{false, true} {
 		t.Run(map[bool]string{false: "later drop-in", true: "higher-precedence source"}[higher], func(t *testing.T) {
@@ -309,6 +313,7 @@ func TestClaudeVersionFloorInvalidValueAfterTheDropInFailsVerify(t *testing.T) {
 }
 
 func TestClaudeVersionFloorModes(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	withHigherSources(t)
 
 	report := testOptions(t)
@@ -374,6 +379,7 @@ func requireUnrecordedFloorFile(t *testing.T, opts Options, want, step string) {
 // byte through reconcile, verify and removal, and it is reported as the
 // administrator's, never as set by DefenseClaw.
 func TestClaudeVersionFloorLeavesAnUnrecordedAdministratorFloor(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	modes := []struct {
 		name      string
 		mode      string
@@ -519,6 +525,7 @@ func TestClaudeVersionFloorLeavesAnUnrecordedAdministratorFloor(t *testing.T) {
 }
 
 func TestClaudeVersionFloorOnDarwinAndItsPlist(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	withHigherSources(t)
 	opts := testOptions(t)
 	opts.GOOS = "darwin"
@@ -543,6 +550,7 @@ func TestClaudeVersionFloorOnDarwinAndItsPlist(t *testing.T) {
 // higher_precedence_sources: warn) even when that source embeds DefenseClaw's
 // hooks.
 func TestClaudeVersionFloorIsNotAppliedUnderAHigherPrecedenceSource(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	const source = `HKLM\SOFTWARE\Policies\ClaudeCode\Settings`
 	hooks, err := renderClaudeDropIn(testOptions(t), testOptions(t).PolicyFor("claudecode"))
 	if err != nil {
@@ -596,6 +604,7 @@ func TestClaudeVersionFloorIsNotAppliedUnderAHigherPrecedenceSource(t *testing.T
 // The Windows pass runs inside the lifecycle's lock, only for the directory
 // that lock guards, and takes no lock when there is nothing to do.
 func TestClaudeVersionFloorLockedPass(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	withHigherSources(t)
 	opts := testOptions(t)
 	// The linux-rooted tree joins with "/" (also on a Windows host).
@@ -728,6 +737,7 @@ func TestStandaloneOptionsCarryTheVersionFloorMode(t *testing.T) {
 // fleet that deploys one of them passes verify without a hand edit. The
 // managed-settings.d hook drop-in never carries the floor.
 func TestClaudeHigherPrecedenceExportsCarryTheVersionFloor(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	wants := map[string]string{
 		"claude-hklm-json":        `"requiredMinimumVersion":"2.1.154"`,
 		"reg":                     `\"requiredMinimumVersion\":\"2.1.154\"`,
@@ -795,6 +805,7 @@ func TestClaudeHigherPrecedenceExportsCarryTheVersionFloor(t *testing.T) {
 // pass records it again and withdraws it when an administrator sets the key,
 // and removal deletes it.
 func TestClaudeVersionFloorSurvivesACrashBeforeItsRecordIsSaved(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	previous := sha256Hex([]byte("{\n  \"requiredMinimumVersion\": \"2.1.100\"\n}\n"))
 	for _, next := range []string{"verify", "reconcile", "remove"} {
 		t.Run(next, func(t *testing.T) {
@@ -853,6 +864,7 @@ func TestClaudeVersionFloorSurvivesACrashBeforeItsRecordIsSaved(t *testing.T) {
 // the lifecycle's ensure re-applies and withdraws the drop-in; then the
 // administrator's value applies and verify passes.
 func TestClaudeVersionFloorAdministratorValueAddedAfterInstall(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, file := range []string{"managed-settings.json", "managed-settings.d/00-admin.json"} {
 		t.Run(file, func(t *testing.T) {
 			withHigherSources(t)
@@ -903,6 +915,7 @@ func TestClaudeVersionFloorAdministratorValueAddedAfterInstall(t *testing.T) {
 // floor to that contract's lowest version, and the report says why; back on
 // the oldest contract the floor returns to the lowest verified version.
 func TestClaudeVersionFloorFollowsTheMachineHookContract(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	withHigherSources(t)
 	opts := testOptions(t)
 	opts.ClaudeMachineHookContract = "claudecode-hooks-v2"

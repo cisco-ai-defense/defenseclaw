@@ -28,6 +28,7 @@ import (
 // guard. An empty file holds no bytes to lose and reads as an empty
 // document, so a repair still registers the guard in it.
 func TestWindowsCursorMachineGuardRepairKeepsAHooksFileThatIsNotJSON(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	const hook = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
 	invalid := []struct {
 		name string

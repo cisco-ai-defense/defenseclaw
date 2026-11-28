@@ -29,6 +29,10 @@ spec:
         {{- include "dc.podAnnotations" $sel | nindent 8 }}
     spec:
       {{- include "dc.podSpecCommon" (dict "ctx" . "sa" "gateway" "values" .Values.gateway) | nindent 6 }}
+      {{- if .Values.gateway.skillScanner.enabled }}
+      # The scan worker must be PID 1 of its container (GAP-0828).
+      shareProcessNamespace: false
+      {{- end }}
       topologySpreadConstraints:
       - maxSkew: 1
         topologyKey: kubernetes.io/hostname
@@ -128,6 +132,49 @@ spec:
         {{- with .Values.gateway.extraVolumeMounts }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+        {{- if .Values.gateway.skillScanner.enabled }}
+        # Scan jobs for the skill scanner sidecar (GAP-0477).
+        - name: skill-scan
+          mountPath: /run/defenseclaw-scan
+        {{- end }}
+      {{- if .Values.gateway.skillScanner.enabled }}
+      # The skill scanner sidecar (GAP-0477): no Secret mounts and no
+      # service-account token (the pod mounts none by default and this
+      # container lists only its two folders), no port.
+      - name: skill-scanner
+        image: {{ include "dc.scannerImage" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        args:
+        - substrate
+        - scan-worker
+        - --dir=/run/defenseclaw-scan
+        # One scan's bound: substrate.skills.scan.timeout (B5.4).
+        - --timeout={{ dig "skills" "scan" "timeout" "20s" (.Values.config.substrate | default dict) }}
+        # The container is the scanner's boundary (GAP-0828): RuntimeDefault
+        # refuses the namespaces the laptop's containment uses, so the worker
+        # is PID 1 of this container's own PID namespace (the pod does not
+        # share one), scans one job at a time and clears the container after
+        # each. Its security settings are fixed here; its uid and gid are the
+        # gateway's, from podSecurityContext (GAP-0876).
+        - --pod-contained
+        resources:
+          {{- toYaml .Values.gateway.skillScanner.resources | nindent 10 }}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: {{ include "dc.scannerUser" (dict "Values" .Values "field" "runAsUser") }}
+          runAsGroup: {{ include "dc.scannerUser" (dict "Values" .Values "field" "runAsGroup") }}
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+          seccompProfile:
+            type: RuntimeDefault
+        volumeMounts:
+        - name: skill-scan
+          mountPath: /run/defenseclaw-scan
+        - name: skill-scan-tmp
+          mountPath: /tmp
+      {{- end }}
       volumes:
       {{- include "dc.volumes" $sel | nindent 6 }}
       {{- include "dc.gatewaySecretVolumes" . | nindent 6 }}
@@ -159,6 +206,15 @@ spec:
       {{- toYaml . | nindent 6 }}
       {{- end }}
       {{- include "dc.kubeTokenVolume" . | nindent 6 }}
+      {{- if .Values.gateway.skillScanner.enabled }}
+      - name: skill-scan
+        emptyDir:
+          medium: Memory
+          sizeLimit: 64Mi
+      - name: skill-scan-tmp
+        emptyDir:
+          sizeLimit: 512Mi
+      {{- end }}
       {{- if .Values.admin.tlsSecretName }}
       - name: admin-tls
         secret:

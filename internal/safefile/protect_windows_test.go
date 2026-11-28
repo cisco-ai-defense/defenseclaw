@@ -1189,6 +1189,11 @@ func TestWritePrivateWindowsHoldsDirectoryAgainstSwap(t *testing.T) {
 	if err := os.Mkdir(parent, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// An elevated token creates the directory owned by BUILTIN\Administrators,
+	// not by its user, and the private write refuses a directory its user does
+	// not own. The test is about the lock held during the write, so it gives
+	// the directory the owner the product requires, like the other tests here.
+	ownWindowsTestPath(t, parent)
 	swapRefused := false
 	err := writePrivate(target, []byte("synthetic fixture"), func() {
 		if renameErr := os.Rename(parent, moved); renameErr != nil {

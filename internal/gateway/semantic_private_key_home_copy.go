@@ -4,9 +4,7 @@
 package gateway
 
 import (
-	"os"
 	"path"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,6 +13,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
 // A user who copies their own SSH key to another place in their own home (a
@@ -26,7 +25,7 @@ import (
 //
 // A place is private because of what the file system says about it, not
 // because of its name: the destination, or the nearest folder above it that
-// exists, has no group or other permission bit (homePlaceOwnerOnly). A web
+// exists, has no group or other permission bit (hookpaths.HomePlaceOwnerOnly). A web
 // root, a synced folder or a shared folder is made readable by others, and its
 // bits say so; a place this gateway cannot read (a home hidden from a managed
 // gateway, a Windows path) is not proven private and keeps the block of rel
@@ -231,9 +230,9 @@ func posixModeOpensAccess(mode string) bool {
 
 // trustedActionPrivateHomeDestination reports a write target below the active
 // home (the home itself too) that no one else reads: the place is owner-only
-// on this host (homePlaceOwnerOnly) and is not a file of the SSH folder that
-// sshd or ssh read as policy.
-func trustedActionPrivateHomeDestination(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+// (hookpaths.HomePlaceOwnerOnly, read through places) and is not a file of the
+// SSH folder that sshd or ssh read as policy.
+func trustedActionPrivateHomeDestination(facts actionfacts.Facts, candidate actionfacts.PathFact, places homePlaceView) bool {
 	relative, ok := activeHomeRelative(facts, candidate)
 	if !ok {
 		return false
@@ -252,47 +251,53 @@ func trustedActionPrivateHomeDestination(facts actionfacts.Facts, candidate acti
 	if canonicalSemanticPath(place) != canonicalSemanticPath(semanticPathValue(candidate)) {
 		return false
 	}
-	return homePlaceOwnerOnly(place)
+	return places.ownerOnly(place)
 }
 
-// homePlaceOwnerOnly reports a place that only its owner can enter or read, as
-// the file system shows it now: the place itself when it exists (a link is
-// followed), else the nearest folder above it that does, with no group or
-// other permission bit. A copy keeps the mode of its source and a folder a
-// command makes sits below the one that exists, so that one decides who can
-// reach the copy. What this gateway cannot read (nothing of the path exists on
-// this host, an error other than a missing name, a Windows path, whose access
-// is no mode) is not proven private.
-func homePlaceOwnerOnly(value string) bool {
-	if runtime.GOOS == "windows" || value == "" {
-		return false
+// homePlaceView answers whether only its owner can reach a place of the
+// active home. nil reads this host's file system (hookpaths.HomePlaceOwnerOnly,
+// hookpaths.PrivateHomePlace); a Substrate actor's command twin and a judgment
+// made only from the actor's kit claims read the kit's facts instead
+// (substrateGuestClaims.homePlaces), which this gateway cannot check, so they
+// are read only where the answer adds a finding to a call that would have none
+// without the kit (substrate-1 GAP-0549). It points at the kit's places, a
+// value, so the dispatch memo keys a request by the places it reads
+// (reflect.DeepEqual compares the set): a closure is never deeply equal, and
+// kept every repeat of an actor's request out of the memo (substrate-1
+// GAP-0758).
+type homePlaceView = *homePlaceSet
+
+// homePlaceSet is the kit's private home places (substrateGuestClaims.homePlaces).
+type homePlaceSet struct {
+	places map[string]bool
+	// byName: a copy-mode actor whose places neither this gateway nor a kit
+	// can answer for; every place of the home outside its SSH folder is
+	// taken as the owner's (substrate-1 GAP-0922). Only the by-name reading
+	// of the actor's call, which adds the finding, reads such a view.
+	byName bool
+}
+
+// ownerOnly is hookpaths.HomePlaceOwnerOnly read through view.
+func (view *homePlaceSet) ownerOnly(place string) bool {
+	if view != nil {
+		return view.byName || view.places[path.Clean(place)]
 	}
-	existing := path.Clean(value)
-	for {
-		info, err := hookpaths.Lstat(existing)
-		if err == nil {
-			if info.Mode()&os.ModeSymlink != 0 {
-				if info, err = hookpaths.Stat(existing); err != nil {
-					return false
-				}
-			}
-			return info.Mode().Perm()&0o077 == 0
-		}
-		if !os.IsNotExist(err) {
-			return false
-		}
-		parent := path.Dir(existing)
-		if parent == existing || parent == "." {
-			return false
-		}
-		existing = parent
+	return hookpaths.HomePlaceOwnerOnly(place)
+}
+
+// privateHome is hookpaths.PrivateHomePlace read through view.
+func (view *homePlaceSet) privateHome(place, home string) bool {
+	if view != nil {
+		place = path.Clean(place)
+		return pathWithin(place, home) && !pathWithin(place, home+"/.ssh") && (view.byName || view.places[place])
 	}
+	return hookpaths.PrivateHomePlace(place, home)
 }
 
 // trustedActionCommandWritesOnlyPrivateHome reports a command whose write
 // targets are all private places in the active home. needWrite also asks for
 // at least one such target.
-func trustedActionCommandWritesOnlyPrivateHome(facts actionfacts.Facts, command actionfacts.CommandFact, needWrite bool) bool {
+func trustedActionCommandWritesOnlyPrivateHome(facts actionfacts.Facts, command actionfacts.CommandFact, needWrite bool, places homePlaceView) bool {
 	wrote := false
 	for _, candidate := range facts.Paths {
 		if candidate.CommandID != command.ID {
@@ -301,7 +306,7 @@ func trustedActionCommandWritesOnlyPrivateHome(facts actionfacts.Facts, command 
 		switch candidate.Access {
 		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
 			wrote = true
-			if !trustedActionPrivateHomeDestination(facts, candidate) {
+			if !trustedActionPrivateHomeDestination(facts, candidate, places) {
 				return false
 			}
 		}
@@ -313,7 +318,7 @@ func trustedActionCommandWritesOnlyPrivateHome(facts actionfacts.Facts, command 
 				continue
 			}
 			wrote = true
-			if redirect.Expands || !trustedActionPrivateHomeDestination(facts, actionfacts.PathFact{Value: redirect.Target}) {
+			if redirect.Expands || !trustedActionPrivateHomeDestination(facts, actionfacts.PathFact{Value: redirect.Target}, places) {
 				return false
 			}
 		}
@@ -324,19 +329,19 @@ func trustedActionCommandWritesOnlyPrivateHome(facts actionfacts.Facts, command 
 // trustedActionPrivateHomeCopy reports one executing copy command that writes
 // only private places in the active home. A wrapper (sudo, env, a shell) leaves
 // the command a content read.
-func trustedActionPrivateHomeCopy(facts actionfacts.Facts, command actionfacts.CommandFact) bool {
+func trustedActionPrivateHomeCopy(facts actionfacts.Facts, command actionfacts.CommandFact, places homePlaceView) bool {
 	return facts.ActiveHome != "" &&
 		command.Kind == actionfacts.CommandKindProcess &&
 		command.Effect == actionfacts.EffectExecute &&
 		len(command.Wrappers) == 0 &&
 		slices.Contains(trustedActionHomeCopyPrograms, strings.ToLower(command.Program)) &&
-		trustedActionCommandWritesOnlyPrivateHome(facts, command, true)
+		trustedActionCommandWritesOnlyPrivateHome(facts, command, true, places)
 }
 
 // trustedActionHomeCopyReading reads the commands of facts: ok is set when
 // every one is a copy into a private place of the active home or a harmless
 // helper of that, and copied when at least one is such a copy.
-func trustedActionHomeCopyReading(facts actionfacts.Facts) (ok, copied bool) {
+func trustedActionHomeCopyReading(facts actionfacts.Facts, places homePlaceView) (ok, copied bool) {
 	if !facts.Authoritative() || facts.ActiveHome == "" {
 		return false, false
 	}
@@ -352,10 +357,10 @@ func trustedActionHomeCopyReading(facts actionfacts.Facts) (ok, copied bool) {
 		}
 		program := strings.ToLower(command.Program)
 		switch {
-		case trustedActionPrivateHomeCopy(facts, command):
+		case trustedActionPrivateHomeCopy(facts, command, places):
 			copied = true
 		case len(command.Wrappers) == 0 && slices.Contains(trustedActionHomeCopyHarmless, program) &&
-			trustedActionCommandWritesOnlyPrivateHome(facts, command, false):
+			trustedActionCommandWritesOnlyPrivateHome(facts, command, false, places):
 		default:
 			return false, false
 		}
@@ -369,12 +374,12 @@ func trustedActionHomeCopyReading(facts actionfacts.Facts) (ok, copied bool) {
 // copied inside the home. A list of commands (cp a b && echo done) is read
 // command by command, as the hook judges each of its commands on its own; a
 // command the reading cannot place keeps the block.
-func trustedActionPrivateKeyOnlyCopiedInHome(input actionfacts.Input, facts actionfacts.Facts) bool {
+func trustedActionPrivateKeyOnlyCopiedInHome(input actionfacts.Input, facts actionfacts.Facts, places homePlaceView) bool {
 	if input.ActiveHome == "" {
 		return false
 	}
 	if facts.Authoritative() {
-		ok, copied := trustedActionHomeCopyReading(facts)
+		ok, copied := trustedActionHomeCopyReading(facts, places)
 		return ok && copied
 	}
 	simples := actionfacts.SimpleCommands(input, facts)
@@ -392,7 +397,7 @@ func trustedActionPrivateKeyOnlyCopiedInHome(input actionfacts.Input, facts acti
 		if simple.CWD != "" {
 			child.CWD = simple.CWD
 		}
-		ok, copied := trustedActionHomeCopyReading(actionfacts.Analyze(child))
+		ok, copied := trustedActionHomeCopyReading(actionfacts.Analyze(child), places)
 		if !ok {
 			return false
 		}
@@ -438,7 +443,7 @@ func appendTrustedPrivateKeyHomeCopyAlert(
 		Confidence: rule.Confidence, Evidence: trustedActionInputText(request.Input, ""),
 		Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
 	}))
-	finding.enforcement = findingEnforcementAlertOnly
+	finding.Proof = finding.Proof.Advise()
 	return append(findings, finding)
 }
 
@@ -457,8 +462,8 @@ const ownSSHFolderCopyTitle = "A copy of your own SSH folder content to another 
 // (a link that leaves it, a shared folder, another account, /tmp), a wrapper
 // runs the copy, anything else is written, or the home is hidden from this
 // gateway, the block stays. Only its owner may reach the destination
-// (ownSSHFolderPrivateDestination), and nothing in the call opens access to it
-// (trustedActionCallOpensAccess).
+// (hookpaths.PrivateHomePlace, read through request.guestHomePlaces), and
+// nothing in the call opens access to it (trustedActionCallOpensAccess).
 func trustedActionOwnSSHFolderCopy(request trustedActionRequest, input actionfacts.Input) bool {
 	home := strings.TrimRight(input.ActiveHome, "/")
 	if request.ProtectedHomeHook || home == "" || !trustedShellCommandInput(input) {
@@ -472,8 +477,8 @@ func trustedActionOwnSSHFolderCopy(request trustedActionRequest, input actionfac
 	if command == "" {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
-	if err != nil || len(file.Stmts) == 0 {
+	file, parsed := shellparse.ParseBash(command)
+	if !parsed || len(file.Stmts) == 0 {
 		return false
 	}
 	copied := false
@@ -507,13 +512,13 @@ func trustedActionOwnSSHFolderCopy(request trustedActionRequest, input actionfac
 			}
 			switch strings.ToLower(path.Base(words[0])) {
 			case "cp", "gcp":
-				if !ownSSHFolderCopyCall(words[1:], input.CWD, home) {
+				if !ownSSHFolderCopyCall(words[1:], input.CWD, home, request.guestHomePlaces) {
 					return false
 				}
 				copied = true
 				return true
 			case "mkdir":
-				return ownSSHFolderMkdirCall(words[1:], input.CWD, home)
+				return ownSSHFolderMkdirCall(words[1:], input.CWD, home, request.guestHomePlaces)
 			case "echo", "printf", "true", ":", "pwd":
 				return true
 			}
@@ -532,7 +537,7 @@ func trustedActionOwnSSHFolderCopy(request trustedActionRequest, input actionfac
 
 // ownSSHFolderCopyCall judges the operands of one cp: safe options, sources
 // inside the SSH folder of home, one destination in a private place of home.
-func ownSSHFolderCopyCall(args []string, cwd, home string) bool {
+func ownSSHFolderCopyCall(args []string, cwd, home string, places homePlaceView) bool {
 	var operands []string
 	target := ""
 	for i := 0; i < len(args); i++ {
@@ -594,57 +599,22 @@ func ownSSHFolderCopyCall(args []string, cwd, home string) bool {
 	// A copy of a file that holds no private key (config, known_hosts, a .pub)
 	// is a plain read the older rules already allow; only a copy that can carry
 	// a private key is an own-key copy.
-	return holdsKey && ownSSHFolderPrivateDestination(destination, cwd, home)
+	return holdsKey && places.privateHome(hookpaths.OperandPath(destination, cwd), home)
 }
 
 // ownSSHFolderMkdirCall judges a mkdir that prepares a private place of home.
-func ownSSHFolderMkdirCall(args []string, cwd, home string) bool {
+func ownSSHFolderMkdirCall(args []string, cwd, home string, places homePlaceView) bool {
 	made := false
 	for _, arg := range args {
 		if arg == "-p" || arg == "--parents" {
 			continue
 		}
-		if strings.HasPrefix(arg, "-") || !ownSSHFolderPrivateDestination(arg, cwd, home) {
+		if strings.HasPrefix(arg, "-") || !places.privateHome(hookpaths.OperandPath(arg, cwd), home) {
 			return false
 		}
 		made = true
 	}
 	return made
-}
-
-// ownSSHFolderPrivateDestination reports a destination inside home, outside the
-// SSH folder, whose existing part, links followed, stays inside home too and
-// only its owner can enter or read (homePlaceOwnerOnly); a part that does not
-// exist yet is only a name. A home this gateway cannot see proves nothing.
-func ownSSHFolderPrivateDestination(destination, cwd, home string) bool {
-	value := path.Clean(hookpaths.OperandPath(destination, cwd))
-	if !pathWithin(value, home) || pathWithin(value, home+"/.ssh") {
-		return false
-	}
-	// Only a name that does not exist yet (ENOENT) is a part the copy makes; any
-	// other error (EACCES, ENOTDIR, ELOOP, ENAMETOOLONG, I/O) proves nothing
-	// about who can reach the place, so it is not private: the block of rel
-	// (ONE BOUND RULE, rel-1-0-10:GAP-0855).
-	existing := value
-	for {
-		_, err := hookpaths.Lstat(existing)
-		if err == nil {
-			break
-		}
-		if !os.IsNotExist(err) || existing == home || !pathWithin(existing, home) {
-			return false
-		}
-		existing = path.Dir(existing)
-	}
-	realHome, err := hookpaths.EvalSymlinks(home)
-	if err != nil {
-		return false
-	}
-	resolved, err := hookpaths.EvalSymlinks(existing)
-	if err != nil {
-		return false
-	}
-	return pathWithin(resolved, realHome) && !pathWithin(resolved, realHome+"/.ssh") && homePlaceOwnerOnly(resolved)
 }
 
 // ownSSHFolderLiteralGlob is the text of a word that is literal text and glob

@@ -333,6 +333,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 				Input:                         actionInput,
 				LegacyText:                    string(toolArgs),
 				Connector:                     "claudecode",
+				sessionID:                     req.SessionID,
 				EnforcementCapable:            true,
 				ManagedHookOverflowHold:       managedWindowsHookOverflowHold(ctx, a.scannerCfg, "claudecode", runtime.GOOS),
 				SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
@@ -450,11 +451,15 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			inspectedContent, "prompt",
 		))
 	}
-	if strings.TrimSpace(inspectedContent) != "" && verdict != nil && verdict.aiDefenseSubmitted {
+	if strings.TrimSpace(inspectedContent) != "" && verdict != nil && verdict.aiDefenseSubmitted &&
+		cfg != nil && cfg.Guardrail.IncludeHookEventContent {
 		inspectedContentPresent = true
 	} else {
 		// Do not retain or emit content handled only by local rules or the
-		// optional judge. The canonical field is evidence of AID submission.
+		// optional judge: the canonical field is evidence of AID submission.
+		// Submitted content is exported only with the opt-in
+		// guardrail.include_hook_event_content (off by default); the
+		// inspection above ran either way, so the verdict does not depend on it.
 		inspectedContent = ""
 	}
 

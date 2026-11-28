@@ -56,7 +56,7 @@ func TestGAP0984CapFloorConsumerBudgetIsACap(t *testing.T) {
 	if _, _, unread := capFloorPieces(command, ""); !unread {
 		t.Fatal("capFloorPieces does not report the spent budget")
 	}
-	env := boundedLaneEnv(t)
+	env := boundedLaneEnvAnyOS(t)
 	call := command + "\ncat <<'EOF' > notes.txt\n" + gap0486Blocked["B1"] + "\nEOF"
 	for _, tier := range boundedTestTiers {
 		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)

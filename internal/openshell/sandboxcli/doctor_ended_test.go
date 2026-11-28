@@ -278,7 +278,7 @@ func TestRestartConsentRefusesWhileOpenShellDoesNotReportEveryMicroVMStopped(t *
 	// setup's restart: not made, and not asked.
 	ta = newTestApp(t, "")
 	endedOn(t, ta, openshell.SupportedMin, 0)
-	ok, err := ta.consentGatewayRestart(bg, SetupOptions{}, true, true, false)
+	ok, err := ta.consentGatewayRestart(bg, SetupOptions{}, true, true, "")
 	if err != nil || ok {
 		t.Fatalf("setup with a completed MicroVM: %v, %v", ok, err)
 	}

@@ -20,13 +20,20 @@ import (
 // Code hook in the five tiers; the same shapes on project files stay
 // unblocked.
 func TestGAP1229MoverDefinedInAListLeavesTheShellWhereItMayFiveTiers(t *testing.T) {
-	env := boundedLaneEnv(t)
+	// Every row runs on a Windows gateway too: the and-tail-variable row (the
+	// write through $x) was allowed there in every tier while its oracle
+	// kept its verdict (rel-1-0-10:GAP-1880).
+	env := boundedLaneEnvAnyOS(t)
 	const mover = "f() { cd /nonexistent-g1229 || return; }"
 	state, key := "cd ~/.defenseclaw && echo m > config.yaml", "cd ~/.ssh && echo k >> authorized_keys"
 	rows := []struct{ id, command, oracle string }{
 		{"and-tail", "cd ~/.defenseclaw && " + mover + "; f; echo m > config.yaml", state},
 		{"and-tail-and", "cd ~/.defenseclaw && f() { cd /nonexistent-g1229 || return 0; }; f && echo m > config.yaml", state},
 		{"and-tail-variable", "cd ~/.defenseclaw && " + mover + "; f; x=config.yaml; echo m > $x", state},
+		// The same write after a top-level cd that may fail: the folder of
+		// cd ~/.defenseclaw was dropped under a Windows home (GAP-1880).
+		{"may-fail-cd-variable", "cd ~/.defenseclaw; cd /nonexistent-g1229 || true; x=config.yaml; echo m > $x", state},
+		{"may-fail-cd-relative-variable", "cd ~ && cd .defenseclaw; cd /nonexistent-g1229 || true; x=config.yaml; echo m > $x", state},
 		{"and-tail-key", "cd ~/.ssh && " + mover + "; f; echo k >> authorized_keys", key},
 		{"branch", "cd ~/.defenseclaw; if true; then " + mover + "; fi; f; echo m > config.yaml", state},
 		{"body-called-first", "h() { " + mover + "; }; cd ~/.defenseclaw && h; f; echo m > config.yaml", state},

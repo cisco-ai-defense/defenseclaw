@@ -20,6 +20,26 @@ func appendTrustedPrivateKeyReaderFinding(
 	request trustedActionRequest,
 	facts actionfacts.Facts,
 ) []RuleFinding {
+	out := appendTrustedPrivateKeyReaderFindingOf(findings, generation, request, facts)
+	if request.guestClaimHomePlaces != nil && request.guestHomePlaces == nil {
+		// A Substrate actor's own SSH folder copy whose private destination
+		// only the kit can see (cp -r ~/.ssh ~/sshbak): the laptop's alert,
+		// added only to a call that names no key rule (substrate-1 GAP-0549).
+		judged := request
+		judged.guestHomePlaces = request.guestClaimHomePlaces
+		if trustedActionOwnSSHFolderCopy(judged, judged.Input) {
+			return appendTrustedPrivateKeyHomeCopyAlert(out, generation, request)
+		}
+	}
+	return out
+}
+
+func appendTrustedPrivateKeyReaderFindingOf(
+	findings []RuleFinding,
+	generation *compiledRulePackCategories,
+	request trustedActionRequest,
+	facts actionfacts.Facts,
+) []RuleFinding {
 	if trustedActionOwnSSHFolderCopy(request, request.Input) {
 		// A copy of the user's own SSH folder content to a private place of the
 		// same home: the key is read only to be copied there, which alerts and does
@@ -27,7 +47,7 @@ func appendTrustedPrivateKeyReaderFinding(
 		// included; rel-1-0-10:GAP-0018).
 		for index := range findings {
 			if findings[index].RuleID == "PATH-SSH-KEY" || findings[index].RuleID == "PATH-WIN-SSH-KEY" {
-				findings[index].enforcement = findingEnforcementAlertOnly
+				findings[index].Proof = findings[index].Proof.Advise()
 			}
 		}
 		return appendTrustedPrivateKeyHomeCopyAlert(findings, generation, request)
@@ -61,17 +81,38 @@ func appendTrustedPrivateKeyReaderFinding(
 		case strings.EqualFold(request.Input.Tool, "PowerShell"):
 			dialect = actionfacts.DialectPowerShell
 		}
-		proved, keyGlobCut = hookpaths.ActionPrivateKeyReadBounded(command, request.Input.CWD, request.Input.ActiveHome, dialect)
+		// A copy-mode actor has no host CWD. Its verified guest CWD still
+		// places a relative find start: from the guest home, find . can
+		// hand the SSH folder to -exec just as the laptop can (GAP-1025).
+		keyCWD := request.Input.CWD
+		if keyCWD == "" && request.SandboxGuestCWD != "" &&
+			(strings.HasPrefix(command, "find ") || strings.HasPrefix(command, "gfind ") ||
+				strings.HasPrefix(command, "/usr/bin/find ")) {
+			keyCWD = request.SandboxGuestCWD
+		}
+		proved, keyGlobCut = hookpaths.ActionPrivateKeyReadBoundedIn(request.hookCall, command, keyCWD, request.Input.ActiveHome, dialect)
 		proved = proved || hookpaths.ActionMakePrivateKeyRead(command, request.Input.CWD, request.Input.ActiveHome)
-		if proved && (trustedActionPrivateKeyOnlyCopiedInHome(request.Input, facts) && !trustedActionCallOpensAccess(request) ||
-			trustedActionOwnSSHFolderCopy(request, request.Input)) {
+		judged := request
+		if !proved && request.substrateGuestClaimsProveKeyRead(command) {
+			// A Substrate actor's kit makes the same proof in the actor's file
+			// system, which this gateway cannot open (substrate-1 GAP-0471).
+			// Only the kit sees whether the copy's destination is private, and
+			// without the kit the call has no key finding, so its places
+			// decide the home copy alert (substrate-1 GAP-0549).
+			proved = true
+			if request.guestHomePlaces == nil {
+				judged.guestHomePlaces = request.guestClaimHomePlaces
+			}
+		}
+		if proved && (trustedActionPrivateKeyOnlyCopiedInHome(judged.Input, facts, judged.guestHomePlaces) && !trustedActionCallOpensAccess(judged) ||
+			trustedActionOwnSSHFolderCopy(judged, judged.Input)) {
 			// Every command copies inside the home and nothing in the call
 			// opens access (rel-1-0-10:GAP-0854): the key is read only to be
 			// copied there, which alerts and does not block.
 			return appendTrustedPrivateKeyHomeCopyAlert(findings, generation, request)
 		}
 	}
-	if !proved && request.StrictPolicy && request.EnforcementCapable &&
+	if !proved && request.tierEnforces(tierGateStrict) && request.EnforcementCapable &&
 		facts.Authoritative() && facts.EnforcementEligible() &&
 		trustedActionOtherHomeSSHPrivateKeyContentRead(facts.EnforcementProjection()) {
 		// A proven content read of another account's key: the strict pack
@@ -100,14 +141,14 @@ func withProvedPrivateKeyRead(
 	if !ok {
 		return findings
 	}
-	enforcement := findingEnforcementDetectionOnly
+	enforcement := recordProof
 	if request.EnforcementCapable {
-		enforcement = findingEnforcementAllowed
+		enforcement = enforcingProof
 	}
 	for index := range findings {
 		if findings[index].RuleID == "PATH-SSH-KEY" ||
 			findings[index].RuleID == "PATH-WIN-SSH-KEY" {
-			findings[index].enforcement = enforcement
+			findings[index].Proof = enforcement
 			findings[index].Severity = rule.Severity
 			return findings
 		}
@@ -116,6 +157,6 @@ func withProvedPrivateKeyRead(
 		RuleID: rule.ID, Title: rule.Title, Severity: rule.Severity,
 		Confidence: rule.Confidence, Evidence: trustedActionInputText(request.Input, ""),
 		Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
-		enforcement: enforcement,
+		Proof: enforcement,
 	}))
 }

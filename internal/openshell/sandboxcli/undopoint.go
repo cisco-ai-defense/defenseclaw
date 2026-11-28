@@ -62,6 +62,9 @@ func (a *App) acceptChanges(ctx context.Context, api API, sb *sandboxapi.Sandbox
 // start` (session false) says how to accept them with --new-snapshot
 // instead.
 func (a *App) startSandbox(ctx context.Context, api API, sb *sandboxapi.Sandbox, o StartOptions, session bool) (*sandboxapi.Sandbox, bool, error) {
+	if err := a.vaultGrantsCurrent(sb); err != nil {
+		return nil, false, err
+	}
 	req := sandboxapi.StartRequest{NoSnapshot: o.NoSnapshot, NewSnapshot: o.NewSnapshot, EndVM: o.EndVM, LLM: a.currentModelCredential(sb)}
 	// The session can change the copy: what it held as the sandbox stopped
 	// is not known after this (a start that fails may still have started

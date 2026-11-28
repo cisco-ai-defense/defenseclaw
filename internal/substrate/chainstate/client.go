@@ -198,7 +198,7 @@ func (s *IntentStore) key(key string) string {
 	return s.Namespace + "\x00" + key
 }
 
-var _ intentstore.Store = (*IntentStore)(nil)
+var _ intentstore.Reader = (*IntentStore)(nil)
 
 func (s *IntentStore) actor(ctx context.Context) (Actor, bool) {
 	if s == nil || s.ActorOf == nil {
@@ -242,11 +242,56 @@ func (s *IntentStore) AppendToolCall(ctx context.Context, key string, call inten
 		Tool: call.Tool, Args: call.Args}, &out); err != nil {
 		return intentstore.Snapshot{}, err
 	}
+	return out.snapshot(), nil
+}
+
+// Lookup implements intentstore.Reader: an actor's context on the leader
+// (IntentGet), which records nothing, so the tool-result judges of every
+// replica read the request the prompt hook recorded on any one of them
+// (rel-1-0-10:GAP-0848). The leader reads only the verified actor's own
+// store, so a judge never sees another actor's or another person's request.
+// A call that is not an actor's reads the fallback when it is a Reader, and
+// finds nothing otherwise. The read on the leader gives up after
+// intentLookupTimeout.
+func (s *IntentStore) Lookup(ctx context.Context, key string) (intentstore.Snapshot, bool, error) {
+	a, ok := s.actor(ctx)
+	if !ok {
+		f, err := s.fallback()
+		if err != nil {
+			return intentstore.Snapshot{}, false, err
+		}
+		reader, ok := f.(intentstore.Reader)
+		if !ok {
+			return intentstore.Snapshot{}, false, nil
+		}
+		return reader.Lookup(ctx, key)
+	}
+	ctx, cancel := context.WithTimeout(ctx, intentLookupTimeout)
+	defer cancel()
+	var out IntentResponse
+	if err := s.Client.call(ctx, leader.MethodIntentGet, IntentRequest{Actor: a, Key: s.key(key)}, &out); err != nil {
+		return intentstore.Snapshot{}, false, err
+	}
+	if !out.Found {
+		return intentstore.Snapshot{}, false, nil
+	}
+	return out.snapshot(), true, nil
+}
+
+// intentLookupTimeout bounds a judge's read of the request on the leader,
+// as the egress callout's 1 s Retry bounds its calls. A miss only leaves the
+// request out of the judge's prompt (the judge still judges, and nothing
+// fails open), so during a leader change a tool-result judge must not wait
+// out the leader client's 45 s retry window on every call.
+const intentLookupTimeout = time.Second
+
+// snapshot is the intent store's view of a leader answer.
+func (out IntentResponse) snapshot() intentstore.Snapshot {
 	snap := intentstore.Snapshot{UserIntent: out.UserIntent}
 	for _, p := range out.Prior {
 		snap.Prior = append(snap.Prior, intentstore.ToolCall{Tool: p.Tool, Args: p.Args})
 	}
-	return snap, nil
+	return snap
 }
 
 // Reset implements intentstore.Store. An actor's reset needs the actor in

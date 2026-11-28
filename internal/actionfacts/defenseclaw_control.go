@@ -6,11 +6,16 @@
 package actionfacts
 
 import (
+	"fmt"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"unicode"
 
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 )
 
 // DefenseClawControlKind names how a command reaches DefenseClaw's own
@@ -43,13 +48,20 @@ const (
 	// disable, a dynamic operand, an unparsed nested shell, a reading the
 	// parse bounds cut). It is judged at the unknown tier.
 	DefenseClawControlUnproven DefenseClawControlKind = "unproven"
+	// DefenseClawControlFault is a reader fault: the reading stopped on an
+	// internal error after the facts before it. The caller answers it as an
+	// evaluation fault of the call (a block in every pack), never as fewer
+	// facts (GAP-1936). Fault holds the error and its stack.
+	DefenseClawControlFault DefenseClawControlKind = "evaluator-fault"
 )
 
 // DefenseClawControlFact is one command of the call that stops or changes the
-// DefenseClaw guardrail. Proven is false for DefenseClawControlUnproven.
+// DefenseClaw guardrail. Proven is false for DefenseClawControlUnproven and
+// DefenseClawControlFault; Fault is set only for DefenseClawControlFault.
 type DefenseClawControlFact struct {
 	Kind   DefenseClawControlKind
 	Proven bool
+	Fault  string
 }
 
 // defenseClawNamespace is the product namespace every packaged program,
@@ -558,11 +570,33 @@ func fanOut(argv []string, name string) ([][]string, bool) {
 // and whose commands the parse could not resolve (a program in a variable, a
 // script fed to a shell on stdin, a reading cut by the parse bounds) is the
 // unknown tier, never a clean allow.
-func DefenseClawControl(facts Facts, text string) []DefenseClawControlFact {
+//
+// The gateway calls it outside Analyze's recovery. A reader fault is reported,
+// not hidden: the facts read before it, then one DefenseClawControlFault fact,
+// which the gateway answers as the evaluation fault of the call, a block in
+// every pack and mode (GAP-1914: a fault here reached the hook's fail-mode
+// answer; GAP-1936: answering it as fewer facts allowed the call).
+func DefenseClawControl(facts Facts, text string) (out []DefenseClawControlFact) {
 	reader := &controlReader{seen: map[DefenseClawControlFact]bool{}}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			out = append(slices.Clip(reader.out), DefenseClawControlFact{
+				Kind:  DefenseClawControlFault,
+				Fault: fmt.Sprintf("defenseclaw control reader: %v\n%s", recovered, debug.Stack()),
+			})
+		}
+	}()
+	if defenseClawControlFaultHook != nil {
+		defenseClawControlFaultHook()
+	}
 	reader.read(facts, text, 0)
 	return reader.out
 }
+
+// defenseClawControlFaultHook is a test-only seam: when non-nil it runs at the
+// start of every DefenseClawControl and after every fact the reading adds,
+// inside its recovery. Production never sets it.
+var defenseClawControlFaultHook func()
 
 type controlReader struct {
 	out  []DefenseClawControlFact
@@ -579,6 +613,9 @@ func (r *controlReader) add(fact DefenseClawControlFact) {
 	if !r.seen[fact] {
 		r.seen[fact] = true
 		r.out = append(r.out, fact)
+	}
+	if defenseClawControlFaultHook != nil {
+		defenseClawControlFaultHook()
 	}
 }
 
@@ -1136,7 +1173,7 @@ func packageManagerRemovesDefenseClaw(manager string, words, flags []string) boo
 // scratch folder) is that test's own gateway, not this host's guard.
 func pidFileInState(text, home string) bool {
 	for start := 0; ; {
-		index := strings.Index(strings.ToLower(text[start:]), ".pid")
+		index := strings.Index(asciifold.Lower(text[start:]), ".pid")
 		if index < 0 {
 			return false
 		}
@@ -1384,6 +1421,9 @@ var (
 	defenseClawRelaxVerbs = map[string]bool{
 		"use-pack": true, "suppress": true, "severity": true, "trusted-paths": true,
 		"allow-private-upstream": true, "migrate": true,
+		// `sandbox vault confirm` lets sandboxes use a captured secret; an
+		// agent could confirm a value it planted itself (GAP-1978).
+		"confirm": true,
 	}
 	// defenseClawReadFlags make the call run nothing: help, version, and the
 	// check and dry-run switches of the commands that have them.
@@ -1457,12 +1497,33 @@ var (
 	// credentials or session, or start, connect to or change an agent runtime.
 	// A Substrate verb in neither table is judged the same way (an ambiguous
 	// verb is a control); this table names the registered ones so the CLI
-	// drift test can tell a new verb from a reviewed one.
+	// drift test can tell a new verb from a reviewed one. `admin` is the
+	// administrators' group (`admin revoke --user PERSON` ends every sign-in
+	// of a person, closes their open terminals and, with --lift, removes an
+	// end early; `--list` prints who is ended): it changes who may use the
+	// cluster, so like `login`, `logout` and `approve` it is a control, never a
+	// read. The judge reads only the first word after `substrate`, so the whole
+	// group, `--list` included, is a control exactly as at rel (where an
+	// unnamed verb already is).
+	// `port` forwards a port of a running agent to this computer over the
+	// agent's tunnel: like `connect` it reaches into an agent runtime with
+	// the person's session, and it opens a listener and a presence record, so
+	// it is not a read. `recover` (an owner or administrator clears the relay
+	// certificate record of an actor, GAP-0861) changes who the relay trusts.
+	// `secrets templates` is listed like every `secrets` verb but `list`:
+	// a control (GAP-1042; the judge already treated both as controls).
 	defenseClawSubstrateStopVerbs = map[string]bool{
 		"run": true, "connect": true, "pull": true, "checkpoint": true, "undo": true, "delete": true,
 		"migrate": true, "approve": true, "reject": true, "login": true, "logout": true, "set": true,
 		"rm": true, "reset": true, "setup": true, "apply": true, "rollback": true, "build": true,
-		"publish": true, "keygen": true, "serve": true,
+		"publish": true, "keygen": true, "serve": true, "admin": true, "port": true,
+		"recover": true, "templates": true,
+		// scan-worker is the hidden, pod-only command the skill scanner sidecar runs
+		// inside its own pod (read-only root, private /tmp and /dev/shm). It is
+		// never typed by a person and it starts a scanner process, so it is a
+		// control, never a read (the same ruling as the other registered
+		// Substrate verbs that run something).
+		"scan-worker": true,
 	}
 )
 
@@ -1755,8 +1816,8 @@ func tildeProgramText(text, home string) (string, int, bool) {
 	if home == "" || strings.ContainsAny(home, " \t\r\n'\"`$\\") {
 		return "", 0, false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
-	if err != nil {
+	file, parsed := shellparse.ParseBash(text)
+	if !parsed {
 		return "", 0, false
 	}
 	var offsets []int
@@ -1799,8 +1860,8 @@ func tildeProgramText(text, home string) (string, int, bool) {
 // of the echo or printf inside. open is true when a substitution holds anything
 // else (a file, a download, a pipeline): its output is not in the text.
 func procSubstScripts(text string) (scripts []string, open bool) {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
-	if err != nil {
+	file, parsed := shellparse.ParseBash(text)
+	if !parsed {
 		return nil, false
 	}
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -1897,8 +1958,8 @@ type heredoc struct {
 // written to a place a login, a scheduler or a later command of the call runs
 // (GAP-0788).
 func heredocs(text string) []heredoc {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
-	if err != nil {
+	file, parsed := shellparse.ParseBash(text)
+	if !parsed {
 		return nil
 	}
 	// A filter that passes its input on (cat <<EOF | sh) feeds the stage that
@@ -2353,7 +2414,7 @@ func namesProduct(text string) bool {
 		}
 		// A Windows service or task: DefenseClaw, then an upper-case letter or
 		// an underscore (DefenseClawGateway, DefenseClawCertGuardian_<hex>).
-		if index := strings.Index(strings.ToLower(base), defenseClawNamespace); index >= 0 && index+len(defenseClawNamespace) < len(base) {
+		if index := strings.Index(asciifold.Lower(base), defenseClawNamespace); index >= 0 && index+len(defenseClawNamespace) < len(base) {
 			next := base[index+len(defenseClawNamespace)]
 			if next >= 'A' && next <= 'Z' || next == '_' {
 				return true
@@ -2370,8 +2431,8 @@ const maxBashCommands = 4096
 // bashCommands returns the simple commands of a bash parse of text, with a
 // word that holds an expansion as "".
 func bashCommands(text string) []CommandFact {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
-	if err != nil {
+	file, parsed := shellparse.ParseBash(text)
+	if !parsed {
 		return nil
 	}
 	var commands []CommandFact

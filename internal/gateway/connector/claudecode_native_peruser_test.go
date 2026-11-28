@@ -13,7 +13,8 @@ import (
 
 func TestClaudeCodePerUserUnixSelectsNativeHook(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Unix registration")
+		claudeCodeWindowsSelectsLauncher(t)
+		return
 	}
 	root := t.TempDir()
 	profile := filepath.Join(root, "profile")
@@ -62,7 +63,8 @@ func TestClaudeCodePerUserUnixSelectsNativeHook(t *testing.T) {
 
 func TestClaudeCodePerUserUnixScriptTwin(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Unix registration")
+		claudeCodeWindowsHasNoScriptTwin(t)
+		return
 	}
 	root := t.TempDir()
 	profile := filepath.Join(root, "profile")

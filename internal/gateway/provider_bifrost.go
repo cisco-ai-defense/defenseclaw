@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -125,7 +126,8 @@ const bifrostTenantsMaxSize = 256
 
 type bifrostTenantEntry struct {
 	client   *bifrost.Bifrost
-	lastUsed time.Time
+	lastUsed time.Time // when the last request started or ended
+	inFlight int       // requests that got this client and have not ended
 }
 
 var (
@@ -151,18 +153,33 @@ func tenantKeyString(k tenantKey) string {
 // deterministic. Without this tie-break the victim depends on Go's
 // randomized map iteration order, which makes bursty-traffic
 // behavior — and the eviction test below — flaky.
+//
+// A client with a request in flight is evicted only when every cached client
+// has one (rel-1-0-10:GAP-2141): the cap still holds.
 func evictOldestBifrostTenantLocked() {
 	var oldestKey tenantKey
 	var oldestKeyStr string
 	var oldestSeen time.Time
+	oldestBusy := false
 	first := true
 	for k, e := range bifrostTenants {
 		ks := tenantKeyString(k)
+		busy := e != nil && e.inFlight > 0
 		if first {
 			oldestKey = k
 			oldestKeyStr = ks
 			oldestSeen = e.lastUsed
+			oldestBusy = busy
 			first = false
+			continue
+		}
+		if busy != oldestBusy {
+			if !busy {
+				oldestKey = k
+				oldestKeyStr = ks
+				oldestSeen = e.lastUsed
+				oldestBusy = false
+			}
 			continue
 		}
 		if e.lastUsed.Before(oldestSeen) {
@@ -179,25 +196,61 @@ func evictOldestBifrostTenantLocked() {
 	}
 	if entry, ok := bifrostTenants[oldestKey]; ok {
 		delete(bifrostTenants, oldestKey)
-		// An entry without a client has nothing to shut down. Calling
-		// Shutdown on nil took a hardware access violation on a fresh
-		// goroutine, which recover() turned into a panic; on Windows hosts
-		// with large exception frames (AMX) the kernel writes that frame
-		// below the 8 KiB goroutine stack into the neighbouring heap, and a
-		// later GC dies on the corrupted span (golang/go#81238,
-		// rel-1-0-6:GAP-0550).
-		if entry == nil || entry.client == nil || shutdownEvictedBifrostClient == nil {
-			return
+		shutdownBifrostTenantEntry(entry)
+	}
+}
+
+// shutdownBifrostTenantEntry tears down the client of an entry that was just
+// removed from the cache. Caller holds bifrostTenantsMu (write lock).
+func shutdownBifrostTenantEntry(entry *bifrostTenantEntry) {
+	// An entry without a client has nothing to shut down. Calling
+	// Shutdown on nil took a hardware access violation on a fresh
+	// goroutine, which recover() turned into a panic; on Windows hosts
+	// with large exception frames (AMX) the kernel writes that frame
+	// below the 8 KiB goroutine stack into the neighbouring heap, and a
+	// later GC dies on the corrupted span (golang/go#81238,
+	// rel-1-0-6:GAP-0550).
+	if entry == nil || entry.client == nil || shutdownEvictedBifrostClient == nil {
+		return
+	}
+	// Shutdown asynchronously so we don't hold the write
+	// lock across an SDK teardown that may block on
+	// in-flight streams. The SDK's Shutdown is documented
+	// as safe to call once and is a no-op on subsequent
+	// invocations.
+	go func(c *bifrost.Bifrost) {
+		defer func() { _ = recover() }()
+		shutdownEvictedBifrostClient(c)
+	}(entry.client)
+}
+
+// bifrostTenantIdleTTL is how long a tenant client may go unused before the
+// cache shuts it down. Each client holds schemas.DefaultConcurrency (1000)
+// idle request workers, and a rotated key or a changed base_url never asks
+// for the old client again, so before this the old client (and its workers)
+// lived until 256 newer tenants pushed it out (GAP-1760). A client with a
+// request in flight is not idle, however long ago that request started: a
+// stream has no total timeout, only a per-read one (rel-1-0-10:GAP-2141).
+const bifrostTenantIdleTTL = 30 * time.Minute
+
+// bifrostTenantSweepEvery rate-limits the idle sweep on the cache-hit path.
+const bifrostTenantSweepEvery = time.Minute
+
+// bifrostTenantsLastSweep is when dropIdleBifrostTenantsLocked last ran. Guarded
+// by bifrostTenantsMu.
+var bifrostTenantsLastSweep time.Time
+
+// dropIdleBifrostTenantsLocked removes and shuts down every tenant client that
+// has no request in flight and was last used bifrostTenantIdleTTL or longer
+// before now. Caller must hold bifrostTenantsMu (write lock).
+func dropIdleBifrostTenantsLocked(now time.Time) {
+	bifrostTenantsLastSweep = now
+	for k, e := range bifrostTenants {
+		if e == nil || e.inFlight > 0 || now.Sub(e.lastUsed) < bifrostTenantIdleTTL {
+			continue
 		}
-		// Shutdown asynchronously so we don't hold the write
-		// lock across an SDK teardown that may block on
-		// in-flight streams. The SDK's Shutdown is documented
-		// as safe to call once and is a no-op on subsequent
-		// invocations.
-		go func(c *bifrost.Bifrost) {
-			defer func() { _ = recover() }()
-			shutdownEvictedBifrostClient(c)
-		}(entry.client)
+		delete(bifrostTenants, k)
+		shutdownBifrostTenantEntry(e)
 	}
 }
 
@@ -526,7 +579,9 @@ func bifrostKeyID(providerKey schemas.ModelProvider, apiKey string) string {
 // tuples get distinct clients; identical tuples share a cached client.
 // The returned client's Account is immutable for the tuple's lifetime,
 // so a concurrent call with different credentials cannot change what
-// this client uses mid-request.
+// this client uses mid-request. The caller calls release when its request
+// (or stream) ends: until then the idle sweep keeps the client, and the
+// end counts as a use (rel-1-0-10:GAP-2141).
 func getBifrostClient(
 	providerKey schemas.ModelProvider,
 	apiKey, baseURL, model string,
@@ -535,7 +590,7 @@ func getBifrostClient(
 	vertex *config.VertexKeyConfig,
 	azure *config.AzureKeyConfig,
 	extraHeaders map[string]string,
-) (*bifrost.Bifrost, error) {
+) (client *bifrost.Bifrost, release func(), err error) {
 	// A standalone gateway sends provider traffic through the
 	// enterprise.network proxy unless no_proxy excludes the endpoint.
 	endpoint := baseURL
@@ -545,7 +600,7 @@ func getBifrostClient(
 	route := currentEnterpriseEgress()
 	proxyConfig, err := bifrostEgressProxy(route, endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("gateway: %s client setup failed: %w", providerDisplayName(providerKey), err)
+		return nil, nil, fmt.Errorf("gateway: %s client setup failed: %w", providerDisplayName(providerKey), err)
 	}
 	egressID := ""
 	if proxyConfig != nil {
@@ -578,8 +633,15 @@ func getBifrostClient(
 	defer bifrostTenantsMu.Unlock()
 	if e, ok := bifrostTenants[tk]; ok {
 		e.lastUsed = now
-		return e.client, nil
+		e.inFlight++
+		if now.Sub(bifrostTenantsLastSweep) >= bifrostTenantSweepEvery {
+			dropIdleBifrostTenantsLocked(now)
+		}
+		return e.client, releaseBifrostTenant(e), nil
 	}
+	// A miss is a new or rotated tenant: release the clients nobody asks for
+	// any more before adding another.
+	dropIdleBifrostTenantsLocked(now)
 	if len(bifrostTenants) >= bifrostTenantsMaxSize {
 		evictOldestBifrostTenantLocked()
 	}
@@ -588,12 +650,27 @@ func getBifrostClient(
 	acct.config.ProxyConfig = proxyConfig
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	client, err := bifrost.Init(ctx, schemas.BifrostConfig{Account: acct})
+	client, err = bifrost.Init(ctx, schemas.BifrostConfig{Account: acct})
 	if err != nil {
-		return nil, fmt.Errorf("gateway: %s client setup failed: %w", providerDisplayName(providerKey), err)
+		return nil, nil, fmt.Errorf("gateway: %s client setup failed: %w", providerDisplayName(providerKey), err)
 	}
-	bifrostTenants[tk] = &bifrostTenantEntry{client: client, lastUsed: now}
-	return client, nil
+	e := &bifrostTenantEntry{client: client, lastUsed: now, inFlight: 1}
+	bifrostTenants[tk] = e
+	return client, releaseBifrostTenant(e), nil
+}
+
+// releaseBifrostTenant returns the release func for one request on e's client.
+// Calling it more than once releases once.
+func releaseBifrostTenant(e *bifrostTenantEntry) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			bifrostTenantsMu.Lock()
+			e.inFlight--
+			e.lastUsed = time.Now()
+			bifrostTenantsMu.Unlock()
+		})
+	}
 }
 
 // mapProviderKey translates a DefenseClaw provider string to a Bifrost
@@ -650,10 +727,11 @@ func mapProviderKey(provider string) (schemas.ModelProvider, error) {
 }
 
 func (bp *bifrostProvider) ChatCompletion(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
-	client, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL, bp.model, bp.tls, bp.bedrock, bp.vertex, bp.azure, bp.extraHeaders)
+	client, release, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL, bp.model, bp.tls, bp.bedrock, bp.vertex, bp.azure, bp.extraHeaders)
 	if err != nil {
 		return nil, err
 	}
+	defer release()
 
 	bReq := toBifrostChatRequest(bp.providerKey, bp.model, req)
 	bCtx := newBifrostRequestContext(ctx, req)
@@ -666,17 +744,22 @@ func (bp *bifrostProvider) ChatCompletion(ctx context.Context, req *ChatRequest)
 }
 
 func (bp *bifrostProvider) ChatCompletionStream(ctx context.Context, req *ChatRequest, chunkCb func(StreamChunk)) (*ChatUsage, error) {
-	client, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL, bp.model, bp.tls, bp.bedrock, bp.vertex, bp.azure, bp.extraHeaders)
+	client, release, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL, bp.model, bp.tls, bp.bedrock, bp.vertex, bp.azure, bp.extraHeaders)
 	if err != nil {
 		return nil, err
 	}
+	defer release()
 
 	bReq := toBifrostChatRequest(bp.providerKey, bp.model, req)
 	bCtx := newBifrostRequestContext(ctx, req)
 	stream, bErr := client.ChatCompletionStreamRequest(bCtx, bReq)
 	if bErr != nil {
+		if status, ok := bifrostStreamAnswer(bCtx, bErr); ok {
+			markUpstreamAnswered(ctx, status)
+		}
 		return nil, bifrostRequestError(bCtx, bp.providerKey, bErr)
 	}
+	markUpstreamAnswered(ctx, http.StatusOK)
 
 	var usage *ChatUsage
 	for chunk := range stream {
@@ -697,6 +780,47 @@ func (bp *bifrostProvider) ChatCompletionStream(ctx context.Context, req *ChatRe
 	}
 
 	return usage, nil
+}
+
+// bifrostStreamAnswer says whether the provider answered a stream request
+// that Bifrost returned as an error, and with what status. Bifrost reads the
+// stream's first event before it returns the stream (it checks that event
+// for an error, to retry or fall back), so a stream that broke off after the
+// provider's HTTP 200 and before its first event (a reset, the agent leaving
+// while a reasoning model thinks, an SSE error event) comes back as an
+// error, like a 429. The provider answered (any status) when Bifrost has its
+// response headers: every provider adapter stores them right after the
+// response arrives, before its status check; a refused connect or a timeout
+// before the response leaves none. An error status the provider answered
+// with is the error's status code on an error Bifrost did not make itself;
+// any other error came from the stream after a 200 (rel-1-0-10:GAP-2233).
+// Once a provider opened a stream (Bifrost marks the call accepted after the
+// HTTP status check), the call answered 200 whatever status the error then
+// carries: an in-stream error event with a status (Gemini error.code, an
+// OpenAI-family status_code, a Bedrock retryable exception), the error
+// status of a later agent-supplied fallback, or a Replicate stream URL's
+// error after its prediction was created (rel-1-0-10:GAP-2254, GAP-2255).
+func bifrostStreamAnswer(bCtx *schemas.BifrostContext, bErr *schemas.BifrostError) (int, bool) {
+	if _, ok := bCtx.Value(schemas.BifrostContextKeyProviderResponseHeaders).(map[string]string); !ok {
+		return 0, false
+	}
+	if accepted, _ := bCtx.Value(schemas.BifrostContextKeyProviderAccepted).(bool); accepted {
+		return http.StatusOK, true
+	}
+	if bErr.StatusCode != nil && *bErr.StatusCode >= 400 && !bErr.IsBifrostError && !bifrostStreamBreak(bErr) {
+		return *bErr.StatusCode, true
+	}
+	return http.StatusOK, true
+}
+
+// bifrostStreamBreak is an error Bifrost reports when a stream it was
+// reading stopped: the caller went away (499) or the stream went idle (504).
+func bifrostStreamBreak(bErr *schemas.BifrostError) bool {
+	if bErr.Error == nil || bErr.Error.Type == nil {
+		return false
+	}
+	t := *bErr.Error.Type
+	return t == schemas.RequestCancelled || t == schemas.RequestTimedOut
 }
 
 // ---------- Type conversion helpers ----------

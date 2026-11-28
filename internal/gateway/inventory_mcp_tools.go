@@ -13,6 +13,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 const (
@@ -84,6 +85,60 @@ type mcpToolInventory struct {
 	pendingRemoval              map[string]struct{}
 	observedRestoreIncomplete   bool
 	advertisedRestoreIncomplete bool
+	// parentSince is when each alias's current parent became current, and
+	// listingSourceSince when the watcher whose MCP admission scans supply
+	// the listings started (zero while none runs). Together they bound how
+	// long a parent with no listing yet keeps its advertised collection
+	// partial (rel-1-0-10:GAP-1857).
+	parentSince        map[string]time.Time
+	listingSourceSince time.Time
+	now                func() time.Time
+}
+
+// mcpToolFirstListingWindow is how long a current parent with no listing
+// keeps the advertised collection partial while a listing source runs: the
+// watcher's MCP discovery poll plus one admission scan, with room for the
+// startup rescan. After it the collection is sent as complete, as before, so
+// a server that is never scanned (admitted without a scan, or an unchanged
+// baseline with no kept listing) cannot keep a Secure Client endpoint from
+// stamping its daily bundle.
+const mcpToolFirstListingWindow = 15 * time.Minute
+
+func (m *mcpToolInventory) clock() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
+}
+
+// setListingSource records whether the watcher that lists MCP tools runs.
+func (m *mcpToolInventory) setListingSource(running bool) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.listingSourceSince = time.Time{}
+	if running {
+		m.listingSourceSince = m.clock()
+	}
+}
+
+// firstListingDueLocked reports a current parent with no recorded listing
+// whose first listing a running source may still deliver: its advertised
+// collection is not complete yet (rel-1-0-10:GAP-1857). With no listing
+// source (gateway.watcher.enabled off) nothing will list it, and it is sent
+// as before: no advertised tools in a complete collection (a documented
+// limit).
+func (m *mcpToolInventory) firstListingDueLocked(key string) bool {
+	if m.listingSourceSince.IsZero() || !m.advertisedListedAt[key].IsZero() || m.advertised[key] != nil {
+		return false
+	}
+	since := m.listingSourceSince
+	if current := m.parentSince[key]; current.After(since) {
+		since = current
+	}
+	return m.clock().Sub(since) < mcpToolFirstListingWindow
 }
 
 // refreshParents invalidates evidence when an alias starts naming a different
@@ -199,6 +254,20 @@ func (m *mcpToolInventory) refreshCompleteParents(servers []endpointInventoryCom
 			next[key] = old
 		}
 	}
+	if m.parentSince == nil {
+		m.parentSince = make(map[string]time.Time)
+	}
+	now := m.clock()
+	for key, parentID := range next {
+		if m.parents[key] != parentID {
+			m.parentSince[key] = now
+		}
+	}
+	for key := range m.parentSince {
+		if next[key] == "" {
+			delete(m.parentSince, key)
+		}
+	}
 	m.parents = next
 	m.rebuildAliasIndexLocked()
 	// Reconcile every durable candidate only after an authoritative connector
@@ -290,8 +359,10 @@ func (m *mcpToolInventory) recordMetric(ctx context.Context, stage, outcome, rea
 	}
 }
 
-func (a *APIServer) recordObservedMCPToolIfManaged(ctx context.Context, req agentHookRequest) {
-	if !ManagedEnterpriseActive() || req.SuppressCorrelationEmit && !req.CorrelationUnavailable {
+// recordObservedMCPToolIfInventoryOn records an authenticated MCP tool call
+// while the gateway sends the endpoint inventory (endpointInventoryOn).
+func (a *APIServer) recordObservedMCPToolIfInventoryOn(ctx context.Context, req agentHookRequest) {
+	if req.SuppressCorrelationEmit && !req.CorrelationUnavailable || !endpointInventoryOn(a.liveConfig()) {
 		return
 	}
 	a.recordObservedMCPTool(ctx, req, time.Now())
@@ -833,6 +904,25 @@ func (m *mcpToolInventory) restoreToolLocked(key string, tool audit.MCPObservedT
 	}
 }
 
+// attachStore makes store the durable state of the tool inventory, in every
+// product. The gateway reads it now when it sends the endpoint inventory (a
+// Secure Client endpoint, or ai_discovery on; ManagedEnterpriseActive is not
+// set yet here); otherwise the first inventory cycle reads it
+// (retryRestoreFromStore), so an install with the inventory off reads nothing.
+func (m *mcpToolInventory) attachStore(ctx context.Context, cfg *config.Config, store mcpObservedToolStore) error {
+	if m == nil || store == nil || cfg == nil {
+		return nil
+	}
+	m.store = store
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) && cfg.ManagedAIDOnly() || cfg.AIDiscovery.Enabled {
+		return m.restoreFromStore(ctx)
+	}
+	m.mu.Lock()
+	m.observedRestoreIncomplete, m.advertisedRestoreIncomplete = true, true
+	m.mu.Unlock()
+	return nil
+}
+
 func (m *mcpToolInventory) restoreFromStore(ctx context.Context) error {
 	if m == nil || m.store == nil {
 		return nil
@@ -940,11 +1030,12 @@ func (m *mcpToolInventory) components(servers []endpointInventoryComponent, remo
 		if includeAdvertised && m.store != nil && m.pendingAdvertised[key] != 0 {
 			partial = true
 		}
-		// A parent that has never been scanned contributes no advertised rows.
-		// A recorded listing failure is partial, while an authoritative empty
-		// listing is represented by an empty advertised slice.
+		// A parent that has never been scanned contributes no advertised rows,
+		// and is partial while its first listing is due. A recorded listing
+		// failure is partial, while an authoritative empty listing is
+		// represented by an empty advertised slice.
 		if includeAdvertised {
-			partial = partial || m.partial[key]
+			partial = partial || m.partial[key] || m.firstListingDueLocked(key)
 		}
 		if includeObserved {
 			partial = partial || m.observedPartial[key]

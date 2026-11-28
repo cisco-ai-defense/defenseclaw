@@ -291,7 +291,7 @@ type sandboxPrerequisitesRecord struct {
 // account's own access to the driver's devices is judged by the probe.
 var sandboxOpenShellPrerequisite = func(cfg *config.Config, _ int, driver string) string {
 	if cfg != nil && strings.Contains(cfg.Enterprise.OpenShell.Version, "<") {
-		if _, _, possible := openshell.ManagedVersionPin(cfg.Enterprise.OpenShell.Version); !possible {
+		if _, _, possible := openshell.ManagedVersionPin(cfg.Enterprise.OpenShell.Version, false); !possible {
 			return "enterprise.openshell.version has no release at or above the OpenShell " + openshell.SupportedMin + " floor; ask your administrator to set a supported range"
 		}
 	}
@@ -387,6 +387,25 @@ func readSandboxPrerequisites(path string) (record sandboxPrerequisitesRecord, o
 	return record, true
 }
 
+// sandboxInstalledOpenShellVersion is the release of OpenShell the lifecycle
+// found installed, as the record names it for a part it refused ("" when the
+// record is missing or names none): what status shows next to the release the
+// organization requires.
+var sandboxInstalledOpenShellVersion = func() string {
+	record, ok := readSandboxPrerequisites(sandboxPrerequisitesPath(runtime.GOOS))
+	if !ok {
+		return ""
+	}
+	for _, missing := range record.Missing {
+		if strings.EqualFold(strings.TrimSpace(missing.Item), "openshell cli") {
+			if v, err := openshell.ParseVersion(missing.Version); err == nil {
+				return v.String()
+			}
+		}
+	}
+	return ""
+}
+
 // sandboxPrerequisiteWhy says why the lifecycle's record keeps a sandbox on
 // driver from running, "" when it doesn't. No record, or one written for
 // another install mode or driver than the configuration's, reads as not set
@@ -453,9 +472,9 @@ func installedOpenShellPrerequisite(detail string) string {
 	case strings.Contains(detail, " is installed, enterprise.openshell.version pins "):
 		if _, pin, ok := strings.Cut(detail, " is installed, enterprise.openshell.version pins "); ok {
 			if fields := strings.Fields(pin); len(fields) > 0 {
-				if _, raised, _ := openshell.ManagedVersionPin(fields[0]); raised {
+				if _, raised, _ := openshell.ManagedVersionPin(fields[0], false); raised {
 					return "OpenShell " + detail + "; enterprise.openshell.version is below the OpenShell " + openshell.SupportedMin +
-						" floor; ask your administrator to set the pin to " + openshell.InstallerVersion + " or later"
+						" floor; ask your administrator to set the pin to " + openshell.SupportedMin + " or later"
 				}
 			}
 		}

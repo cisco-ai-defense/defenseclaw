@@ -60,7 +60,7 @@ func WithPerUserGatewayDataDir(ctx context.Context, dataDir string) context.Cont
 // the record does not name, or a table that cannot be read is no proof, and
 // the error is returned as it is.
 func classifyUnaccepted(ctx context.Context, err error, server *net.TCPAddr) error {
-	if err != nil && server != nil && errors.Is(err, errPerUserNotAccepted) && ownGatewayHoldsQueue(ctx, server) {
+	if err != nil && server != nil && errors.Is(err, errPerUserNotAccepted) && ownGatewayHoldsQueue(ctx, server, nil) {
 		return fmt.Errorf("%w: %w", errPerUserListenerUnanswered, err)
 	}
 	return err
@@ -177,7 +177,7 @@ func ownGatewayHoldsQueueRetried(ctx context.Context, check *perUserPeerCheck, c
 		if settled.Load() {
 			return false
 		}
-		if ownGatewayHoldsQueue(ctx, server) {
+		if ownGatewayHoldsQueue(ctx, server, func() { check.recordedHolder.Store(true) }) {
 			return connectionStillQueued(conn)
 		}
 		if !ownerScanSupported || check.abandoned.Load() || !time.Now().Add(ownerScanPoll).Before(end) {
@@ -199,14 +199,25 @@ var errPerUserListenerUnanswered = errors.New("this account's gateway listener a
 
 // errPerUserOwnerScanUnfinished ends a per-user try whose queued connection
 // was waiting for the owner scan of its listener when ownerScanGrace ran out
-// (connectBy): neither the owner nor an accepting peer was shown in time,
-// and nothing was sent. It is the outage of an unanswered listener, not the
-// refusal of a peer found to be another process: the outage mode of the
-// account decides, so the default tiers allow an ordinary call with the
+// (connectBy), after the scan showed that the recorded gateway holds the
+// listener: only that no other process of the account holds it was not read
+// in time, and nothing was sent. It is the outage of an unanswered listener,
+// not the refusal of a peer found to be another process: the outage mode of
+// the account decides, so the default tiers allow an ordinary call with the
 // visible warning, strict stays closed, and so does a call that may reach a
 // protected file (failPerUserListenerUnanswered). A peer that is shown not
-// to be the gateway stays refused (errPerUserPeerUnverified).
+// to be the gateway stays refused (errPerUserPeerUnverified), and so does one
+// the scan never tied to the gateway (errPerUserOwnerUnproven).
 var errPerUserOwnerScanUnfinished = fmt.Errorf("%w: its owner was still being read at the connect deadline", errPerUserListenerUnanswered)
+
+// errPerUserOwnerUnproven ends a per-user try whose queued connection was
+// waiting for the owner scan of its listener when ownerScanGrace ran out
+// before the scan showed the recorded gateway holding that listener (a slow
+// record read, a scan that never got to run on a loaded host). Nothing ties
+// the listener to the gateway, so it is an unverified peer, closed in every
+// fail mode, as a listener found to be another process is: a decoy of the
+// account on the port gets no outage allow from load (GAP-1534).
+var errPerUserOwnerUnproven = fmt.Errorf("%w: its listener was not shown to be the recorded gateway by the connect deadline", errPerUserPeerUnverified)
 
 // PerUserPostListenerUnanswered reports whether err, from PostPerUserHook, is
 // a connection that waited in the accept queue of this account's recorded

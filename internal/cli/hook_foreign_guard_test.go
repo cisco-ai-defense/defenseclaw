@@ -65,6 +65,21 @@ func newPortableForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixt
 	if err := os.MkdirAll(filepath.Join(fixture.project, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// The guard also scans the process working directory and its
+	// ancestors up to a git root or a home (the agent loads project hooks
+	// from where it runs). The test binary's own folder is no such root
+	// where its tree has no .git: the native Windows gate runs a copied
+	// tree under the account profile, and the walk reached that account's
+	// real .cursor\hooks.json (GAP-1788; the hookcli fixture has the same
+	// folder). The process runs in an empty repository of its own beside
+	// the project, so the fixture project is reached only through the
+	// payload's working directory, as when the hook runs outside the
+	// workspace.
+	elsewhere := filepath.Join(fixture.home, "elsewhere")
+	if err := os.MkdirAll(filepath.Join(elsewhere, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(elsewhere)
 	fixture.summary = &enterprisepolicy.PublicPolicy{
 		SchemaVersion: 1,
 		HookBinary:    foreignGuardHookBinary,

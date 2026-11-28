@@ -55,6 +55,23 @@ type OverLimitWordSplit struct {
 	Twin string
 	Data int
 	Code int
+	// Query counts the over-limit inline queries of a SQL client (psql -c,
+	// mysql -e): code to the server, so the call is recorded truncated, but
+	// the twin keeps the query with its long literals shortened, cut after
+	// its last statement within the bound (sqlQueryWordChunks), and the cut by
+	// itself raises nothing (DET111 ruling on FIX-T20B).
+	Query int
+	// QueryUnreadDanger counts the over-limit queries with a statement past
+	// the cut that holds a modeled danger keyword and could not be read alone
+	// (sqlQueryWordChunks): the call then takes the truncated row, not the
+	// record (DET111 ruling on T23 review P3-1).
+	QueryUnreadDanger int
+	// QueryChunks are the further readings of the call when a query is
+	// past the bound even shortened: the twin with each such query replaced
+	// by its next chunk of whole statements (x when it has no more), so the
+	// statements past the first cut are read too, at most maxSQLQueryChunks
+	// readings in all (DET111 ruling B on GAP-1926).
+	QueryChunks []string
 	// Why is the reason the text could not be split, "" when it could.
 	Why string
 }
@@ -89,19 +106,24 @@ func splitOverLimitWords(command string, nestedBodies bool) (OverLimitWordSplit,
 	}
 	dataWords := map[*syntax.Word]bool{}
 	bodyWords := map[*syntax.Word]bool{}
+	queryWords := map[*syntax.Word]sqlQueryWord{}
 	bindings := literalBindings(file)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if call, isCall := node.(*syntax.CallExpr); isCall {
-			markDataWords(call, bindings, dataWords, bodyWords)
+			markDataWords(call, bindings, dataWords, bodyWords, queryWords)
 		}
 		return true
 	})
 	var split OverLimitWordSplit
-	type replacement struct {
-		start, end int
-		text       string
-	}
+	type replacement = overLimitReplacement
 	var replacements []replacement
+	// queryChunks holds, for each over-limit query, the index of its
+	// replacement and its chunks past the first.
+	type queryChunk struct {
+		index  int
+		chunks []string
+	}
+	var queryChunks []queryChunk
 	valid := true
 	syntax.Walk(file, func(node syntax.Node) bool {
 		word, isWord := node.(*syntax.Word)
@@ -110,6 +132,23 @@ func splitOverLimitWords(command string, nestedBodies bool) (OverLimitWordSplit,
 		}
 		if !overLimitWord(word) {
 			return true
+		}
+		if query, isQuery := queryWords[word]; isQuery {
+			start, end := int(word.Pos().Offset()), int(word.End().Offset())
+			if start < 0 || end > len(command) || start >= end {
+				valid = false
+				return false
+			}
+			chunks, danger := sqlQueryWordChunks(query, projectPOSIXWord(word).Value)
+			if danger {
+				split.QueryUnreadDanger++
+			}
+			if len(chunks) > 1 {
+				queryChunks = append(queryChunks, queryChunk{len(replacements), chunks[1:]})
+			}
+			replacements = append(replacements, replacement{start, end, chunks[0]})
+			split.Query++
+			return false
 		}
 		if !dataWords[word] {
 			// The script word of a shell -c is code to the local shell, but
@@ -122,8 +161,17 @@ func splitOverLimitWords(command string, nestedBodies bool) (OverLimitWordSplit,
 				if text, nested, ok := nestedBodyTwin(word); ok {
 					start, end := int(word.Pos().Offset()), int(word.End().Offset())
 					if start >= 0 && end <= len(command) && start < end {
+						if len(nested.QueryChunks) != 0 {
+							chunks := make([]string, len(nested.QueryChunks))
+							for i, chunk := range nested.QueryChunks {
+								chunks[i] = posixSingleQuoted(chunk)
+							}
+							queryChunks = append(queryChunks, queryChunk{len(replacements), chunks})
+						}
 						replacements = append(replacements, replacement{start, end, text})
 						split.Data += nested.Data
+						split.Query += nested.Query
+						split.QueryUnreadDanger += nested.QueryUnreadDanger
 						return false
 					}
 				}
@@ -150,25 +198,58 @@ func splitOverLimitWords(command string, nestedBodies bool) (OverLimitWordSplit,
 		split.Why = "a word part cannot be shortened"
 		return split, false
 	}
-	if split.Data == 0 {
+	if split.Data+split.Query == 0 {
 		split.Why = "no data word"
 		return split, false
 	}
-	slices.SortFunc(replacements, func(a, b replacement) int { return a.start - b.start })
+	twin, ok := overLimitTwinText(command, replacements)
+	if !ok {
+		split.Why = "overlapping parts"
+		return split, false
+	}
+	split.Twin = twin
+	for k := 0; len(queryChunks) != 0 && len(split.QueryChunks) < maxSQLQueryChunks+maxSQLDangerReadings-1; k++ {
+		more := false
+		chunked := slices.Clone(replacements)
+		for _, query := range queryChunks {
+			chunked[query.index].text = posixSingleQuoted("x")
+			if k < len(query.chunks) {
+				chunked[query.index].text, more = query.chunks[k], true
+			}
+		}
+		if !more {
+			break
+		}
+		text, _ := overLimitTwinText(command, chunked)
+		split.QueryChunks = append(split.QueryChunks, text)
+	}
+	return split, true
+}
+
+// overLimitReplacement is the text that stands in for command[start:end]
+// in a twin.
+type overLimitReplacement struct {
+	start, end int
+	text       string
+}
+
+// overLimitTwinText is command with each replacement made, false when two
+// overlap.
+func overLimitTwinText(command string, replacements []overLimitReplacement) (string, bool) {
+	sorted := slices.Clone(replacements)
+	slices.SortFunc(sorted, func(a, b overLimitReplacement) int { return a.start - b.start })
 	var twin strings.Builder
 	last := 0
-	for _, r := range replacements {
+	for _, r := range sorted {
 		if r.start < last {
-			split.Why = "overlapping parts"
-			return split, false
+			return "", false
 		}
 		twin.WriteString(command[last:r.start])
 		twin.WriteString(r.text)
 		last = r.end
 	}
 	twin.WriteString(command[last:])
-	split.Twin = twin.String()
-	return split, true
+	return twin.String(), true
 }
 
 // OverLimitTwinWithinBounds reports a twin of SplitOverLimitWords that the
@@ -213,8 +294,10 @@ func shortenedWordPart(part syntax.WordPart) (string, bool) {
 }
 
 // markDataWords records, in dataWords, each over-limit operand of call that
-// is in DATA position.
-func markDataWords(call *syntax.CallExpr, bindings map[string]string, dataWords, bodyWords map[*syntax.Word]bool) {
+// is in DATA position, and in queryWords each that is the inline query of a
+// SQL client.
+func markDataWords(call *syntax.CallExpr, bindings map[string]string, dataWords, bodyWords map[*syntax.Word]bool,
+	queryWords map[*syntax.Word]sqlQueryWord) {
 	if len(call.Args) < 2 {
 		return
 	}
@@ -231,8 +314,15 @@ func markDataWords(call *syntax.CallExpr, bindings map[string]string, dataWords,
 			}
 		case len(value.Value) > maxScalarBytes:
 			// A stand-in with no dash and no space: it is an operand, never an
-			// option, wherever the grammar of the program puts it.
+			// option, wherever the grammar of the program puts it. A glued
+			// long option (--command=<text>) keeps its name after the mark,
+			// so the grammar of the program still sees which option the word
+			// sets (overLimitSQLQueryOperand).
 			argv[index] = "\x01"
+			if name, _, glued := strings.Cut(value.Value, "="); glued &&
+				strings.HasPrefix(name, "--") && len(name) <= stubKeepBytes {
+				argv[index] = "\x01" + name + "="
+			}
 			big[index] = true
 			any = true
 		default:
@@ -243,10 +333,15 @@ func markDataWords(call *syntax.CallExpr, bindings map[string]string, dataWords,
 		return
 	}
 	for index, isBig := range big {
+		if !isBig {
+			continue
+		}
+		position, query := overLimitOperandPosition(argv, index)
 		switch {
-		case !isBig:
-		case overLimitOperandIsData(argv, index):
+		case position == overLimitData:
 			dataWords[call.Args[index]] = true
+		case position == overLimitSQLQuery:
+			queryWords[call.Args[index]] = query
 		case overLimitShellBodyAt(argv, index):
 			bodyWords[call.Args[index]] = true
 		}
@@ -263,7 +358,7 @@ func nestedBodyTwin(word *syntax.Word) (string, OverLimitWordSplit, bool) {
 		return "", OverLimitWordSplit{}, false
 	}
 	nested, ok := SplitOverLimitWordsOfArgv(value.Value)
-	if !ok || nested.Code > 0 || nested.Data == 0 || len(nested.Twin) >= len(value.Value) {
+	if !ok || nested.Code > 0 || nested.Data+nested.Query == 0 || len(nested.Twin) >= len(value.Value) {
 		return "", OverLimitWordSplit{}, false
 	}
 	return posixSingleQuoted(nested.Twin), nested, true
@@ -274,7 +369,7 @@ func nestedBodyTwin(word *syntax.Word) (string, OverLimitWordSplit, bool) {
 func overLimitShellBodyAt(argv []string, at int) bool {
 	start := 0
 	for range maxWrapperDepth + 1 {
-		if at <= start || argv[start] == "" || argv[start] == "\x01" {
+		if at <= start || argv[start] == "" || strings.HasPrefix(argv[start], "\x01") {
 			return false
 		}
 		program := overLimitProgram(argv[start])
@@ -318,50 +413,90 @@ func shellCommandBodyIndex(argv []string) (int, bool) {
 	return 0, false
 }
 
-// overLimitOperandIsData reports the over-limit word argv[at] as the plain
-// operand of a program that does not run it as local code. argv holds "" for
-// an expansion and "\x01" for an over-limit word.
-func overLimitOperandIsData(argv []string, at int) bool {
+// overLimitPosition is the place of an over-limit word in the grammar of
+// its call (overLimitOperandPosition).
+type overLimitPosition uint8
+
+const (
+	// overLimitCode: code to the local shell or a program it starts.
+	overLimitCode overLimitPosition = iota
+	// overLimitData: the plain operand of a program that does not run it.
+	overLimitData
+	// overLimitSQLQuery: the inline query of a SQL client.
+	overLimitSQLQuery
+)
+
+// overLimitOperandPosition reads the place of the over-limit word argv[at]:
+// the plain operand of a program that does not run it as local code (data),
+// the inline query of a SQL client (with its engine), or code. argv holds ""
+// for an expansion and "\x01" for an over-limit word.
+func overLimitOperandPosition(argv []string, at int) (overLimitPosition, sqlQueryWord) {
 	start := 0
 	for range maxWrapperDepth + 1 {
-		if at <= start || argv[start] == "" || argv[start] == "\x01" {
-			return false
+		if at <= start || argv[start] == "" || strings.HasPrefix(argv[start], "\x01") {
+			return overLimitCode, sqlQueryWord{}
 		}
 		program := overLimitProgram(argv[start])
+		if program == "kubectl" || program == "oc" || program == "k" {
+			parsed, ok := parseKubectlArgv(argv[start:])
+			if ok && !parsed.unknown && parsed.subcommand == "exec" && len(parsed.command) > 0 {
+				childStart := len(argv) - len(parsed.command)
+				if at > childStart {
+					if engine, isSQL := sqlMutationEngine(overLimitProgram(parsed.command[0])); isSQL {
+						if glued, query := overLimitSQLQueryOperand(engine, argv[at-1], argv[at]); query {
+							return overLimitSQLQuery, sqlQueryWord{engine: engine, glued: glued}
+						}
+					}
+				}
+			}
+		}
 		switch {
 		case overLimitRemoteProgram(program):
 			// classifySSH reads the options and the destination; the words
 			// after the destination are the command the remote host runs.
-			return overLimitAfterDestination(argv[start:], at-start, program)
+			return overLimitDataIf(overLimitAfterDestination(argv[start:], at-start, program))
 		case overLimitTransparentWrapper(program):
 			rest := transparentWrapperTarget(argv[start:])
 			next := len(argv) - len(rest)
 			if len(rest) == 0 || next <= start || at < next {
-				return false
+				return overLimitCode, sqlQueryWord{}
 			}
 			start = next
 		case overLimitInterpreterRow(program) != nil:
-			return overLimitInterpreterOperandIsData(argv, start, at)
+			return overLimitDataIf(overLimitInterpreterOperandIsData(argv, start, at))
 		case overLimitCodeProgram(program):
-			return false
+			return overLimitCode, sqlQueryWord{}
 		case overLimitRunsOperand(program, argv, start, at):
-			return false
+			return overLimitCode, sqlQueryWord{}
 		default:
-			return true
+			if engine, ok := sqlMutationEngine(program); ok {
+				if glued, query := overLimitSQLQueryOperand(engine, argv[at-1], argv[at]); query {
+					return overLimitSQLQuery, sqlQueryWord{engine: engine, glued: glued}
+				}
+			}
+			return overLimitData, sqlQueryWord{}
 		}
 	}
-	return false
+	return overLimitCode, sqlQueryWord{}
+}
+
+func overLimitDataIf(data bool) (overLimitPosition, sqlQueryWord) {
+	if data {
+		return overLimitData, sqlQueryWord{}
+	}
+	return overLimitCode, sqlQueryWord{}
 }
 
 // overLimitRunsOperand reports a program that runs the over-limit operand
 // argv[at] as code in its own grammar, though no shell reads it: a sed script
 // (its e and w commands run a program and write a file), a make assignment or
 // target (the recipes read it), a tar option value (--checkpoint-action,
-// --to-command, -I), an rsync remote shell (-e, --rsh) and the value of a git
-// -c setting (an alias that starts with ! is a shell command). A word these
-// take that is past the string bound is no plain data, as the argument of a
-// program that passes it on (rel-1-0-10:GAP-0761); a commit message of git,
-// the destination of a copy and the like stay DATA.
+// --to-command, -I), an rsync remote shell (-e, --rsh) and the value of a
+// git -c setting (an alias that starts with ! is a shell command). A word
+// these take that is past the string bound is no plain data, as the argument
+// of a program that passes it on (rel-1-0-10:GAP-0761); a commit message of
+// git, the destination of a copy and the like stay DATA. The inline query of
+// a SQL client has its own place (overLimitSQLQueryOperand).
 func overLimitRunsOperand(program string, argv []string, start, at int) bool {
 	switch program {
 	case "sed", "gsed", "make", "gmake", "gnumake", "tar", "gtar", "bsdtar", "rsync":
@@ -370,6 +505,24 @@ func overLimitRunsOperand(program string, argv []string, start, at int) bool {
 		return at-1 > start && argv[at-1] == "-c"
 	}
 	return false
+}
+
+// overLimitSQLQueryOperand reports the over-limit word of a SQL client of
+// engine that is its inline query: the value of its query option as the next
+// word (psql -c, mysql -e, sqlcmd -Q, snowsql -q), or glued to it
+// (--command=<SQL>, kept by markDataWords as the mark and the option name).
+// The query is no plain data (the server runs it, and COPY ... PROGRAM
+// starts a program there) and no local code: the SQL readers read it
+// (sqlQueryWordTwin). The database operand of psql stays DATA.
+func overLimitSQLQueryOperand(engine, previous, word string) (glued, query bool) {
+	if key, _, consumesNext, _, ok := exactSQLCLIOption(engine, previous); ok && key == "query" && consumesNext {
+		return false, true
+	}
+	if name, marked := strings.CutPrefix(word, "\x01"); marked && name != "" {
+		key, _, _, _, ok := exactSQLCLIOption(engine, name+"x")
+		return true, ok && key == "query"
+	}
+	return false, false
 }
 
 // overLimitProgram is the lower-case base name of a program word, with a

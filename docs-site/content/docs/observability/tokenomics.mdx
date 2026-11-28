@@ -54,7 +54,7 @@ defenseclaw setup tokenomics --disable   # tokenomics and the local store off
 
 `--disable` turns tokenomics and the local store off. When the gateway applies the change, it writes the usage it still buffers, closes the store and writes it no more. The price table stays in `config.yaml`, and the usage already recorded stays in `model_usage` in the data directory until you delete that folder.
 
-Check the seeded prices against your contract before you rely on the cost. A model with no row has no cost.
+The seeded table (version `2026-11-21.1`) holds the list prices of Claude Haiku, Sonnet and Opus 4.5 on the Claude API and on Amazon Bedrock, and of OpenAI `gpt-5` and `gpt-5.2` with their dated snapshots, as the vendors' pricing pages showed them on 2026-11-21: [Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing), [OpenAI pricing](https://developers.openai.com/api/docs/pricing) and the [AWS Price List for Amazon Bedrock](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrockFoundationModels/current/index.json). The Bedrock rows are the global endpoint rates; a regional (`us.`, `eu.`, `apac.`) endpoint is billed 10 percent more. Cache writes are priced at the 5-minute rate. Check the seeded prices against your contract before you rely on the cost. A model with no row has no cost.
 
 On a managed host both blocks come from the admin `config.yaml` in the signed bundle. A user cannot set them.
 

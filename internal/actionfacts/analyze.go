@@ -51,6 +51,14 @@ func Analyze(input Input) (facts Facts) {
 // runtime-expanded redirect targets of that parse
 // (analyzeWithRedirectTargets).
 func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Facts {
+	facts := analyzeReading(input, twinCommand, capture)
+	if facts.credentialPaths != nil {
+		facts.credentialPaths.budget = input.CredentialWalkBudget
+	}
+	return facts
+}
+
+func analyzeReading(input Input, twinCommand string, capture *redirectTargetCapture) Facts {
 	base := newParseOutput(DialectNone, 1)
 	base.status = StatusNotApplicable
 	activeAgentFiles, activeAgentFilesIssue := normalizeActiveAgentFiles(
@@ -99,7 +107,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 		return facts
 	}
 
-	extracted := extractArgsForTool(input.Args, input.Tool)
+	extracted := extractArgsForToolAt(input.Args, input.Tool, patchCallCWD(input))
 	for _, issue := range extracted.issues {
 		base.addIssue(issue)
 	}
@@ -270,7 +278,8 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 				// is kept: a redirect to a home path in a command list the
 				// classifier reads only in part (type a.txt & type nul >
 				// %USERPROFILE%\f) keeps its exact target (GAP-2408).
-				if resolved := parse(rewrite); resolved.status == StatusComplete || issuesNarrowed(resolved, parsed) {
+				if resolved := parse(rewrite); resolved.status == StatusComplete || issuesNarrowed(resolved, parsed) ||
+					rewritePlacesHomeOperandsOnly(resolved, parsed) {
 					parsed = resolved
 				}
 			}
@@ -320,15 +329,18 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 		projectStructuredTextReplacements(input)
 	facts.SQLServerCommandExecutions =
 		projectSQLServerCommandExecutions(input)
-	facts.PostgreSQLCopyPrograms = projectPostgreSQLCopyPrograms(input)
+	sqlReads, sqlReadCaps, sqlUnreadDanger := sqlCLIReadInputs(input, facts)
+	facts.sqlUnreadDanger = sqlUnreadDanger
+	facts.PostgreSQLCopyPrograms = projectPostgreSQLCopyPrograms(input, sqlReads)
 	facts.SQLSensitiveServerFileReads =
-		projectSQLSensitiveServerFileReads(input)
+		projectSQLSensitiveServerFileReads(input, sqlReads)
 	facts.SensitiveSQLRowsetReads = projectSensitiveSQLRowsetReads(input)
 	facts.SQLDirectExternalEgresses = projectSQLDirectExternalEgresses(input)
 	facts.StructuredLiteralPersistences =
 		projectStructuredLiteralPersistences(input)
 	facts.SQLCommandUDFOperations = projectSQLCommandUDFOperations(input, facts)
-	facts.SQLMutations = projectSQLMutations(input, facts)
+	facts.SQLMutations, facts.SQLFacts, facts.sqlASTCaps = projectSQLAnalysis(input, facts)
+	facts.sqlASTCaps = facts.sqlASTCaps.Union(sqlReadCaps)
 	facts.HTTPSQLInjections = projectHTTPSQLInjections(input)
 	facts.HTTPCommandInjections = projectHTTPCommandInjections(input)
 	facts.SQLClientShellEscapes = projectSQLClientShellEscapes(facts)
@@ -341,6 +353,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 		projectKubernetesCronJobReverseShells(input, facts)
 	facts.KubernetesSensitiveAccesses =
 		projectKubernetesSensitiveAccesses(input, facts)
+	facts.KubeRequests, facts.kubeCut = projectKubeRequests(input, facts)
 	facts.StructuredPortForwards = projectStructuredPortForwards(input)
 	facts.WirelessCaptureDeauthOperations =
 		projectWirelessCaptureDeauthOperations(input)
@@ -357,7 +370,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 		projectCompromisedCredentialAuthentications(input, facts)
 	facts.DirectoryCredentialAcquisitions =
 		projectDirectoryCredentialAcquisitions(input, &facts)
-	facts.KerberosS4USecretsDumps = projectKerberosS4USecretsDumps(input)
+	facts.KerberosS4USecretsDumps = projectKerberosS4USecretsDumps(input, extracted)
 	facts.StagedPayloadPersistenceOperations =
 		projectStagedPayloadPersistenceOperations(input)
 	facts.CloudMetadataCredentialReads =
@@ -2461,6 +2474,34 @@ func issuesNarrowed(resolved, original parseOutput) bool {
 		return false
 	}
 	return dropped
+}
+
+// rewritePlacesHomeOperandsOnly reports a home rewrite of a PowerShell or
+// cmd call whose parse stays partial for another word of the call, and
+// differs from the original only by the home operands it placed: no issue
+// the original did not have, the same commands, more path facts. Another
+// dynamic word (a delay-bind script block -Body {$_}, a variable) dropped
+// the rewrite, so Get-Content $env:USERPROFILE\.aws\credentials | Out-String
+// | Invoke-WebRequest ... -Body {$_} had no read of the credentials at all
+// and was allowed in every pack, where the same call with the path written
+// out was judged (rel-1-0-10:GAP-2136). The rewrite names the same files the
+// original names, so it only adds facts.
+func rewritePlacesHomeOperandsOnly(resolved, original parseOutput) bool {
+	if resolved.status != StatusPartial || original.status != StatusPartial ||
+		len(resolved.commands) != len(original.commands) || len(resolved.paths) <= len(original.paths) {
+		return false
+	}
+	for _, issue := range resolved.issues {
+		if !slices.Contains(original.issues, issue) {
+			return false
+		}
+	}
+	for i := range resolved.commands {
+		if resolved.commands[i].Program != original.commands[i].Program {
+			return false
+		}
+	}
+	return true
 }
 
 // rewriteKeepsOnlyStaticGlobs reports a home rewrite whose parse is left

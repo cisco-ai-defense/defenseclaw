@@ -40,11 +40,14 @@ def lit(text: str, indent: int) -> str:
     if len(repr(text)) + indent <= 118:
         return repr(text)
     pieces: list[str] = []
+    # Each piece sits on its own line as indent + 4 spaces + its repr: keep that under 120 columns, with one
+    # column of slack for the escaped newline a piece can end with.
+    width = min(WIDTH, 117 - indent - 4)
     for line in text.splitlines(keepends=True):
-        while len(line) > WIDTH:
-            cut = line.rfind(" ", 0, WIDTH) + 1
+        while len(line) > width:
+            cut = line.rfind(" ", 0, width) + 1
             if cut <= 0:
-                cut = WIDTH
+                cut = width
             pieces.append(line[:cut])
             line = line[cut:]
         pieces.append(line)
@@ -62,6 +65,8 @@ def render_flag(flag: dict, indent: int) -> str:
         parts.append("default=" + repr(default))
     if flag.get("metavar"):
         parts.append("metavar=" + repr(flag["metavar"]))
+    if flag.get("hidden"):
+        parts.append("hidden=True")
     return " " * indent + "_Flag(" + ", ".join(parts) + "),"
 
 
@@ -194,6 +199,7 @@ def _option(flag: _Flag) -> GatewayOption:
         type=click.STRING,
         metavar=flag.metavar or None,
         help=flag.help,
+        hidden=flag.hidden,
     )
 
 

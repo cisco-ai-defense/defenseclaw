@@ -388,7 +388,8 @@ type sandboxHookCase struct {
 	// contract: Hermes enforces only a stdout block directive (its exit
 	// status is ignored), Antigravity only a synchronous {"decision":"deny"},
 	// Kiro exit 2 with nothing on stdout (it adds stdout to the context),
-	// every other harness exit 2 (see sandboxHookFailObject).
+	// Codex exit 0 with the event's block object, every other harness exit 2
+	// (see sandboxHookFailObject).
 	blocked func(sandboxHookRun) bool
 }
 
@@ -413,10 +414,13 @@ var sandboxHookFailObject = map[string]func(sandboxHookRun) bool{
 
 func sandboxHookCases() []sandboxHookCase {
 	exit2 := func(run sandboxHookRun) bool { return run.exitCode == 2 }
+	// Codex reads a non-zero status as a hook failure: its block is exit 0
+	// with the event's block object (GAP-1769).
+	codexBlock := func(run sandboxHookRun) bool { return codexBlockAnswer("PreToolUse", run.exitCode, run.stdout) }
 	return []sandboxHookCase{
 		{"claudecode", &ClaudeCodeConnector{}, "2.1.156", "claude-code-hook.sh", nil, claudePreToolUse, "/api/v1/claude-code/hook", nil, false, true, exit2},
 		{"codex", &CodexConnector{}, "0.146.0", "codex-hook.sh", codexPreToolUseArgs, codexPreToolUse, "/api/v1/codex/hook",
-			map[string]string{"x-defenseclaw-hook-event": "PreToolUse", "x-defenseclaw-hook-contract": "codex-hooks-v4"}, false, true, exit2},
+			map[string]string{"x-defenseclaw-hook-event": "PreToolUse", "x-defenseclaw-hook-contract": "codex-hooks-v4"}, false, true, codexBlock},
 		{"copilot", NewCopilotConnector(), "1.0.88", "copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, "/api/v1/copilot/hook",
 			map[string]string{"x-defenseclaw-copilot-event": "preToolUse"}, false, true, exit2},
 		{"cursor", NewCursorConnector(), "2026.07.23-e383d2b", "cursor-hook.sh", nil, cursorPreToolUse, "/api/v1/cursor/hook", nil, false, true, exit2},
@@ -658,8 +662,16 @@ func TestSandboxHookFailClosedNamesThePrompt(t *testing.T) {
 	} {
 		h := newSandboxHookHarness(t, tc.provider, tc.version)
 		run := h.run(t, SandboxHookDir+"/"+tc.hook, tc.args, tc.payload, map[string]string{SandboxTokenEnv: "tok"}, []string{"exit:7", "exit:7"})
-		if run.exitCode != 2 || !strings.Contains(run.stderr, tc.want) {
-			t.Fatalf("%s: exit %d stderr %q, want exit 2 and %q", tc.hook, run.exitCode, run.stderr, tc.want)
+		blocked := run.exitCode == 2
+		if tc.hook == "codex-hook.sh" {
+			// Codex shows no stderr of a hook that exits 0: its block object
+			// says what is down and how the user brings it back (GAP-1769).
+			blocked = codexBlockAnswer("UserPromptSubmit", run.exitCode, run.stdout) &&
+				strings.Contains(codexBlockReason(run.stdout), "its daemon is stopped or restarting") &&
+				strings.Contains(codexBlockReason(run.stdout), "defenseclaw sandbox doctor")
+		}
+		if !blocked || !strings.Contains(run.stderr, tc.want) {
+			t.Fatalf("%s: exit %d stdout %q stderr %q, want a block and %q", tc.hook, run.exitCode, run.stdout, run.stderr, tc.want)
 		}
 		// The reason says what is down and how the user brings it back,
 		// not "sandbox ingress unreachable" (GAP-0272).
@@ -841,7 +853,10 @@ func TestSandboxHooksBindTheRegisteredEvent(t *testing.T) {
 		// registration is broken (nil: only no request is required).
 		denied func(sandboxHookRun) bool
 	}{
-		{"codex mismatched event", codex, "codex-hook.sh", []string{"--event", "Stop", "--hook-contract", "codex-hooks-v4"}, nil},
+		// A Stop bound hook answers Codex's Stop block, exit 0, as the
+		// native runner does (rel-1-0-10:GAP-1770).
+		{"codex mismatched event", codex, "codex-hook.sh", []string{"--event", "Stop", "--hook-contract", "codex-hooks-v4"},
+			func(run sandboxHookRun) bool { return run.exitCode == 0 && lastJSON(run)["decision"] == "block" }},
 		{"copilot no args", copilot, "copilot-hook.sh", nil, nil},
 		{"copilot unknown event", copilot, "copilot-hook.sh", []string{"--event", "futureEvent"}, nil},
 		{"copilot extra args", copilot, "copilot-hook.sh", []string{"--event", "preToolUse", "--x"}, nil},

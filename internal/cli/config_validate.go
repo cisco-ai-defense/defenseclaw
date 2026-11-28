@@ -127,6 +127,7 @@ var configValidateCmd = &cobra.Command{
 		warnings = append(warnings, configValidateManagedStandaloneWarnings(loaded)...)
 		warnings = append(warnings, configValidateUserEntryWarnings(cmd.Context(), loaded.runtime.Guardrail.ProfileAssignments)...)
 		warnings = append(warnings, configValidateRoutingGroupWarnings(cmd.Context(), loaded.runtime)...)
+		warnings = append(warnings, loaded.runtime.RoutingAdminIssuerWarnings()...)
 		if configValidateJSON {
 			valid := true
 			encoder := json.NewEncoder(out)

@@ -5,6 +5,8 @@ package actionfacts
 
 import (
 	"encoding/json"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -442,25 +444,32 @@ func TestStripShellComments(t *testing.T) {
 
 // TestOverLimitWriteElidedContentTargetRelativeLink pins that the client's
 // attested target of a relative operand is read under the key the client
-// gives it, the operand placed in the working directory. The rows are POSIX:
-// /etc/ld.so.preload is a Linux loader file and /srv/app is not a rooted path
-// of a Windows host, so the client places the operand differently there.
+// gives it, the operand placed in the working directory. The working
+// directory is a rooted folder of the host (/srv/app, C:\srv\app on
+// Windows, where /srv/app is not rooted), and the key is the operand placed
+// in it with the host's path rules, as the client places it. The attested
+// target is the Linux loader file /etc/ld.so.preload on every host: the
+// class is read from the target the client gives (rel-1-0-10:GAP-1525).
 func TestOverLimitWriteElidedContentTargetRelativeLink(t *testing.T) {
-	skipPOSIXPathsOnWindows(t)
+	app := "/srv/app"
+	if runtime.GOOS == "windows" {
+		app = `C:\srv\app`
+	}
+	placed := filepath.Join(app, "lnk-preload")
 	opaque := "*** Begin Patch\n*** Add File: lnk-preload\n+" + strings.Repeat("x", 300000) + "\n*** End Patch\n"
-	raw, err := json.Marshal(map[string]any{"command": opaque, "workdir": "/srv/app"})
+	raw, err := json.Marshal(map[string]any{"command": opaque, "workdir": app})
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := Input{Tool: "apply_patch", Args: raw, CWD: "/srv/app"}
+	input := Input{Tool: "apply_patch", Args: raw, CWD: app}
 	facts := Analyze(input)
 	for _, c := range []struct {
 		name     string
 		resolved map[string]string
 		class    string
 	}{
-		{"placed key", map[string]string{"/srv/app/lnk-preload": "/etc/ld.so.preload"}, "global-preload"},
-		{"ordinary link", map[string]string{"/srv/app/lnk-preload": "/srv/app/notes.txt"}, ""},
+		{"placed key", map[string]string{placed: "/etc/ld.so.preload"}, "global-preload"},
+		{"ordinary link", map[string]string{placed: filepath.Join(app, "notes.txt")}, ""},
 		{"no evidence", nil, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {

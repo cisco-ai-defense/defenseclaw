@@ -197,8 +197,8 @@ type BuildOutput struct {
 }
 
 // RelaySessions is how the image's relay checks a launcher's session token:
-// against the gateway (verify_url), or with the gateway's public keys for
-// tokens of one issuer and audience.
+// against the gateway (verify_url, always), after the gateway's public keys
+// for tokens of one issuer and audience when the build was given them.
 type RelaySessions struct {
 	VerifyURL string   `json:"verify_url,omitempty"`
 	Issuer    string   `json:"issuer,omitempty"`
@@ -212,10 +212,14 @@ type RelaySessions struct {
 // against it). Their issuer is --session-issuer, else the install's: the
 // gateway signs with https://<substrate.services.admin> of --config (or of
 // the defaults), so an image built for an install verifies that install's
-// tokens. A relay with neither keys nor a verify URL would refuse every
-// attachment, so an image that starts the relay must have one of them.
-func relaySessions(cfg *config.Config, keyArgs []string, issuer, audience, verifyURL string, startsRelay bool) (map[string][]byte, RelaySessions, error) {
+// tokens. The verify URL is --verify-url, else the actor listener's check
+// (kit.RelayVerifyURL of gatewayURL): every relay asks the gateway, which
+// alone can check that a token's person owns the agent (GAP-0435).
+func relaySessions(cfg *config.Config, keyArgs []string, issuer, audience, verifyURL, gatewayURL string) (map[string][]byte, RelaySessions, error) {
 	rs := RelaySessions{VerifyURL: strings.TrimSpace(verifyURL)}
+	if rs.VerifyURL == "" {
+		rs.VerifyURL = kit.RelayVerifyURL(gatewayURL)
+	}
 	keys := map[string][]byte{}
 	for _, kv := range keyArgs {
 		kid, file, ok := strings.Cut(kv, "=")
@@ -238,8 +242,6 @@ func relaySessions(cfg *config.Config, keyArgs []string, issuer, audience, verif
 	}
 	sort.Strings(rs.KeyIDs)
 	switch {
-	case rs.VerifyURL != "" && len(keys) > 0:
-		return nil, rs, errors.New("--verify-url and --session-key are two ways to check session tokens; give one")
 	case len(keys) > 0:
 		rs.Issuer = strings.TrimSpace(issuer)
 		if rs.Issuer == "" {
@@ -249,9 +251,6 @@ func relaySessions(cfg *config.Config, keyArgs []string, issuer, audience, verif
 		if rs.Audience == "" {
 			rs.Audience = kit.DefaultConfig().Relay.SessionAudience
 		}
-	case rs.VerifyURL == "" && startsRelay:
-		return nil, rs, errors.New("the relay could not check any session token, so nobody could attach: give --session-key " +
-			"(the gateway's relay session public key, public.pem of the relay session Secret) or --verify-url")
 	case issuer != "":
 		return nil, rs, errors.New("--session-issuer goes with --session-key")
 	}
@@ -287,7 +286,7 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 		dry           = fs.Bool("dry-run", false, "scan the composed image and stop before pushing")
 		issuer        = fs.String("session-issuer", "", "iss of the relay session tokens the keys verify (default https://<substrate.services.admin> of --config, the gateway's)")
 		audience      = fs.String("session-audience", "dcrelay", "aud of the relay session tokens")
-		verifyURL     = fs.String("verify-url", "", "gateway session-token check URL, instead of --session-key")
+		verifyURL     = fs.String("verify-url", "", "gateway session-token check URL (default <gateway-url>"+kit.RelayVerifyPath+")")
 		trusted       multi
 		mcpHosts      multi
 		sessionKeys   multi
@@ -337,7 +336,13 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 	if err != nil {
 		return ExitUsageError, err
 	}
-	keys, sessions, err := relaySessions(cfg, sessionKeys, *issuer, *audience, *verifyURL, !*keepEP)
+	// The hook posts to the install's actor Service by its FQDN (GAP-0023):
+	// the same name the controller renders the egress rule for. The relay
+	// checks session tokens there too (GAP-0435).
+	if strings.TrimSpace(*gateway) == "" {
+		*gateway = cfg.Substrate.ActorGatewayURL()
+	}
+	keys, sessions, err := relaySessions(cfg, sessionKeys, *issuer, *audience, *verifyURL, *gateway)
 	if err != nil {
 		return ExitUsageError, err
 	}
@@ -363,15 +368,11 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 		return ExitUsageError, err
 	}
 	*provider = route
-	// The hook posts to the install's actor Service by its FQDN (GAP-0023):
-	// the same name the controller renders the egress rule for.
-	if strings.TrimSpace(*gateway) == "" {
-		*gateway = cfg.Substrate.ActorGatewayURL()
-	}
 	spec, tpl, err := kitspec.Spec(kitspec.Options{Connector: *connectorName, KitVersion: *kitVersion, GatewayURL: *gateway,
 		FailMode: *failMode, TaskStall: *taskStall, Provider: *provider, Model: *model, HookBinary: hook, RelayBinary: relay, SessionKeys: keys,
 		SessionIssuer: sessions.Issuer, Audience: sessions.Audience, VerifyURL: sessions.VerifyURL,
 		AgentBinary: agent, Arch: "amd64", Providers: providers(*connectorName, *provider),
+		// Build-time registry lines for launchers older than 1.0.11: remove in 1.0.12, when launchers older than 1.0.11 are unsupported.
 		RegistryTokens: kit.NPMRegistryTokens(cfg.Substrate.Secrets)})
 	if err != nil {
 		return ExitUsageError, err
@@ -461,11 +462,10 @@ func printBuild(w io.Writer, o BuildOutput, dry bool) {
 	default:
 		fmt.Fprintf(w, "built %s\n  kit %s on base %s (%s)\n  attestation %s signed by key %s\n", o.Image, o.Kit.Version, o.Base.Digest, o.Base.Trust, o.AttTag, short(o.KeyID))
 	}
-	switch r := o.Relay; {
-	case r.VerifyURL != "":
+	if r := o.Relay; len(r.KeyIDs) > 0 {
+		fmt.Fprintf(w, "  relay checks session tokens of %s (aud %s) with keys %s, then with %s\n", r.Issuer, r.Audience, strings.Join(r.KeyIDs, ", "), r.VerifyURL)
+	} else if r.VerifyURL != "" {
 		fmt.Fprintf(w, "  relay checks session tokens with %s\n", r.VerifyURL)
-	case len(r.KeyIDs) > 0:
-		fmt.Fprintf(w, "  relay accepts session tokens of %s (aud %s), keys %s\n", r.Issuer, r.Audience, strings.Join(r.KeyIDs, ", "))
 	}
 	printScan(w, o.Scan, o.Hooks)
 }

@@ -38,12 +38,12 @@ func useEffectsRulesMode(t *testing.T, mode string) {
 	cfg.Guardrail.Cascade.SetLane(config.CascadeLaneEffects, mode)
 	cfg.Guardrail.EffectsRulesTier = string(tierRestricted)
 	liveGeneration.Store(&Generation{Config: cfg})
-	prevResolver := effectResolverOverride
-	effectResolverOverride = func(path string) (string, bool) { return path, true }
+	restoreResolver := setEffectResolverIdle(t, func(path string) (string, bool) { return path, true })
+	restoreHook := setEffectShadowFaultHookIdle(t, nil)
 	t.Cleanup(func() {
 		liveGeneration.Store(previous)
-		effectResolverOverride = prevResolver
-		effectShadowFaultHook = nil
+		restoreHook()
+		restoreResolver()
 	})
 }
 
@@ -125,7 +125,7 @@ func TestEffectShadowLivePanicIsRecordedAndIgnored(t *testing.T) {
 	baseline, _ := dispatchShadowLive(t, shadowLiveWrite, 0)
 
 	useEffectsRulesMode(t, "shadow")
-	effectShadowFaultHook = func() { panic("injected shadow fault") }
+	t.Cleanup(setEffectShadowFaultHookIdle(t, func() { panic("injected shadow fault") }))
 	findings, recs := dispatchShadowLive(t, shadowLiveWrite, 1)
 	if len(recs) != 1 || recs[0].Reason != effectShadowReasonPanic || recs[0].Action != guardrailActionAllow || recs[0].Tier != string(effectTierClean) {
 		t.Fatalf("panic record = %+v, want shadow_panic, clean, allow", recs)
@@ -135,17 +135,18 @@ func TestEffectShadowLivePanicIsRecordedAndIgnored(t *testing.T) {
 	}
 }
 
-// A run past the wall-clock cap is recorded as shadow_timeout and its answer
-// is discarded.
-func TestEffectShadowLiveTimeoutIsRecordedAndDiscarded(t *testing.T) {
+// The shadow record of a slow run is the record of an idle one: the slow step
+// shows only in the cost (FIX-T19).
+func TestEffectShadowLiveSlowRunKeepsItsAnswer(t *testing.T) {
 	useEffectsRulesMode(t, "shadow")
-	prev := effectShadowTimeCap
-	effectShadowTimeCap = 5 * time.Millisecond
-	t.Cleanup(func() { effectShadowTimeCap = prev })
-	effectShadowFaultHook = func() { time.Sleep(30 * time.Millisecond) }
+	t.Cleanup(setEffectShadowFaultHookIdle(t, func() { time.Sleep(effectsLaneSlowStep) }))
 	_, recs := dispatchShadowLive(t, shadowLiveWrite, 1)
-	if len(recs) != 1 || recs[0].Reason != effectShadowReasonTimeout || recs[0].Action != guardrailActionAllow || len(recs[0].RuleIDs) != 0 {
-		t.Fatalf("timeout record = %+v, want shadow_timeout, allow, no rule ids", recs)
+	if len(recs) != 1 || recs[0].Reason != "" || recs[0].Tier != string(effectTierRestricted) ||
+		len(recs[0].RuleIDs) != 1 || recs[0].RuleIDs[0] != "effect.protected_target_restricted" {
+		t.Fatalf("slow record = %+v, want the restricted answer with no reason", recs)
+	}
+	if recs[0].CostUS < effectsLaneSlowStep.Microseconds() {
+		t.Fatalf("slow record cost %d us, want at least the slow step %d us", recs[0].CostUS, effectsLaneSlowStep.Microseconds())
 	}
 }
 
@@ -154,7 +155,7 @@ func TestEffectShadowLiveTimeoutIsRecordedAndDiscarded(t *testing.T) {
 func TestEffectShadowLiveParseBudgetSkipsTheRun(t *testing.T) {
 	useEffectsRulesMode(t, "shadow")
 	started := false
-	effectShadowFaultHook = func() { started = true }
+	t.Cleanup(setEffectShadowFaultHookIdle(t, func() { started = true }))
 	deep := strings.Repeat("(", 600) + "x" + strings.Repeat(")", 600)
 	_, recs := dispatchShadowLive(t, deep, 1)
 	if started {
@@ -211,7 +212,10 @@ func TestEffectShadowAuditDetailsAreValueFree(t *testing.T) {
 func TestEffectShadowLivePathologicalInputsStayInsideTheCaps(t *testing.T) {
 	useEffectsRulesMode(t, "shadow")
 	const allocCap = 64 << 20
-	timeCap := 4 * effectShadowTimeCap // the parse before the walk is not interruptible
+	// A test bound on the cost of the worst input the lane admits, never a
+	// bound of an answer: the lane counts work (FIX-T19). 200 ms is four times
+	// the wall-clock cap the shadow lane had; the parse is not interruptible.
+	const timeCap = 200 * time.Millisecond
 	near := effectShadowMaxCommandBytes - 64
 	fill := func(unit string) string { return strings.Repeat(unit, near/len(unit)) }
 	protectedWrite := " echo k >> /home/u/.ssh/authorized_keys"

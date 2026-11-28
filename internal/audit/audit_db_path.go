@@ -14,6 +14,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // auditDBPathHooks provide deterministic fault/race injection without
@@ -129,6 +130,11 @@ func openHardenedAuditSQLite(dbPath string, hooks auditDBPathHooks) (*hardenedAu
 // retains that immutable identity for post-migration revalidation and
 // runtime-plan binding instead of reinterpreting a relative constructor path
 // after the process working directory changes.
+// auditStoreSeed is nil in every binary but the audit package's test binary,
+// which sets it to fill a new, empty store file from a migrated template
+// (GAP-0964). It runs after the path checks and before SQLite opens the file.
+var auditStoreSeed func(path string, secureClient bool)
+
 func openHardenedAuditSQLiteWithIdentity(
 	dbPath string,
 	hooks auditDBPathHooks,
@@ -151,6 +157,9 @@ func openHardenedAuditSQLiteWithIdentity(
 			prepared.close()
 			return nil, "", nil, fmt.Errorf("audit: pre-open path check: %w", err)
 		}
+	}
+	if auditStoreSeed != nil {
+		auditStoreSeed(prepared.path, hooks.secureClient)
 	}
 	pragmas := withPageCache(auditPragmasFor(hooks.secureClient), hooks.pageCacheKiB)
 	if hooks.schemaTolerant {
@@ -759,7 +768,7 @@ func validateAuditDBDirectory(path string, info os.FileInfo, allowStickyWritable
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
 		if trustedAuditDBSystemDirectoryAlias(path, info) {
-			resolved, err := filepath.EvalSymlinks(path)
+			resolved, err := winpath.EvalLinks(path)
 			if err != nil {
 				return fmt.Errorf("audit: resolve trusted system directory alias: %w", err)
 			}

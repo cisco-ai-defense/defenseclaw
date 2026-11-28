@@ -4,6 +4,7 @@
 package actionfacts
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -20,7 +21,7 @@ func TestGAP1046GlobCompareChargesTheBytesItReads(t *testing.T) {
 		t.Helper()
 		out := parsePOSIX(command, 1, 0)
 		classifyOutput(&out)
-		return resolveCredentialPathReadsWithin(limits, out.credentialWords, dir, dir, out.commands, out.paths)
+		return resolveCredentialPathReadsWithin(NewCredentialWalkBudget(context.Background()), limits, out.credentialWords, dir, dir, out.commands, out.paths)
 	}
 	if record := analyze(credentialPathLimits{candidates: 64, work: 4096, lookups: 64}); record == nil || !record.caps.Has(bounded.Time) {
 		t.Fatalf("a 400-byte glob word under a 4096-unit work cap did not report the Time cap: %+v", record)

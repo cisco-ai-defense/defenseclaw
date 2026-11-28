@@ -478,6 +478,19 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			a.handleSandboxHookReceipt(w, r, connectorName, receiptID)
 			return
 		}
+		// A sandboxed agent's secret goes into the account's vault and out
+		// of the body before anything evaluates or records it.
+		rawBody, vaultCapture := captureSandboxVault(r.Context(), a.sandboxVaultStore(), connectorName, r.Header, rawBody, func() bool {
+			// The answer's mode decides whether a stopped prompt goes on:
+			// decided before the capture's one write.
+			return sandboxHookMode(r.Context(), connectorName, a.agentHookMode(r.Context(), connectorName)) != "action"
+		})
+		a.afterSandboxVaultCapture(r.Context(), connectorName, vaultCapture)
+		if vaultCapture == nil && relayedSandboxRequest(r.Context()) {
+			// A managed host's sandbox daemon captured before it relayed:
+			// answer and record the call as the block it is.
+			vaultCapture = vaultCaptureFromHeader(connectorName, r.Header.Get(sandboxrelay.VaultCaptureHeader))
+		}
 		payload, b, err := rawPayloadFromJSONDecoder(json.NewDecoder(bytes.NewReader(rawBody)))
 		if err != nil {
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_json", 0)
@@ -690,7 +703,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		}
 		// A connector the administrator's config turns off is answered allow
 		// here, before anything about the call is recorded (rel-1-0-6:GAP-0325).
-		if a.answerDisabledConnectorHook(r.Context(), w, r.Header, profile, connectorName, req) {
+		if vaultCapture == nil && a.answerDisabledConnectorHook(r.Context(), w, r.Header, profile, connectorName, req) {
+			// A captured call is never answered allow: Claude Code and Codex
+			// would send the original prompt with its secret on.
 			return
 		}
 		a.noteProtectedFileActivity(r.Context(), connectorName, req, identityFacts.ID)
@@ -869,7 +884,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// identity. The request-scoped projection is re-bound to the exact
 		// native tool name by each typed evaluator below.
 		ctx = withAuthenticatedToolResource(ctx, req, rawBody)
-		a.recordObservedMCPToolIfManaged(ctx, req)
+		a.recordObservedMCPToolIfInventoryOn(ctx, req)
 		// Capture trusted ActionFacts even when correlation persistence is
 		// degraded. Durable cross-call joins require correlation, but the
 		// experimental final-artifact execution gate is a same-request
@@ -1094,6 +1109,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			(cfg == nil || !cfg.SecureClientIntegration()) {
 			ctx = withShellToolGateBound(ctx, r)
 		}
+		// One wait for walk slots for the whole request: its evaluation, each
+		// call of a Copilot envelope, the members of an artifact and the
+		// tool-chain stage all draw on it (substrate-1:GAP-1083). The artifact
+		// stage runs on ctx, not on evaluationCtx, so the wait is put here,
+		// where both come from (RV-0674T F4).
+		ctx = withHookWalkBudget(ctx)
 		accountingCtx := ctx
 		evaluationCtx, managedAIDFailOpenGate := deferManagedAIDFailOpenNativeHookAccounting(ctx)
 		// An argumentless Copilot permission callback is bound to the call of
@@ -1189,6 +1210,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// On a managed host, the post-tool answer tells the agent of
 			// the kernel denials its tool calls hit (kernel_block_notice.go).
 			resp = a.safeAddKernelBlockNotice(ctx, profile, connectorName, req, b, payload, resp)
+		}
+		if vaultCapture != nil {
+			resp = a.applySandboxVaultCapture(ctx, profile, req, b, payload, resp, vaultCapture)
 		}
 		if oversizeUninspectedPayload(payload) && (resp.Action == "allow" || resp.Action == "alert") {
 			// The hook could not send this oversized call whole: never a
@@ -1327,14 +1351,17 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		hungUpBeforeAnswer := r.Context().Err() != nil
 		var preKey preToolDecisionKey
 		preNoted := false
-		shellBridge := r.Header.Get(hookexec.HookShellBridgeHeader) == "shell"
+		// A managed shell bridge post and a verified Substrate actor's kit
+		// post answer their agent with this reply and send no receipt
+		// (GAP-2614, GAP-0550).
+		synchronousPost := r.Header.Get(hookexec.HookShellBridgeHeader) == "shell" || isSubstrateActorRequest(ctx)
 		unreceipted := func(proposal agentHookResponse) agentHookResponse {
-			if a.scannerCfg != nil && !a.scannerCfg.SecureClientIntegration() && !shellBridge &&
+			if a.scannerCfg != nil && !a.scannerCfg.SecureClientIntegration() && !synchronousPost &&
 				r.Header.Get(hookexec.HookDeliveryReceiptHeader) == "1" &&
 				hookexec.DeliveryReceiptEvent(connectorName, req.HookEventName) {
 				return a.deliveredHookDecision(connectorName, proposal, "")
 			}
-			return a.unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer, connectorName, req.HookEventName, proposal)
+			return a.unreceiptedHookDecision(synchronousPost, hungUpBeforeAnswer, connectorName, req.HookEventName, proposal)
 		}
 		var capacityReceipt *hookCapacityReceipt
 		if delivery != nil {
@@ -2679,6 +2706,7 @@ func (a *APIServer) safeEvaluateSyntheticHook(
 	req agentHookRequest,
 ) (resp agentHookResponse, panicked bool) {
 	defer hookpaths.HookCall()()
+	ctx = withHookWalkBudget(ctx)
 	baseCtx := ctx
 	ctx = withShareBodyStrict(ctx, func() bool { return a.shareBodyStrictTier(baseCtx, connectorName) })
 	defer func() {
@@ -2840,10 +2868,10 @@ func (a *APIServer) hookFailedCheckResponse(
 				connectorName, req.HookEventName, recovered)
 			out = resp
 			out.HookOutput = failedCheckFallbackOutput(profile, req, resp.Action, resp.RawAction, plain, resp.AdditionalContext)
-			out = lifecycleOutput(out)
+			out = withCopilotBlockedPrompt(req, lifecycleOutput(out))
 		}
 	}()
-	return lifecycleOutput(a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, plain))
+	return withCopilotBlockedPrompt(req, lifecycleOutput(a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, plain)))
 }
 
 // failedCheckNativeAction is the closed answer of a failed check (and of a
@@ -2872,7 +2900,23 @@ func failedCheckNativeAction(ctx context.Context, profile connector.HookProfile,
 	if everyNativeBlock && action == "allow" && nativeOnlyBlockEvent(connectorName, req.HookEventName) {
 		return "block", false
 	}
+	if action == "allow" && copilotBlockedPromptRewrite(req, "action", "block") {
+		// The gateway's replacement is the block of a Copilot CLI prompt
+		// (GAP-1730), so a closed failed check replaces it too
+		// (withCopilotBlockedPrompt, GAP-1753).
+		return "block", false
+	}
 	return action, wouldBlock
+}
+
+// withCopilotBlockedPrompt gives a blocked Copilot CLI prompt of a failed
+// check the generic replacement, the hook output that carries the block
+// (GAP-1753). Any other answer is returned unchanged.
+func withCopilotBlockedPrompt(req agentHookRequest, resp agentHookResponse) agentHookResponse {
+	if resp.Action == "block" && copilotBlockedPromptRewrite(req, "action", "block") {
+		resp.HookOutput = copilotBlockedPromptOutput(req, "action", "block", nil, resp.HookOutput)
+	}
+	return resp
 }
 
 // nativeOnlyBlockEvent names the events whose native hook can block although
@@ -3035,6 +3079,13 @@ func hookStageForTest(ctx context.Context, stage string) {
 }
 
 func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.Context {
+	return withHookSessionRootAgent(enrichAgentHookContextOnly(ctx, req), req)
+}
+
+// enrichAgentHookContextOnly is enrichAgentHookContext without the session
+// root agent: for a caller that names the session's agent itself, as the
+// foreign-hook denial does from the live hook snapshot first (GAP-1903).
+func enrichAgentHookContextOnly(ctx context.Context, req agentHookRequest) context.Context {
 	ctx = ContextWithSessionID(ctx, req.SessionID)
 	identity := agentIdentityForGenericHook(ctx, req)
 	ctx = ContextWithAgentIdentity(ctx, identity)
@@ -3094,6 +3145,39 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 		ctx = audit.ContextWithEnvelope(ctx, env)
 	}
 	return ctx
+}
+
+// withHookSessionRootAgent names the session's root agent on the audit
+// envelope of a hook that reported no agent. The id is the one the hook's
+// hook_decision, lifecycle and model records derive (hookLLMEventMeta) and the
+// one correlation mints at the session's start, so it is the same on every
+// gateway replica and needs no cross-replica lookup. Before, the envelope got
+// an agent only from this replica's correlation cursor: a replica that saw an
+// actor's session first on a tool hook, with the session's start on another
+// replica, wrote its connector-hook rows with agent_id empty while the
+// hook_decision rows of the same events named the agent (substrate-1:GAP-0422).
+// A cursor's or the payload's agent still wins (contextWithHookCorrelation).
+// The key is the hook's own session, as hookLLMEventMeta's. An agentless
+// sub-agent start or stop is left alone: hookLLMEventMeta names a sub-agent
+// node for it, not the root. Traffic with no agent identity, and Secure Client
+// (UUIDv7 agents, issue #1092), keep the envelope as it was.
+func withHookSessionRootAgent(ctx context.Context, req agentHookRequest) context.Context {
+	env := audit.EnvelopeFromContext(ctx)
+	connectorName, sessionID := strings.TrimSpace(req.ConnectorName), strings.TrimSpace(req.SessionID)
+	if env.AgentID != "" || sessionID == "" || connectorName == "" || ManagedEnterpriseActive() {
+		return ctx
+	}
+	switch canonicalHookLifecycleEvent(firstString(req.Payload,
+		"hook_event_name", "hookEventName", "event_type", "eventType", "event_name", "eventName")) {
+	case "subagent_start", "subagent_stop":
+		return ctx
+	}
+	scope := agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx))
+	if scope == "" {
+		return ctx
+	}
+	env.AgentID = agentNodeID(scope, connectorName, sessionID, "root")
+	return audit.ContextWithEnvelope(ctx, env)
 }
 
 // refreshAuditEnvelopeFromHook copies payload-derived correlation
@@ -3796,7 +3880,13 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			if req.ContentFromResultField {
 				intentText = ""
 			}
-			a.observeUserTurn(ctx, intentText, scopeText, req.CWD, verdict)
+			// Hermes says which platform the turn came from: a messaging
+			// party's turn is never the task (GAP-1637).
+			sender := hookTurnSender(req.ConnectorName, req.Payload)
+			if sender == judgeTurnSenderRemote {
+				intentText = ""
+			}
+			a.observeUserTurn(withJudgeTurnSender(ctx, req.ConnectorName, sender), intentText, scopeText, req.CWD, verdict)
 			a.observeAlignmentTurn(ctx, req.ConnectorName, intentText, verdict)
 		}
 	case isResultLikeEvent(req.HookEventName):
@@ -3920,11 +4010,13 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		}
 	}
 
-	// Copilot's native prompt events cannot deny a prompt, but Secure Client
-	// enforces an action-mode block by replacing userPromptTransformed before
-	// the model sees it. Record that completed replacement as the effective
-	// block; observe mode and every non-rewrite path keep their mapped outcome.
-	if a.copilotSecureClientPromptRewrite(ctx, req, mode, rawAction) {
+	// Copilot's native prompt events cannot deny a prompt, but on every
+	// profile an action-mode block replaces userPromptTransformed before the
+	// model sees it (GAP-1730). Record that completed replacement as the
+	// effective block; observe mode and every non-rewrite path keep their
+	// mapped outcome. The mode is the enforced one, as for every other event
+	// (GAP-1753).
+	if copilotBlockedPromptRewrite(req, effectiveMode, rawAction) {
 		action, wouldBlock = "block", false
 		aiDefenseEnforced = verdict.aiDefenseBlock
 	}
@@ -3950,7 +4042,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	resp := agentHookResponseForProfile(
 		profile, req, action, rawAction, severity, responseReason, findings, mode, wouldBlock, caps, responsePolicy,
 	)
-	resp.HookOutput = a.copilotSecureClientPromptOutput(ctx, req, mode, rawAction, findings, resp.HookOutput)
+	resp.HookOutput = copilotBlockedPromptOutput(req, effectiveMode, rawAction, findings, resp.HookOutput)
 	// Secure Client keeps the block message as the reason of the hook
 	// records (issue #1092).
 	if !a.managedAIDOnly() {
@@ -4296,27 +4388,33 @@ func (a *APIServer) inspectAgentHookToolCall(
 		CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 	}
 	dialectHint := a.agentHookWindowsDialectHint(ctx)
+	hookTier, hookTiers := configTierTable(a.decisionConfig(ctx), req.ConnectorName)
 	var conflictSource *conflictingToolArgumentSource
 	if bytes.Equal(trustedArgs, shellProjectedArgs) {
 		// The conflicting-keys check reads the arguments as the call
 		// carried them and projects each candidate as above (GAP-0678).
 		conflictSource = agentHookConflictSource(ctx, req, actionInput, dialectHint)
 	}
+	guestCWD := sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD)
 	action := trustedActionRequest{
 		Input:                   actionInput,
 		LegacyText:              string(req.ToolArgs),
 		conflictSource:          conflictSource,
 		Connector:               req.ConnectorName,
+		sessionID:               req.SessionID,
 		CopilotSharedLocalFile:  copilotSharedLocalFileCall(ctx, req),
 		EnforcementCapable:      enforcementCapable,
 		StrictPolicy:            a.strictPolicyTierForHook(ctx, req.ConnectorName),
+		PolicyTier:              hookTier,
+		Tiers:                   hookTiers,
 		ManagedInstall:          a.managedInstallForHook(ctx),
 		ManagedHookOverflowHold: managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
 		ResolvedWriteTargets:    resolvedWritesFromContext(ctx),
 		ShellStartup:            shellStartupFromContext(ctx),
 		patchTarget:             hermesV4APatch,
 		strictPatchLinks:        hermesV4APatch && a.strictPolicyTierForHook(ctx, req.ConnectorName),
-		SandboxGuestCWD:         sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
+		SandboxGuestCWD:         guestCWD,
+		guestToolCWDUnresolved:  isSandboxHookRequest(ctx) && filepath.IsAbs(req.ReportedCWD) && strings.TrimSpace(toolCWD) != "" && guestCWD == "",
 		record:                  toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
 	}
 	withWindowsShellDialect(&action, dialectHint)
@@ -5552,7 +5650,7 @@ func isGenericToolInspectionEvent(event string) bool {
 func isPromptLikeEvent(event string) bool {
 	switch canonicalEvent(event) {
 	case "userpromptsubmit", "userpromptsubmitted", "userprompttransformed", "beforesubmitprompt", "preuserprompt", "subagentstart",
-		"prellmcall", "beforeagent", "beforemodel", "agentstart":
+		"prellmcall", "beforeagent", "beforemodel", "agentstart", "sessionprompt":
 		return true
 	default:
 		return false
@@ -5562,13 +5660,14 @@ func isPromptLikeEvent(event string) bool {
 // isToolJudgeIntentEvent identifies the prompt-bearing turn-start event in
 // each supported connector contract. The spellings intentionally mirror the
 // contract-owned correlation lifecycle bindings. Connectors without prompt
-// text on a trusted turn boundary (currently OpenCode and Antigravity) receive
-// tool-call context only; DefenseClaw must not invent user intent from model or
-// tool output.
+// text on a trusted turn boundary (currently Antigravity, and OpenCode 1.x)
+// receive tool-call context only; DefenseClaw must not invent user intent from
+// model or tool output. OpenCode 2.x reports the user's own turn of a root
+// session as session.prompt (GAP-0032).
 func isToolJudgeIntentEvent(event string) bool {
 	switch canonicalEvent(event) {
 	case "userpromptsubmit", "userpromptsubmitted", "beforesubmitprompt",
-		"beforeagent", "preuserprompt", "prellmcall", "agentstart":
+		"beforeagent", "preuserprompt", "prellmcall", "agentstart", "sessionprompt":
 		return true
 	default:
 		return false

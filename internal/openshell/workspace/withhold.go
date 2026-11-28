@@ -55,7 +55,7 @@ const (
 // the agent can read that file anyway, and git needs its object. It
 // returns how many blobs were left out. It must run after every object of
 // the copy has been written.
-func withholdHistory(ctx context.Context, sg gitCmd, stage, stageRoot string, withheld func(rel string) bool) (int, error) {
+func withholdHistory(ctx context.Context, sg gitCmd, stage, stageRoot string, withheld, keepInBaseline func(rel string) bool) (int, error) {
 	raw, err := sg.output(ctx, "log", "--all", "--format=", "--raw", "-z", "--no-abbrev", "--no-renames", "-m", "--root")
 	if err != nil {
 		return 0, err
@@ -91,7 +91,7 @@ func withholdHistory(ctx context.Context, sg gitCmd, stage, stageRoot string, wi
 		}
 		for _, entry := range splitNUL(listing) {
 			meta, rel, ok := strings.Cut(entry, "\t")
-			if f := strings.Fields(meta); ok && len(f) == 3 && !withheld(rel) {
+			if f := strings.Fields(meta); ok && len(f) == 3 && (!withheld(rel) || rev == baselineRef && keepInBaseline(rel)) {
 				delete(drop, f[2])
 			}
 		}

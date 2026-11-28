@@ -27,6 +27,7 @@ import (
 // installed release still accepts it, and once the marker is gone the next
 // ensure writes the current form again.
 func TestGAP1540RetiredLaunchFoldersWriteThe109ClaudePolicy(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	setStandaloneProfileForTest(t, true)
 	opts := windowsManagedInstallOptions(fixture)

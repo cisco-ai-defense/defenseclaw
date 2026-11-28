@@ -100,6 +100,7 @@ func gap1091Run(t *testing.T, paths []gap0429Path) {
 	values := gap1091Values(t)
 	type tally struct{ rows, blocked, leaking, maxBefore, sumBefore int }
 	tallies := map[string]*tally{}
+	dropped := 0
 	for _, path := range paths {
 		for _, pack := range gap0429Packs() {
 			for _, size := range gap0429Sizes() {
@@ -111,6 +112,10 @@ func gap1091Run(t *testing.T, paths []gap0429Path) {
 						row := gap0429Row{path: path, pack: pack, secret: v,
 							shape: gap0429Shape{name: fmt.Sprintf("at%d", fill), pre: func(f string) string { return f }},
 							size:  size, filler: fill, trailer: " is the value. The build passed on the second run.\n"}
+						if gap0429IsWholeAgain(row) {
+							dropped++
+							continue
+						}
 						name := fmt.Sprintf("%s/%s/%s/at%d/size=%d", path.name, pack, v.name, fill, size)
 						res := gap0429Serve(t, row)
 						n := v.end - v.body
@@ -141,6 +146,7 @@ func gap1091Run(t *testing.T, paths []gap0429Path) {
 			}
 		}
 	}
+	t.Logf("GAP0429-TALLY gap1091 skipped %d rows of 4096-byte pieces whose reply text is at most 4096 bytes (the same pieces as their whole rows)", dropped)
 	keys := make([]string, 0, len(tallies))
 	for k := range tallies {
 		keys = append(keys, k)

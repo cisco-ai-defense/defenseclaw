@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/defenseclaw/defenseclaw/internal/cliusage"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -33,6 +34,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/workspace"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
 
 	"golang.org/x/term"
@@ -59,7 +62,7 @@ func runSubstrateLogs(cmd *cobra.Command, out *substrateOutput, com *substrateCo
 		// GAP-0420: no wait for an agent that cannot answer.
 		return substrateFail(substrateCrashedErr(a))
 	}
-	o, err := substrateAttachOptions(cmd, s, a, "auto", true)
+	o, err := substrateAttachOptions(cmd, s, a, "auto", true, attach.KeyReplayOff)
 	if err != nil {
 		return err
 	}
@@ -74,8 +77,12 @@ func runSubstrateLogs(cmd *cobra.Command, out *substrateOutput, com *substrateCo
 			if a.Unattended {
 				// GAP-0420: a headless run whose actor crashed and came back
 				// lost its run and its log with the worker.
+				if _, ok := loadSubstrateTaskRecord(auth.StateDir(), a); ok {
+					return fmt.Errorf("%s/%s has no headless task now: its run and log were lost when it crashed and was brought back to an earlier snapshot. "+
+						"Start the task again from the beginning with: defenseclaw substrate undo %s", a.Atespace, a.Name, a.Name)
+				}
 				return fmt.Errorf("%s/%s has no headless task now: its run and log were lost when it crashed and was brought back to an earlier snapshot. "+
-					"Bring its folder home with: defenseclaw substrate pull %s, or start the task again in a new agent", a.Atespace, a.Name, a.Name)
+					"Start it again with defenseclaw substrate undo %s on the computer that started it, or start the task again in a new agent", a.Atespace, a.Name, a.Name)
 			}
 			return fmt.Errorf("%s/%s has no headless task; start one with: defenseclaw substrate run AGENT --task \"...\"", a.Atespace, a.Name)
 		}
@@ -138,18 +145,21 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 		return err
 	}
 	modes := 0
-	for _, on := range []bool{f.apply, f.branch != "", f.patch != ""} {
+	for _, on := range []bool{f.apply, f.branch != "", f.patch != "", f.pushBranch != ""} {
 		if on {
 			modes++
 		}
 	}
 	if modes > 1 {
-		return cliusage.WithExitCode(errors.New("choose one of --apply, --branch NAME or --patch-out FILE"), 2)
+		return cliusage.WithExitCode(errors.New("choose one of --apply, --branch NAME, --patch-out FILE or --push-branch NAME"), 2)
 	}
-	if f.allowFlagged && !f.apply {
+	if len(f.exclude) > 0 && f.noExclude {
+		return cliusage.WithExitCode(errors.New("choose --exclude GLOB (what run left out) or --no-exclude (run left out nothing), not both"), 2)
+	}
+	if f.allowFlagged && !f.apply && f.pushBranch == "" {
 		// Refused before anything is read, also on an empty pull
 		// (GAP-0531).
-		return cliusage.WithExitCode(errors.New("--allow-flagged goes with --apply (a branch or a patch writes nothing that runs)"), 2)
+		return cliusage.WithExitCode(errors.New("--allow-flagged goes with --apply or --push-branch (a branch or a patch writes nothing that runs)"), 2)
 	}
 	s, err := substrateOpen(cmd, &f.com)
 	if err != nil {
@@ -164,12 +174,11 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	if a.State == substrateStateCrashed {
 		return substrateFail(substrateCrashedErr(a))
 	}
+	if f.pushBranch != "" {
+		return runSubstratePushBranch(ctx, cmd, f, s, a, asJSON)
+	}
 	name := substrateCopyName(a)
 	dataDir := auth.StateDir()
-	if !workspace.HasCopy(dataDir, name) {
-		return fmt.Errorf("this computer has no record of the folder you sent to %s/%s, so it cannot tell what the agent changed. "+
-			"Pull from the computer you ran it on, or push from inside the agent (defenseclaw substrate connect %s, then git push)", a.Atespace, a.Name, a.Name)
-	}
 	rel, err := substrateOpenRelay(ctx, s, a)
 	if err != nil {
 		return err
@@ -177,8 +186,13 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	defer rel.Close()
 	w := cmd.OutOrStdout()
 	fmt.Fprintln(cmd.ErrOrStderr(), "Reading the agent's work...")
-	rev, err := workspace.Pull(ctx, workspace.PullOptions{Exec: rel.Client, DataDir: dataDir, Name: name, Label: a.Name, Timeout: f.timeout, Project: "."})
+	rev, err := workspace.Pull(ctx, workspace.PullOptions{Exec: rel.Client, DataDir: dataDir, Name: name, Label: a.Name, Timeout: f.timeout, Project: ".",
+		RestoreSecretLines: f.restoreSecrets, Exclude: f.exclude, ExcludesStated: len(f.exclude) > 0 || f.noExclude})
 	if err != nil {
+		var nr *workspace.NoRecordError
+		if errors.As(err, &nr) {
+			return substratePullElsewhere(a, nr)
+		}
 		return fmt.Errorf("could not read the agent's work: %w", err)
 	}
 	if asJSON {
@@ -251,6 +265,20 @@ func substratePullAccept(f *substratePullFlags, sensitive, interactive bool, ask
 	return ok, ok, nil
 }
 
+// substratePullElsewhere is pull's refusal on a computer that keeps no
+// record of the copy and where the folder pull runs in cannot stand in for
+// it (GAP-0489): it is not a git checkout with a commit, or the agent has no
+// folder of its name. The copy of the baseline in the agent's sandbox is the
+// agent's to rewrite, so it is never used. The refusal names what works.
+// Exit 3: running it again in this folder cannot help.
+func substratePullElsewhere(a api.Actor, why *workspace.NoRecordError) error {
+	return cliusage.WithExitCode(fmt.Errorf("%s/%s: %s. "+
+		"Run pull in a git checkout of the folder you sent (it compares the agent's work with that checkout's last commit), or on the computer you ran \"defenseclaw substrate run\" on. "+
+		"Or connect to the agent (defenseclaw substrate connect %s), commit its work and git push it from inside the agent, then git pull it here. "+
+		"--push-branch works only on the computer you ran \"defenseclaw substrate run\" on: it pushes to the origin that computer recorded.",
+		a.Atespace, a.Name, why.Error(), a.Name), substrateExitRefused)
+}
+
 // substratePullChoose asks what to do with the changes on a terminal; with
 // no terminal it says how to choose.
 func substratePullChoose(cmd *cobra.Command, f *substratePullFlags, a api.Actor, name, dataDir string, rev *workspace.Review) error {
@@ -281,8 +309,8 @@ func substratePullChoose(cmd *cobra.Command, f *substratePullFlags, a api.Actor,
 
 // substrateInteractive is true when stdin is a terminal. A char device is
 // not enough: /dev/null is one, and a script that gives pull no input must
-// get the hint, not a question.
-func substrateInteractive() bool {
+// get the hint, not a question. Tests replace it.
+var substrateInteractive = func() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
@@ -292,7 +320,8 @@ func substrateApply(cmd *cobra.Command, dataDir, name string, mode workspace.App
 	res, err := workspace.Apply(ctx, workspace.ApplyOptions{DataDir: dataDir, Name: name, Mode: mode, Branch: branch, PatchPath: patch, AcceptSensitive: accept})
 	if err != nil {
 		var sens *workspace.SensitiveError
-		if errors.As(err, &sens) {
+		var unknown *workspace.ExcludesUnknownError
+		if errors.As(err, &sens) || errors.As(err, &unknown) {
 			// The refusal already names --allow-flagged, --branch and
 			// --patch-out; the advice is said once (GAP-0531).
 			return cliusage.WithExitCode(err, substrateExitRefused)
@@ -336,20 +365,37 @@ func runSubstrateCheckpoint(cmd *cobra.Command, out *substrateOutput, com *subst
 		return err
 	}
 	take := func() error {
-		rel, err := substrateOpenRelay(ctx, s, a)
+		info, err := func() (*workspace.CheckpointInfo, error) {
+			rel, err := substrateOpenRelay(ctx, s, a)
+			if err != nil {
+				return nil, err
+			}
+			defer rel.Close()
+			return workspace.Checkpoint(ctx, workspace.CheckpointOptions{Exec: rel.Client, Dir: dir, DataDir: auth.StateDir(), Name: substrateCopyName(a)})
+		}()
 		if err != nil {
 			return err
 		}
-		defer rel.Close()
-		info, err := workspace.Checkpoint(ctx, workspace.CheckpointOptions{Exec: rel.Client, Dir: dir, DataDir: auth.StateDir(), Name: substrateCopyName(a)})
-		if err != nil {
-			return err
-		}
+		// GAP-0476: the cluster's chain state marks the restore point, so
+		// an undo to it forgets only what came after. Quiet when it fails:
+		// the undo says what that means.
+		_, _ = s.Client.ReportWorkspace(ctx, a.Atespace, a.Name, api.WorkspaceEvent{Event: "checkpoint", Checkpoint: info.Commit})
+		// GAP-0410: the restore point is a file in the agent. Only a
+		// snapshot the cluster stores brings it back after the agent's
+		// worker goes away; without one a crash returns the agent to its
+		// template's start, without the folder.
+		kept, note, kerr := substrateKeepSnapshot(ctx, s, a, info.ID)
 		if asJSON {
-			return writeSubstrateJSONCompact(cmd.OutOrStdout(), map[string]any{"id": info.ID, "files": info.Files, "agent": a.Atespace + "/" + a.Name, "time": time.Now().UTC()})
+			if err := writeSubstrateJSONCompact(cmd.OutOrStdout(), map[string]any{"id": info.ID, "files": info.Files, "agent": a.Atespace + "/" + a.Name, "kept": kept, "time": time.Now().UTC()}); err != nil {
+				return err
+			}
+		} else {
+			fmt.Fprintf(cmd.OutOrStdout(), "Saved restore point %s (%d files). Go back to it with: defenseclaw substrate undo %s --to %s\n", info.ID, info.Files, a.Name, info.ID)
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "Saved restore point %s (%d files). Go back to it with: defenseclaw substrate undo %s --to %s\n", info.ID, info.Files, a.Name, info.ID)
-		return nil
+		if note != "" {
+			fmt.Fprintln(cmd.ErrOrStderr(), note)
+		}
+		return kerr
 	}
 	if err := take(); err != nil {
 		return err
@@ -364,11 +410,56 @@ func runSubstrateCheckpoint(cmd *cobra.Command, out *substrateOutput, com *subst
 		case <-ctx.Done():
 			return nil
 		case <-tick.C:
-			if err := take(); err != nil {
+			if err := take(); errors.Is(err, errSubstrateNotKept) {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %v\n", err)
+			} else if err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Could not save a restore point: %v\n", err)
 			}
 		}
 	}
+}
+
+// runSubstrateRecover is substrate recover (GAP-0930): the gateway's
+// recover route clears the relay certificate record, and brings a crashed
+// agent back to its last snapshot.
+func runSubstrateRecover(cmd *cobra.Command, com *substrateCommon, ref string, yes bool) error {
+	s, err := substrateOpen(cmd, com)
+	if err != nil {
+		return err
+	}
+	ctx, stop := substrateContext(cmd)
+	defer stop()
+	a, err := resolveSubstrateActor(ctx, s.Client, ref)
+	if err != nil {
+		return substrateFail(err)
+	}
+	if a.State == substrateStateCrashed && !yes {
+		ok, err := substrateConfirm(cmd, fmt.Sprintf("%s/%s crashed. Bring it back to its last snapshot? What it did after that snapshot is lost.", a.Atespace, a.Name))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			fmt.Fprintln(cmd.OutOrStdout(), "Nothing changed.")
+			return nil
+		}
+	}
+	_, err = s.Client.Recover(ctx, a.Atespace, a.Name)
+	var ae *api.Error
+	switch {
+	case err == nil:
+		fmt.Fprintf(cmd.OutOrStdout(), "%s/%s crashed; it is back at its last snapshot and starting, and its relay certificate record is cleared.\n", a.Atespace, a.Name)
+		return nil
+	case errors.As(err, &ae) && ae.Reason == "not_crashed":
+		if !ae.RelayCertCleared {
+			fmt.Fprintf(cmd.OutOrStdout(), "%s/%s is running and this cluster keeps no relay certificate record; nothing changed.\n", a.Atespace, a.Name)
+			return nil
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%s/%s: its relay certificate record is cleared. The relay asks for a new certificate when a connect refuses its old one, so the first connect can still fail; connect again, and if that fails too, wait a minute.\n", a.Atespace, a.Name)
+		return nil
+	case errors.As(err, &ae) && ae.NotImplemented():
+		return substrateFail(fmt.Errorf("this cluster cannot recover agents yet; ask your administrator to upgrade DefenseClaw"))
+	}
+	return substrateFail(fmt.Errorf("recovering %s/%s: %w", a.Atespace, a.Name, err))
 }
 
 func runSubstrateUndo(cmd *cobra.Command, com *substrateCommon, ref, to string, yes bool) error {
@@ -395,14 +486,34 @@ func runSubstrateUndo(cmd *cobra.Command, com *substrateCommon, ref, to string, 
 				return nil
 			}
 		}
-		if _, err := s.Client.Recover(ctx, a.Atespace, a.Name); err != nil {
+		rec, err := s.Client.Recover(ctx, a.Atespace, a.Name)
+		if err != nil {
 			var ae *api.Error
 			if errors.As(err, &ae) && ae.NotImplemented() {
 				return substrateFail(fmt.Errorf("this cluster cannot bring a crashed agent back yet; ask your administrator to upgrade DefenseClaw (or to run: kubectl ate revert actor %s -a %s)", a.Name, a.Atespace))
 			}
 			return substrateFail(fmt.Errorf("bringing %s/%s back from its crash: %w", a.Atespace, a.Name, err))
 		}
+		if rec.RecoveredFrom == "template" {
+			// GAP-0410: no snapshot of its own was stored, so it came back
+			// at its template's start and there is nothing to undo to.
+			return substrateFail(substrateFolderLost(a, workspace.RemoteDirOf(auth.StateDir(), substrateCopyName(a))))
+		}
 		fmt.Fprintf(cmd.ErrOrStderr(), "%s/%s crashed; it is back at its last snapshot and starting.\n", a.Atespace, a.Name)
+	}
+	if a.Unattended && to == "" {
+		// GAP-0420: a --task agent this computer started whose run was lost
+		// (a crash, or an administrator's revert) starts its task again on a
+		// fresh copy of its folder: at least once, never silently dropped.
+		if rec, ok := loadSubstrateTaskRecord(auth.StateDir(), a); ok {
+			lost, err := substrateTaskLost(ctx, cmd, s, a, rec.Transport)
+			if err != nil {
+				return err
+			}
+			if lost {
+				return substrateRerunTask(ctx, cmd, s, a, rec, yes)
+			}
+		}
 	}
 	dir, err := substrateRemoteDir(a)
 	if err != nil {
@@ -436,10 +547,19 @@ func runSubstrateUndo(cmd *cobra.Command, com *substrateCommon, ref, to string, 
 		}
 		info, err = workspace.Undo(ctx, opts)
 	}
+	if errors.Is(err, workspace.ErrNoFolder) && a.State == substrateStateCrashed {
+		// An older gateway does not say where the recovery went; the
+		// missing folder does (GAP-0410).
+		return substrateFail(substrateFolderLost(a, dir))
+	}
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Put %s/%s back to restore point %s.\n", a.Atespace, a.Name, info.ID)
+	substrateReportUndo(ctx, cmd, s.Client, a, info)
+	if info.Pushes > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "It also took back %d push(es) made after that point.\n", info.Pushes)
+	}
 	// GAP-0415: what the agent was asking about is gone with the folder it
 	// changed; its pending asks close now instead of waiting out their time.
 	if n := substrateCloseAsks(ctx, s.Client, a, "the agent was put back to a restore point with undo"); n > 0 {
@@ -447,6 +567,107 @@ func runSubstrateUndo(cmd *cobra.Command, com *substrateCommon, ref, to string, 
 	}
 	return nil
 }
+
+// substrateReportUndo tells the cluster's chain state which files the undo
+// removed and put back, as path digests, so a download into one of them
+// after the restore point no longer joins a later run of that path
+// (GAP-0476). Downloads outside the folder, and from before the restore
+// point, still do. When the report fails (an older gateway or leader) or
+// the leader has no mark for the restore point, the undo stands and the
+// launcher says what the chain may still report.
+func substrateReportUndo(ctx context.Context, cmd *cobra.Command, cl *api.Client, a api.Actor, info *workspace.UndoInfo) {
+	cut := false
+	digests := func(paths []string) []string {
+		var out []string
+		for _, p := range paths {
+			if len(out) == chainstate.MaxUndoFiles {
+				cut = true
+				break
+			}
+			if d, ok := guardrail.ToolChainPOSIXPathDigest(p); ok {
+				out = append(out, d)
+			}
+		}
+		return out
+	}
+	ev := api.WorkspaceEvent{Event: "undo", Checkpoint: info.Commit, Removed: digests(info.Removed), Restored: digests(info.Restored)}
+	const may = "running a file the undo %s may still be reported as a download that is run (chain.download_then_execute_same_artifact, an alert, never a block)"
+	res, err := cl.ReportWorkspace(ctx, a.Atespace, a.Name, ev)
+	switch {
+	case err != nil:
+		fmt.Fprintf(cmd.ErrOrStderr(), "Note: the cluster was not told about this undo (%v), so "+may+".\n", err, "removed or put back")
+	case !res.CheckpointKnown && len(ev.Restored) > 0:
+		fmt.Fprintf(cmd.ErrOrStderr(), "Note: the cluster has no mark for restore point %s (saved before it could keep one), so "+may+".\n", info.ID, "put back")
+	}
+	if cut {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Note: the undo changed more than %d files of a kind; for the others, "+may+".\n", chainstate.MaxUndoFiles, "changed")
+	}
+}
+
+// substrateFolderLost is the undo of an agent that came back from a crash
+// at its template's start: no snapshot of its own was stored, so the folder
+// copied into it and its restore points are gone (GAP-0410).
+func substrateFolderLost(a api.Actor, dir string) error {
+	folder := "its folder"
+	if dir != "" {
+		folder += " " + dir
+	}
+	return fmt.Errorf("%s/%s crashed before the cluster stored a snapshot of its work, so it came back at its template's start: %s and its restore points are lost, and there is nothing to undo to. "+
+		"The folder on your computer is unchanged. Start a new agent on it from that folder with \"defenseclaw substrate run <agent>%s\", and remove this one with \"defenseclaw substrate delete %s\". "+
+		"Restore points saved with \"defenseclaw substrate checkpoint\" are stored by the cluster and survive a crash",
+		a.Atespace, a.Name, folder, substrateTemplateFlag(a), a.Name)
+}
+
+// substrateTemplateFlag is " --template T" for the agent's template, "" when
+// it is not known.
+func substrateTemplateFlag(a api.Actor) string {
+	t := a.Template
+	if i := strings.LastIndex(t, "/"); i >= 0 {
+		t = t[i+1:]
+	}
+	if t == "" {
+		return ""
+	}
+	return " --template " + t
+}
+
+// substrateKeepSnapshot has the cluster store the agent's state after the
+// restore point id was saved in it (GAP-0410). kept is whether it did; note
+// is a line for the person; err is set when the snapshot failed in a way a
+// script should see (the restore point itself was saved).
+func substrateKeepSnapshot(ctx context.Context, s *substrateSession, a api.Actor, id string) (kept bool, note string, err error) {
+	res, err := s.Client.Snapshot(ctx, a.Atespace, a.Name)
+	if err == nil {
+		if res.State == "suspended" {
+			if res.ResumeError == "no_worker" {
+				return true, fmt.Sprintf("The cluster stored it, but it has no free worker to start %s again now; it is suspended at that snapshot, and \"defenseclaw substrate connect %s\" starts it when a worker is free.", a.Name, a.Name), nil
+			}
+			return true, fmt.Sprintf("The cluster stored it; %s is suspended at that snapshot and \"defenseclaw substrate connect %s\" starts it again.", a.Name, a.Name), nil
+		}
+		return true, "", nil
+	}
+	if ae, ok := api.AsError(err); ok {
+		switch {
+		case ae.NotImplemented():
+			return false, "Note: this cluster cannot store a snapshot of the agent yet, so this restore point is lost if the agent's worker crashes. Ask your administrator to upgrade DefenseClaw.", nil
+		case ae.Status == http.StatusConflict:
+			return false, "Note: the agent stopped running before the cluster could store a snapshot, so this restore point is lost if it crashes before its next one. Run checkpoint again after connect.", nil
+		}
+	}
+	// The suspend may have taken effect before it failed: the gateway
+	// starts the agent again when it can, and says when it could not
+	// (snapshot_failed_may_be_suspended); with no answer nobody knows
+	// (GAP-0649).
+	hint := ""
+	if ae, ok := api.AsError(err); !ok || ae.Reason != "snapshot_failed" {
+		hint = fmt.Sprintf(". %s may be suspended now; \"defenseclaw substrate connect %s\" starts it again", a.Name, a.Name)
+	}
+	return false, "", fmt.Errorf("%w: restore point %s is saved in the agent, but the cluster could not store a snapshot of it (%w), so it is lost if the agent crashes. Run checkpoint again%s", errSubstrateNotKept, id, err, hint)
+}
+
+// errSubstrateNotKept marks a checkpoint whose restore point was saved but
+// not stored by the cluster.
+var errSubstrateNotKept = errors.New("not stored by the cluster")
 
 // substrateUndoStartTries bounds the retries of an undo while a recovered
 // agent starts (2 s apart).
@@ -490,7 +711,7 @@ func substrateCloseAsks(ctx context.Context, cl *api.Client, a api.Actor, why st
 		if k.Actor != a.Name || (k.Atespace != "" && k.Atespace != a.Atespace) {
 			continue
 		}
-		if cl.Decide(ctx, k.ID, "deny", false, why) == nil {
+		if _, err := cl.Decide(ctx, k.ID, "deny", false, why); err == nil {
 			n++
 		}
 	}

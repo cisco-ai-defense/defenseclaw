@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -278,14 +279,7 @@ func TestManagedStatusPreservesGatewayCauseWhenListenersIdle(t *testing.T) {
 // An idle managed daemon deliberately releases both sandbox listeners. A
 // reachable gateway still makes it ready for the next run, which binds them.
 func TestManagedStatusIdleReleaseKeepsGatewayAvailable(t *testing.T) {
-	f := newSandboxDaemonFixture(t)
-	f.run(t)
-	if err := f.d.ensureListeners(); err != nil {
-		t.Fatal(err)
-	}
-	if stop, err := f.d.check(context.Background()); stop || err != nil || f.d.listening() {
-		t.Fatalf("idle check did not release listeners: stop %t, err %v", stop, err)
-	}
+	f := newIdleReleasedSandboxFixture(t, nil)
 	zero := 0
 	st := &sandboxapi.Status{Enabled: true, Available: true, Live: &zero,
 		Gateway: &sandboxapi.Gateway{Healthy: true, Driver: "docker"}, Managed: &sandboxapi.ManagedStatus{},
@@ -299,6 +293,72 @@ func TestManagedStatusIdleReleaseKeepsGatewayAvailable(t *testing.T) {
 	f.d.statusListenerAddresses(st)
 	if st.Available || !strings.Contains(st.Reason, "listener is not running") {
 		t.Fatalf("lost listener under a running sandbox = %+v", st)
+	}
+}
+
+// newIdleReleasedSandboxFixture is a running managed daemon that bound its
+// listeners and released them on an idle check, on ports no program holds.
+// The ports come from freePort, which cannot see a program outside this
+// process that takes one between the probe and the bind or the check (PR 1492:
+// "sandbox ingress port 127.0.0.1:16556 is held by another process" on a
+// daemon that had just released it, and 400 runs of the test alone never
+// repeat it). Such a squatter is a different scenario (see
+// TestManagedStatusKeepsBindFailureUntilListenersRecover), so the daemon is
+// built again on fresh ports, three times at most; any other failure stops
+// the test. squat, if set, takes a port on the first attempt after the
+// release, as the outside program did (rel-1-0-10:GAP-1817).
+func newIdleReleasedSandboxFixture(t *testing.T, squat func(*sandboxDaemonFixture)) *sandboxDaemonFixture {
+	t.Helper()
+	for attempt := 1; attempt <= 3; attempt++ {
+		f := newSandboxDaemonFixture(t)
+		f.run(t)
+		if err := f.d.ensureListeners(); err != nil {
+			if strings.Contains(err.Error(), "held by another") {
+				t.Logf("attempt %d: a program outside the test holds a port at the bind: %v", attempt, err)
+				continue
+			}
+			t.Fatal(err)
+		}
+		if stop, err := f.d.check(context.Background()); stop || err != nil || f.d.listening() {
+			t.Fatalf("idle check did not release listeners: stop %t, err %v", stop, err)
+		}
+		if squat != nil && attempt == 1 {
+			squat(f)
+		}
+		if conflict := f.d.idlePortConflict(); conflict != nil {
+			t.Logf("attempt %d: a program outside the test holds a port the daemon released: %s", attempt, conflict.Message())
+			continue
+		}
+		return f
+	}
+	t.Fatal("three daemons in a row found a port held by a program outside the test")
+	return nil
+}
+
+// A program outside the test that takes a released port makes the first
+// daemon unusable for the idle-status check; the next one, on fresh ports,
+// is (rel-1-0-10:GAP-1817).
+func TestIdleReleasedSandboxFixtureMovesPastAPortSomeoneElseTook(t *testing.T) {
+	var squatted []net.Listener
+	t.Cleanup(func() {
+		for _, ln := range squatted {
+			_ = ln.Close()
+		}
+	})
+	var first, taken int
+	f := newIdleReleasedSandboxFixture(t, func(f *sandboxDaemonFixture) {
+		first = f.d.currentSettings().Operational.IngressPort
+		ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(first)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		squatted, taken = append(squatted, ln), first
+		if f.d.idlePortConflict() == nil {
+			t.Fatal("a held ingress port is not a conflict: the test below proves nothing")
+		}
+	})
+	if got := f.d.currentSettings().Operational.IngressPort; got == taken || f.d.idlePortConflict() != nil {
+		t.Fatalf("the fixture kept port %d held by someone else (conflict %v)", got, f.d.idlePortConflict())
 	}
 }
 
@@ -450,5 +510,40 @@ func TestManagedStatusSaysTheRequestLimitRefusedThePolicyRead(t *testing.T) {
 	if err != nil || st.Managed == nil || st.Managed.Allowed || st.Managed.PolicyLimited ||
 		!strings.Contains(st.Managed.PolicyUnread, "not reachable") {
 		t.Fatalf("unreachable managed status = %+v, %v", st, err)
+	}
+}
+
+// rel-1-0-10:GAP-1779: a daemon that started while the organization had
+// sandboxes off (the account's daemon ran before ensure turned
+// openshell on) kept "sandboxes are turned off by your organization" in
+// sandbox doctor and sandbox run until it restarted. Status and a create
+// read the managed settings again once they are stale, so the enable
+// reaches a running daemon within sandboxDaemonSettingsTTL.
+func TestGAP1779ARunningDaemonSeesSandboxesTurnedOn(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	on := false
+	f.relay.settings = func() (sandboxrelay.DaemonSettings, error) {
+		s := f.d.currentSettings()
+		s.Enabled, s.Available, s.Unavailable = on, on, ""
+		if !on {
+			s.Unavailable = sandboxUnavailableOff
+		}
+		return s, nil
+	}
+	f.d.settingsMu.Lock()
+	f.d.settings.Enabled, f.d.settings.Available, f.d.settings.Unavailable = false, false, sandboxUnavailableOff
+	f.d.settingsMu.Unlock()
+	f.d.reloadConfig()
+	f.run(t)
+	client := sandboxapi.NewUnixClient(f.socket)
+	st, err := client.Status(context.Background())
+	if err != nil || st.Enabled || st.Managed == nil || !strings.Contains(st.Managed.Unavailable, "turned off by your organization") {
+		t.Fatalf("sandboxes off: %+v, %v", st, err)
+	}
+	on = true
+	f.d.settingsAt.Store(time.Now().Add(-sandboxDaemonSettingsTTL - time.Second).UnixNano())
+	st, err = client.Status(context.Background())
+	if err != nil || !st.Enabled || st.Managed == nil || st.Managed.Unavailable != "" {
+		t.Fatalf("after the organization turned sandboxes on, the running daemon still says: %+v, %v", st, err)
 	}
 }

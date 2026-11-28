@@ -29,6 +29,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/pushgrant"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 )
@@ -36,12 +38,14 @@ import (
 // TestSubstrateCalloutLeaderPermissions is GAP-0090: the callout may make
 // the chain check and the registration name lookup, and post its egress
 // decisions to the telemetry relay (GAP-0453, a method that accepts egress
-// records only), and nothing else.
+// records only), check a git push against the open push grants (GAP-1073,
+// never open or close one) and share its per-actor egress rate (GAP-0635),
+// and nothing else.
 func TestSubstrateCalloutLeaderPermissions(t *testing.T) {
 	const callout = "spiffe://cluster.local/ns/dc/sa/defenseclaw-callout"
 	p := substrateLeaderPermissions([]string{"spiffe://cluster.local/ns/dc/sa/defenseclaw-gateway"}, []string{callout}, nil)
 	got := p[callout]
-	want := []string{chainstate.MethodChainEgress, leader.MethodRegistrationLookup, telemetryrelay.MethodPostEgress}
+	want := []string{chainstate.MethodChainEgress, leader.MethodRegistrationLookup, telemetryrelay.MethodPostEgress, pushgrant.MethodCheck, ratelimit.MethodShare}
 	if !slices.Equal(got, want) {
 		t.Fatalf("callout methods %v, want %v", got, want)
 	}

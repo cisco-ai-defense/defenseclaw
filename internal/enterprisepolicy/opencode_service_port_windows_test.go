@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // requireOpenCodeServiceFilePrivate is the private-file contract of the
@@ -76,9 +77,7 @@ func TestManagedWindowsOpenCodePortReadSeesAccountLinkedFolder(t *testing.T) {
 	if err := os.Rename(config, target); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, config); err != nil {
-		t.Skipf("this Windows runner cannot create a directory link: %v", err)
-	}
+	testenv.Symlink(t, target, config)
 	if got, err := ReadOpenCodeServicePortAsUser(home); err != nil || got != 25001 {
 		t.Fatalf("account-linked folder port = %d, err=%v", got, err)
 	}

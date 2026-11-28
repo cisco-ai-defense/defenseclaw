@@ -6,11 +6,7 @@
 package hookpaths
 
 import (
-	"errors"
 	"os"
-
-	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
-	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // pathOpenDirectory is pathOpen on Windows: directory, junction, share and
@@ -28,25 +24,14 @@ func networkShareRoot(path string) string {
 	return root
 }
 
-// gatedPath is the share gate for a read network_path.go does not make
-// itself (a Windows API call on the path: file identity, link count, DACL):
-// ok is false when it must not be made, and otherwise read is the path to
-// hand it, held as readGated holds it until release.
-func gatedPath(name string) (read string, release func() bool, ok bool) {
-	gate := networkPathGate(name, true)
-	if gate.unanswered {
-		return "", nil, false
-	}
-	if !gate.proved {
-		return gate.read, func() bool { return true }, true
-	}
-	still, err := pathidentity.HoldUnlinked(fixturefs.Map(gate.read))
-	switch {
-	case errors.Is(err, pathidentity.ErrLinked):
-		return "", nil, false
-	case err != nil:
-		// Nothing to hold (a missing file): the call fails as it would.
-		return gate.read, func() bool { return true }, true
-	}
-	return gate.read, still, true
+// readGatedValue is the gate of a read network_path.go does not make itself
+// (a Windows API call on the path: file identity, link count, DACL, a
+// traverse open, a long name): readGated without the cut. The call gets the
+// path the share gate read, its last component held, and its answer is
+// discarded when the hold saw that component change; a hold that cannot be
+// taken is that error, and the call is not made. gatedPath, which handed
+// the path out and dropped the hold's answer, is gone (rel-1-0-10:GAP-1264).
+func readGatedValue[T any](op, name string, call func(path string) (T, error)) (T, error) {
+	value, _, err := readGated(op, name, call, nil)
+	return value, err
 }

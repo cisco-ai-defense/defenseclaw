@@ -1,0 +1,184 @@
+[
+  {
+    "case": "gap0592_perl:C04 shadowed O_NOFOLLOW",
+    "cmd": "perl -e 'sub O_NOFOLLOW () { 1 }; sysopen(my $f, \".claude/settings.json\", O_NOFOLLOW) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N2 shadow + W5"
+  },
+  {
+    "case": "gap0592_perl:C05 use constant O_NOFOLLOW",
+    "cmd": "perl -e 'use constant O_NOFOLLOW => 1; sysopen(my $f, \".claude/settings.json\", O_NOFOLLOW) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N1 + W5"
+  },
+  {
+    "case": "gap0592_perl:X07 BEGIN glob alias",
+    "cmd": "perl -e 'BEGIN { *O_NOFOLLOW = sub () { 1 } }; sysopen(my $f,\".claude/settings.json\",O_NOFOLLOW) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N3 in BEGIN + W5"
+  },
+  {
+    "case": "gap0592_perl:X08 use constant list",
+    "cmd": "perl -e 'use constant { O_NOFOLLOW => 1 }; sysopen(my $f,\".claude/settings.json\",O_NOFOLLOW) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N1 hash + W5"
+  },
+  {
+    "case": "gap0592_perl:X16 prototype sub flag",
+    "cmd": "perl -e 'sub O_CLOEXEC () { 1 }; sysopen(my $f,\".claude/settings.json\",O_CLOEXEC) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N2 + W5"
+  },
+  {
+    "case": "rv0592f_regr:A03 command import NOFOLLOW",
+    "cmd": "perl -Mconstant=O_NOFOLLOW,1 -e 'sysopen(my $f,\".claude/settings.json\",O_NOFOLLOW) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N1 via -Mconstant + W5"
+  },
+  {
+    "case": "rv0592f_regr:A04 command import RDONLY",
+    "cmd": "perl -Mconstant=O_RDONLY,1 -e 'sysopen(my $f,\".claude/settings.json\",O_RDONLY) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N1 via -Mconstant + W5"
+  },
+  {
+    "case": "rv0592g_regr:A01 long constant list",
+    "cmd": "perl -e 'use constant { K0 => 0, K1 => 0, K2 => 0, K3 => 0, K4 => 0, K5 => 0, K6 => 0, K7 => 0, K8 => 0, K9 => 0, K10 => 0, K11 => 0, K12 => 0, K13 => 0, K14 => 0, K15 => 0, K16 => 0, K17 => 0, K18 => 0, K19 => 0, K20 => 0, K21 => 0, K22 => 0, K23 => 0, K24 => 0, K25 => 0, K26 => 0, K27 => 0, K28 => 0, K29 => 0, K30 => 0, K31 => 0, K32 => 0, K33 => 0, K34 => 0, K35 => 0, K36 => 0, K37 => 0, K38 => 0, K39 => 0, K40 => 0, K41 => 0, K42 => 0, K43 => 0, K44 => 0, K45 => 0, K46 => 0, K47 => 0, K48 => 0, K49 => 0, K50 => 0, K51 => 0, K52 => 0, K53 => 0, K54 => 0, K55 => 0, K56 => 0, K57 => 0, K58 => 0, K59 => 0, K60 => 0, K61 => 0, K62 => 0, K63 => 0, K64 => 0, K65 => 0, K66 => 0, K67 => 0, K68 => 0, K69 => 0, K70 => 0, K71 => 0, K72 => 0, K73 => 0, K74 => 0, K75 => 0, K76 => 0, K77 => 0, K78 => 0, K79 => 0, K80 => 0, K81 => 0, K82 => 0, K83 => 0, K84 => 0, K85 => 0, K86 => 0, K87 => 0, K88 => 0, K89 => 0, O_RDONLY => 1 }; sysopen(my $f,\".claude/settings.json\",O_RDONLY) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N1 hash, whole list (closes GAP-1134)"
+  },
+  {
+    "case": "rv0592g_regr:A02 qualified flag sub",
+    "cmd": "perl -e 'sub main::O_RDONLY () { 1 }; sysopen(my $f,\".claude/settings.json\",O_RDONLY) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N2 main:: (closes GAP-1135)"
+  },
+  {
+    "case": "rv0592g_regr:A03 block eval qualified glob",
+    "cmd": "perl -e 'eval { *main::O_RDONLY = sub () { 1 } }; sysopen(my $f,\".claude/settings.json\",O_RDONLY()) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N3 runtime, NAME() call (closes GAP-1136)"
+  },
+  {
+    "case": "rv0592g_mask:M01 data marker in string",
+    "cmd": "perl -e 'my $x=\"__END__\"; use constant O_RDONLY => 1; sysopen(my $f,\".claude/settings.json\",O_RDONLY) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "L2 + N1 + W5"
+  },
+  {
+    "case": "rv0592g_mask:M02 heredoc token in string",
+    "cmd": "perl -e 'my $x=\"\\nEOF\\n\"; my $doc=<<EOF;\ntext\nEOF\nuse constant O_RDONLY => 1; sysopen(my $f,\".claude/settings.json\",O_RDONLY) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "L2/L5 + N1 + W5"
+  },
+  {
+    "case": "rv0592g_mask:M03 two heredocs",
+    "cmd": "perl -e 'my ($a,$b)=(<<A,<<B);\nalpha\nA\nbeta\nB\nuse constant O_RDONLY => 1; sysopen(my $f,\".claude/settings.json\",O_RDONLY) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "L5 + N1 + W5"
+  },
+  {
+    "case": "gap0592_perl:C01 custom sub",
+    "cmd": "perl -e 'sub O_CUSTOM () { 1 }; sysopen(my $f, \".claude/settings.json\", O_CUSTOM) or die; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N2 + W5"
+  },
+  {
+    "case": "gap0592_perl:C02 use constant",
+    "cmd": "perl -e 'use constant O_CUSTOM => 1; sysopen(my $f, \".claude/settings.json\", O_CUSTOM) or die; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N1 + W5"
+  },
+  {
+    "case": "gap0592_perl:C03 ampersand sub",
+    "cmd": "perl -e 'sub O_X { 1 }; sysopen(my $f, \".claude/settings.json\", &O_X) or die; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N2 &NAME + W5"
+  },
+  {
+    "case": "gap0592_cust:constant sub",
+    "cmd": "perl -e 'sub O_CUSTOM () { 1 }; sysopen(my $f, \".claude/settings.json\", O_CUSTOM) or die $!; print $f \"x\";'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N2 + W5"
+  },
+  {
+    "case": "gap0592_cust:use constant",
+    "cmd": "perl -e 'use constant O_CUSTOM => 1; sysopen(my $f, \".claude/settings.json\", O_CUSTOM) or die $!; print $f \"x\";'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N1 + W5"
+  },
+  {
+    "case": "gap0592_cust:shadowed read-only sub",
+    "cmd": "perl -e 'sub O_NOFOLLOW () { 1 }; sysopen(my $f, \".claude/settings.json\", O_NOFOLLOW) or die $!; print $f \"x\";'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N2 + W5"
+  },
+  {
+    "case": "gap0592_cust:shadowed read-only use constant",
+    "cmd": "perl -e 'use constant O_NOFOLLOW => 1; sysopen(my $f, \".claude/settings.json\", O_NOFOLLOW) or die $!; print $f \"x\";'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N1 + W5"
+  },
+  {
+    "case": "gap0592_cust:ampersand sub",
+    "cmd": "perl -e 'sub O_X { 1 }; sysopen(my $f, \".claude/settings.json\", &O_X) or die $!; print $f \"x\";'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N2 &NAME + W5"
+  },
+  {
+    "case": "gap0592_cust:constant hash",
+    "cmd": "perl -e 'use constant { O_NOFOLLOW => 1 }; sysopen(my $f, \".claude/settings.json\", O_NOFOLLOW)'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N1 hash + W5"
+  },
+  {
+    "case": "gap0592_cust:BEGIN glob",
+    "cmd": "perl -e 'BEGIN { *O_NOFOLLOW = sub { 1 } }; sysopen(my $f, \".claude/settings.json\", O_NOFOLLOW)'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N3 in BEGIN + W5"
+  },
+  {
+    "case": "gap0592_cust:X07 BEGIN glob alias",
+    "cmd": "perl -e 'BEGIN { *O_NOFOLLOW = sub () { 1 } }; sysopen(my $f,\".claude/settings.json\",O_NOFOLLOW) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N3 in BEGIN + W5"
+  },
+  {
+    "case": "gap0592_cust:X08 use constant list",
+    "cmd": "perl -e 'use constant { O_NOFOLLOW => 1 }; sysopen(my $f,\".claude/settings.json\",O_NOFOLLOW) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N1 hash + W5"
+  },
+  {
+    "case": "gap0592_cust:X16 prototype sub flag",
+    "cmd": "perl -e 'sub O_CLOEXEC () { 1 }; sysopen(my $f,\".claude/settings.json\",O_CLOEXEC) or die $!; print $f \"x\"'",
+    "rel": "AA",
+    "spec": "LB",
+    "rule": "N2 + W5"
+  }
+]

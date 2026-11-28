@@ -113,9 +113,17 @@ func TestReviewRegressionPOSIX(t *testing.T) {
 			t.Fatal("unquoted * after a quoted prefix not a glob")
 		}
 	})
-	t.Run("PX-6 brace list is a pattern", func(t *testing.T) {
-		if !has(shell("rm /etc/{passwd,shadow}", envOpts), KindDelete, "/etc/{passwd,shadow}", TargetStateUnknown) {
-			t.Fatal("brace list treated as one literal")
+	t.Run("PX-6 brace list expands to its words", func(t *testing.T) {
+		// Brace expansion runs first, as in the shell: each alternative is
+		// its own operand (DET111 R1, GAP-0662), never one literal.
+		r := shell("rm /etc/{passwd,shadow}", envOpts)
+		if !has(r, KindDelete, "/etc/passwd", TargetStateKnown) || !has(r, KindDelete, "/etc/shadow", TargetStateKnown) {
+			t.Fatal("brace list not expanded into its words")
+		}
+	})
+	t.Run("PX-6 oversized brace expansion stays a pattern", func(t *testing.T) {
+		if !has(shell("rm /etc/{a,b,c}{a,b,c}{a,b,c}{a,b,c}{a,b,c}x", envOpts), KindDelete, "/etc/{a,b,c}{a,b,c}{a,b,c}{a,b,c}{a,b,c}x", TargetStateUnknown) {
+			t.Fatal("a brace expansion past maxBraceWords is not kept as one glob word")
 		}
 	})
 	t.Run("PX-6 escaped star is literal", func(t *testing.T) {
@@ -131,8 +139,19 @@ func TestReviewRegressionPOSIX(t *testing.T) {
 		}
 	})
 	t.Run("PX-7 ssh remote command", func(t *testing.T) {
-		if !has(shell("ssh -i key evil.example rm -rf /x", envOpts), KindDelete, "/x", "") {
-			t.Fatal("ssh inner command dropped")
+		// The remote body is read; its delete is placed on the remote host
+		// (GAP-0662 ruling): kept by spelling, never a local /x.
+		r := shell("ssh -i key evil.example rm -rf /x", envOpts)
+		kept := false
+		for _, e := range r.Effects {
+			if e.Kind == KindDelete && e.Target.Spelling == "$?/x" && e.Target.Path == "" && e.TargetState == TargetStateUnknown {
+				for _, rs := range e.Reasons {
+					kept = kept || rs.Code == ReasonForeignContext
+				}
+			}
+		}
+		if !kept || has(r, KindDelete, "/x", "") {
+			t.Fatalf("ssh inner command not kept as a remote delete:\n%s", fmtRes(r))
 		}
 	})
 	t.Run("PT-1 dd key=value operands", func(t *testing.T) {

@@ -71,15 +71,19 @@ func mustRemove(t *testing.T, target Target, opts Options) State {
 
 // A reconcile after an administrator edit folds the edit into the file
 // DefenseClaw writes. Removal must keep the edit instead of restoring the
-// install-time preimage.
+// install-time preimage. For Codex only a publish that adopts administrator
+// edits (the unix reconcile action) folds it in (GAP-1928).
 func TestRemoveAfterReconcileKeepsLaterAdministratorEdits(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	t.Run("codex", func(t *testing.T) {
 		opts := testOptions(t)
 		path := codexPath(t, opts)
 		writeFile(t, path, adminCodexRequirements)
 		mustReconcile(t, codexTarget{}, opts)
 		writeFile(t, path, readFile(t, path)+"\n[[hooks.Stop]]\n\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"/usr/local/bin/admin-stop\"\n")
-		mustReconcile(t, codexTarget{}, opts)
+		adopt := opts
+		adopt.AdoptAdministratorEdits = true
+		mustReconcile(t, codexTarget{}, adopt)
 		mustRemove(t, codexTarget{}, opts)
 		got := readFile(t, path)
 		if !strings.Contains(got, "/usr/local/bin/admin-stop") || !strings.Contains(got, "/usr/local/bin/company-audit") {
@@ -115,7 +119,9 @@ func TestRemoveAfterReconcileKeepsLaterAdministratorEdits(t *testing.T) {
 		writeFile(t, path, adminCodexRequirements)
 		mustReconcile(t, codexTarget{}, opts)
 		writeFile(t, path, strings.Replace(readFile(t, path), "allowed_approval_policies = [\"on-request\"] # keep approvals on\n", "", 1))
-		mustReconcile(t, codexTarget{}, opts)
+		adopt := opts
+		adopt.AdoptAdministratorEdits = true
+		mustReconcile(t, codexTarget{}, adopt)
 		mustRemove(t, codexTarget{}, opts)
 		if got := readFile(t, path); strings.Contains(got, "allowed_approval_policies") {
 			t.Fatalf("removal restored a setting the administrator deleted after install:\n%s", got)
@@ -147,6 +153,7 @@ func TestRemoveAfterReconcileKeepsLaterAdministratorEdits(t *testing.T) {
 // as the administrator's preimage, or removal would put DefenseClaw's hooks
 // and lock back for every user.
 func TestPreimageNeverKeepsDefenseClawContent(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	t.Run("codex export deployed then merge", func(t *testing.T) {
 		opts := testOptions(t)
 		path := codexPath(t, opts)
@@ -206,6 +213,7 @@ func TestPreimageNeverKeepsDefenseClawContent(t *testing.T) {
 // Whole-file drop-ins: removal never leaves an empty file, which is not
 // valid JSON.
 func TestRemoveNeverLeavesAnEmptyDropIn(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range []struct {
 		name   string
 		target Target

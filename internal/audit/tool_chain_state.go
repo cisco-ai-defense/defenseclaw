@@ -545,15 +545,19 @@ func (repo *ToolChainRepository) loadExistingEvent(
 		return ToolChainObserveResult{}, false, err
 	}
 	projectionFP, _ := guardrail.ToolChainProjectionFingerprint(input.Projection)
+	stored := guardrail.ToolChainProjection{ParseStatus: actionfacts.ParseStatus(event.parseStatus),
+		DetectionStepMask: event.detectionSteps, EnforcementStepMask: event.enforcementSteps,
+		EnforcementJoinDigests:       event.enforcementJoinDigests,
+		EnforcementOutputJoinDigests: event.enforcementOutputJoinDigests,
+		ValueJoinDigests:             event.valueJoinDigests}
+	// A workspace undo may have taken facts about reverted files out of
+	// the stored event (ForgetToolChainArtifacts): a repeat of the
+	// observation is still the same event (substrate-1:GAP-0476).
+	sameProjection := (event.projectionFP == projectionFP && stored == input.Projection) ||
+		guardrail.ToolChainProjectionForgotten(stored, input.Projection)
 	if event.connector != string(input.ConnectorInstanceID) || event.session != session ||
-		event.inputFP != input.InputFingerprint || event.projectionFP != projectionFP ||
+		event.inputFP != input.InputFingerprint || !sameProjection ||
 		event.ruleset != input.RulesetFingerprint ||
-		event.parseStatus != string(input.Projection.ParseStatus) ||
-		event.detectionSteps != input.Projection.DetectionStepMask ||
-		event.enforcementSteps != input.Projection.EnforcementStepMask ||
-		event.enforcementJoinDigests != input.Projection.EnforcementJoinDigests ||
-		event.enforcementOutputJoinDigests != input.Projection.EnforcementOutputJoinDigests ||
-		event.valueJoinDigests != input.Projection.ValueJoinDigests ||
 		(event.denied != 0 && event.stableAction != stableToolChainActionID(input, event.denied)) {
 		return ToolChainObserveResult{}, true, ErrToolChainIntegrity
 	}

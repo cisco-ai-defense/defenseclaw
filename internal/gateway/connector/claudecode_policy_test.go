@@ -64,11 +64,9 @@ func writeClaudePolicyJSON(t *testing.T, path string, value interface{}) {
 // GAP-1062: a dotfiles layout links ~/.claude/settings.json to a file in the
 // home folder. Setup writes the hooks through the link, so the effective-hook
 // check must follow it too; refusing it left the gateway unable to start
-// while fail-closed hooks blocked every Claude Code prompt.
+// while fail-closed hooks blocked every Claude Code prompt. Windows keeps
+// refusing a linked settings file, before Setup writes anything.
 func TestClaudeSettingsLinkedIntoHomeIsInspected(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows keeps refusing linked settings")
-	}
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
 	target := filepath.Join(home, "dotfiles", "claude", "settings.json")
@@ -81,9 +79,7 @@ func TestClaudeSettingsLinkedIntoHomeIsInspected(t *testing.T) {
 	if err := os.WriteFile(target, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, settingsPath); err != nil {
-		t.Fatal(err)
-	}
+	symlinkOrSkipWithoutPrivilegeForTest(t, target, settingsPath)
 	restore, err := BindUserHomeDir(home)
 	if err != nil {
 		t.Fatal(err)
@@ -97,6 +93,10 @@ func TestClaudeSettingsLinkedIntoHomeIsInspected(t *testing.T) {
 
 	conn := NewClaudeCodeConnector()
 	opts := SetupOpts{DataDir: filepath.Join(home, ".defenseclaw"), APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	if runtime.GOOS == "windows" {
+		claudeCodeWindowsRefusesLinkedSettings(t, conn, opts, settingsPath, target)
+		return
+	}
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Claude setup through a linked settings file: %v", err)
 	}
@@ -226,10 +226,11 @@ func TestClaudeManagedContractUsesWinningManagedSource(t *testing.T) {
 }
 
 func TestClaudeEnterpriseScriptContractUsesUserSettings(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows enterprise policy requires a pinned native launcher")
-	}
 	conn, opts, _, _ := isolatedClaudePolicyFixture(t)
+	if runtime.GOOS == "windows" {
+		claudeCodeWindowsEnterpriseContractIgnoresUserSettings(t, conn, opts)
+		return
+	}
 	opts.ManagedEnterprise = true
 	if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
 		t.Fatalf("enterprise script contract = (present=%v, err=%v), want user-settings hook", present, err)

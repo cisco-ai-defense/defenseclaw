@@ -70,7 +70,7 @@ func TestWriteThroughANameFromAFolderBehindManyLinksIsJudgedByTheFileItReaches(t
 					t.Fatalf("the system does not open %s from a folder behind %d links: %v", name, folderLinks, err)
 				}
 			}
-			restore := hookpaths.OverrideNetworkSharesForTest(func(string) string { return "" }, func(string) {})
+			restore := overrideNetworkSharesIdle(t, func(string) string { return "" }, func(string) {})
 			t.Cleanup(restore)
 			for _, row := range []struct {
 				name, command string

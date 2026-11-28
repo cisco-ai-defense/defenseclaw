@@ -135,6 +135,9 @@ func staticPOSIXWrappedAwkCall(command CommandFact) bool {
 // or gets more words. The gateway answers an awk program with a shell hole
 // behind any of them at the unknown tier, as it answers the bare call
 // (awkprog.DynamicReason, rel-1-0-10:GAP-0859, substrate-1:GAP-0332).
+// A literal awk after an expanding env assignment or sudo user option is
+// read only for the unknown-program tier, since those wrapper values can
+// change the argv and prove no concrete effect (rel-1-0-10:GAP-0972).
 // Nothing else is read from it.
 func AwkCallBehindWrappers(command CommandFact) (CommandFact, bool) {
 	argv, arguments := command.Argv, command.Arguments
@@ -155,11 +158,62 @@ func AwkCallBehindWrappers(command CommandFact) (CommandFact, bool) {
 		for i, argument := range arguments {
 			static[i] = !argument.Expands
 		}
-		start := WrapperChildIndex(argv, static)
+		start := possibleAwkWrapperChildIndex(argv, arguments, static)
 		if start <= 0 || start >= len(argv) {
 			return CommandFact{}, false
 		}
 		argv, arguments = argv[start:], arguments[start:]
 	}
 	return CommandFact{}, false
+}
+
+// possibleAwkWrapperChildIndex locates a literal awk child after wrapper
+// operands whose values expand. This only supplies the unknown-program tier:
+// the wrapper may change its argv after expansion, so it proves no file or
+// network effect. An env assignment keeps its NAME= prefix, and -u/--user
+// always consumes one word; other dynamic wrapper words remain unread.
+func possibleAwkWrapperChildIndex(argv []string, arguments []ArgumentFact, static []bool) int {
+	if len(argv) != len(arguments) || len(argv) != len(static) {
+		return -1
+	}
+	if index := WrapperChildIndex(argv, static); index > 0 {
+		return index
+	}
+	location := cloneSlice(argv)
+	known := cloneSlice(static)
+	for index, argument := range arguments {
+		if !argument.Expands {
+			continue
+		}
+		switch {
+		case hereDocAssignmentWord(argument.staticPrefix):
+			location[index] = argument.staticPrefix + "x"
+			known[index] = true
+		case index > 0 && (argv[index-1] == "-u" || argv[index-1] == "--user"):
+			location[index] = "x"
+			known[index] = true
+		}
+	}
+	child := WrapperChildIndex(location, known)
+	if child <= 0 || child >= len(argv) {
+		return -1
+	}
+	for index := 0; index <= child; index++ {
+		if arguments[index].Expands && !known[index] {
+			return -1
+		}
+	}
+	// This fallback is only for an awk program the shell still builds at
+	// run time. A static awk body behind an uncertain wrapper keeps the
+	// earlier reader's answer.
+	if awkProgramWord(argv[child]) {
+		dynamic := false
+		for _, argument := range arguments[child+1:] {
+			dynamic = dynamic || argument.Expands
+		}
+		if !dynamic {
+			return -1
+		}
+	}
+	return child
 }

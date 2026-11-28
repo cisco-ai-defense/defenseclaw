@@ -221,6 +221,7 @@ func TestDetectSkillsAttachesFactsOncePerFolder(t *testing.T) {
 		Enabled: true, Mode: "enhanced", DataDir: filepath.Join(home, "data"), HomeDir: home,
 	}, catalog)
 	cleanupPreparedDiscoveryService(t, svc)
+	svc.skillClock = skillClockAfterTheWrites
 
 	var facts []*AISkillFacts
 	for _, signal := range svc.detectSkills() {
@@ -246,6 +247,8 @@ func TestDetectSkillsAttachesFactsOncePerFolder(t *testing.T) {
 	}
 
 	// A spent scan budget stops reading instead of hashing more user files.
+	// The folder is new to this scan, so it is not in the hash cache.
+	svc.skillHashCache = nil
 	svc.skillBytesRead = maxSkillScanBytes
 	if got := svc.skillFacts(filepath.Join(home, ".agents", "skills", "pdf"), false); got.ContentStatus != SkillContentTooLarge {
 		t.Fatalf("over the scan budget: %+v", got)
@@ -254,6 +257,12 @@ func TestDetectSkillsAttachesFactsOncePerFolder(t *testing.T) {
 
 func TestDetectSkillsSyncedAndManagedFolders(t *testing.T) {
 	home, managed := t.TempDir(), t.TempDir()
+	// The test folder stands for one an administrator owns.
+	adminOwned := skillFolderManaged
+	skillFolderManaged = func(dir *os.File, path string) bool { return pathBelow(managed, path) || adminOwned(dir, path) }
+	adminEntry := skillEntryManaged
+	skillEntryManaged = func(opened *os.File, path string) bool { return pathBelow(managed, path) || adminEntry(opened, path) }
+	t.Cleanup(func() { skillFolderManaged, skillEntryManaged = adminOwned, adminEntry })
 	skills := filepath.Join(home, ".claude", "skills")
 	writeSkillFiles(t, skills, map[string]string{
 		"pdf/SKILL.md":                     "---\nname: pdf\n---\n",

@@ -162,9 +162,10 @@ func windowsReadOnlyTestACECount(t *testing.T, path string) uint16 {
 // expected 7"). An install plan takes it over and restores the exact DACL;
 // strict mode and a per-user install folder keep the refusal; a validation
 // plan accepts it unchanged. A write-capable grant is drift a Secure Client
-// plan re-stamps like any retained root (26.8.4); strict mode and a
-// standalone plan refuse it.
+// plan re-stamps like any retained root (26.8.4); strict mode refuses it
+// and a standalone plan skips that user unrepaired (GAP-1733).
 func TestWindowsManagedRuntimeInstallPlanRestampsAReadOnlyGrant(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	previous := windowsEnterpriseStandaloneProcess
 	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previous })
 	windowsEnterpriseStandaloneProcess = func() bool { return false }
@@ -206,8 +207,8 @@ func TestWindowsManagedRuntimeInstallPlanRestampsAReadOnlyGrant(t *testing.T) {
 	if err := os.WriteFile(perUser, []byte("gateway: {}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Secure Client skips only this user and leaves the folder as it is;
-	// a strict or standalone plan refuses it.
+	// Both profiles skip only this user and leave the folder as it is
+	// (GAP-1733); a strict plan refuses it.
 	skippedPlan, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest)
 	if err != nil || len(skippedPlan.Roots) != 0 || len(skippedPlan.SkippedProfiles) != 1 ||
 		!strings.Contains(skippedPlan.SkippedProfiles[0].Reason, dataDir+" holds config.yaml") {
@@ -216,9 +217,9 @@ func TestWindowsManagedRuntimeInstallPlanRestampsAReadOnlyGrant(t *testing.T) {
 	if got := windowsReadOnlyTestACECount(t, dataDir); got != canonicalCount+1 {
 		t.Fatalf("skipping the per-user install folder changed its DACL (%d ACEs)", got)
 	}
-	// Strict and standalone refuse the whole plan, never skip the user. The
-	// folder also carries this test's read-only grant, which they refuse
-	// first, so the refusal is asserted rather than its reason.
+	// Strict refuses the whole plan, never skips the user. The folder also
+	// carries this test's read-only grant, which it refuses first, so the
+	// refusal is asserted rather than its reason.
 	t.Setenv(managed.TrustStrictAncestorsEnv, "1")
 	if refused, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest); err == nil ||
 		len(refused.SkippedProfiles) != 0 ||
@@ -226,11 +227,16 @@ func TestWindowsManagedRuntimeInstallPlanRestampsAReadOnlyGrant(t *testing.T) {
 		t.Fatalf("strict install plan over a per-user install folder = %+v, %v; want the refusal", refused, err)
 	}
 	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+	// GAP-1733: a standalone install plan skips that one user too instead of
+	// failing every user, and never takes the folder over.
 	windowsEnterpriseStandaloneProcess = func() bool { return true }
-	if refused, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest); err == nil ||
-		len(refused.SkippedProfiles) != 0 ||
-		!strings.Contains(err.Error(), "reject noncanonical managed runtime baseline") {
-		t.Fatalf("standalone install plan over a per-user install folder = %+v, %v; want the refusal", refused, err)
+	if standalonePlan, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest); err != nil ||
+		len(standalonePlan.Roots) != 0 || len(standalonePlan.SkippedProfiles) != 1 || len(standalonePlan.RepairedProfiles) != 0 ||
+		!strings.Contains(standalonePlan.SkippedProfiles[0].Reason, dataDir+" holds config.yaml") {
+		t.Fatalf("standalone install plan over a per-user install folder = %+v, %v; want that user skipped", standalonePlan, err)
+	}
+	if got := windowsReadOnlyTestACECount(t, dataDir); got != canonicalCount+1 {
+		t.Fatalf("the standalone skip changed the per-user install folder's DACL (%d ACEs)", got)
 	}
 	windowsEnterpriseStandaloneProcess = func() bool { return false }
 	if err := os.Remove(perUser); err != nil {
@@ -256,10 +262,16 @@ func TestWindowsManagedRuntimeInstallPlanRestampsAReadOnlyGrant(t *testing.T) {
 		t.Fatalf("strict install plan over a write grant = %v, want the refusal", err)
 	}
 	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+	// Drift repair stays Secure Client only (GAP-1733): a standalone install
+	// plan skips the user with the write grant and changes nothing.
 	windowsEnterpriseStandaloneProcess = func() bool { return true }
-	if _, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest); err == nil ||
-		!strings.Contains(err.Error(), "reject noncanonical managed runtime baseline") {
-		t.Fatalf("standalone install plan over a write grant = %v, want the refusal", err)
+	if standalonePlan, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest); err != nil ||
+		len(standalonePlan.Roots) != 0 || len(standalonePlan.RepairedProfiles) != 0 || len(standalonePlan.SkippedProfiles) != 1 ||
+		!strings.Contains(standalonePlan.SkippedProfiles[0].Reason, "reject noncanonical managed runtime baseline") {
+		t.Fatalf("standalone install plan over a write grant = %+v, %v; want the user skipped, not repaired", standalonePlan, err)
+	}
+	if got := windowsReadOnlyTestACECount(t, dataDir); got != canonicalCount+1 {
+		t.Fatalf("the standalone skip changed the write-granted folder's DACL (%d ACEs)", got)
 	}
 	windowsEnterpriseStandaloneProcess = func() bool { return false }
 	plan, err = PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest)
@@ -276,6 +288,7 @@ func TestWindowsManagedRuntimeInstallPlanRestampsAReadOnlyGrant(t *testing.T) {
 // /repair failed 1603. The plan now recovers that stale shape; a relax a
 // running setup holds and any other DACL stay refused and unchanged.
 func TestWindowsManagedRuntimeRepairPlanRecoversAStaleGuardianSetupRelax(t *testing.T) {
+	requireElevatedManagedWindows(t)
 	previousStandalone := windowsEnterpriseStandaloneProcess
 	previousWait, previousStale := windowsManagedRuntimeSetupRelaxWait, windowsSetupRelaxIsStale
 	t.Cleanup(func() {
@@ -314,7 +327,7 @@ func TestWindowsManagedRuntimeRepairPlanRecoversAStaleGuardianSetupRelax(t *test
 		return err
 	}
 
-	setDACL(windowsSetupRelaxedDirectorySDDL)
+	setDACL(managed.WindowsSetupRelaxedDirectorySDDL)
 	windowsSetupRelaxIsStale = func(string, *windows.SID) bool { return false }
 	if err := plan(); err == nil || !strings.Contains(err.Error(), "reject noncanonical managed runtime baseline") {
 		t.Fatalf("plan over a running setup's relax = %v, want the refusal", err)

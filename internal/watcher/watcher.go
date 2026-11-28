@@ -50,6 +50,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/skillrootsafe"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // InstallType distinguishes between skill and MCP install events.
@@ -607,7 +608,7 @@ func (w *InstallWatcher) setRootCoverage(kind, path string, cause error) {
 	}
 }
 
-// SetMCPToolObserver attaches the managed inventory sink before Run starts.
+// SetMCPToolObserver attaches the endpoint inventory sink before Run starts.
 func (w *InstallWatcher) SetMCPToolObserver(observer func(context.Context, string, string, *scanner.ScanResult, error)) {
 	w.mcpToolObserver = observer
 }
@@ -4332,10 +4333,7 @@ func (w *InstallWatcher) resolvedLinkedRoot(path string, roots []string) (string
 // the root. False for a plain root, an unsafe link or another account's
 // folder.
 func (w *InstallWatcher) resolvedRootOf(root string) (string, bool) {
-	resolved, err := filepath.EvalSymlinks(root)
-	if !w.secureClientActive() {
-		resolved, err = skillrootsafe.Resolve(root, watcherEvalSymlinks)
-	}
+	resolved, err := skillrootsafe.Resolve(root, watcherEvalSymlinks)
 	if err != nil || sameWatcherPath(resolved, root) {
 		return "", false
 	}
@@ -4490,10 +4488,10 @@ func (w *InstallWatcher) admitsLinkedAsset(path string) bool {
 // allowed (GAP-0394). An unresolvable link keeps its own path, whose scan
 // then fails closed.
 func linkedAssetTarget(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != filepath.Clean(path) {
+	if resolved, err := winpath.EvalLinks(path); err == nil && resolved != filepath.Clean(path) {
 		return resolved
 	}
-	target, err := os.Readlink(path) // a Windows junction
+	target, err := os.Readlink(path) // a link whose target is missing
 	if err != nil || strings.TrimSpace(target) == "" {
 		return path
 	}
@@ -5063,6 +5061,11 @@ func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallE
 	fmt.Fprintf(os.Stderr, "[watch] quarantine %s: %v\n", evt.Path, err)
 }
 
+// quarantineLstat inspects a quarantine destination. A test replaces it to
+// make the destination uninspectable on Windows, where a folder the account
+// may not enter cannot be made (the process bypasses traverse checking).
+var quarantineLstat = os.Lstat
+
 // quarantineUnmaterialized reports that a failed quarantine (err) left no
 // copy its pending record must keep: the destination does not exist, or it
 // cannot be inspected (a quarantine folder the gateway may not enter) and
@@ -5074,7 +5077,7 @@ func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallE
 // the record is what restores it. The source still being in place proves
 // nothing, as a published copy whose source removal failed leaves both.
 func quarantineUnmaterialized(plan enforce.AssetQuarantinePlan, err error, fresh bool) bool {
-	_, statErr := os.Lstat(plan.QuarantinePath)
+	_, statErr := quarantineLstat(plan.QuarantinePath)
 	if os.IsNotExist(statErr) {
 		return true
 	}
@@ -5175,7 +5178,7 @@ func isBundledSkillWatchPath(path string) bool {
 	if enforce.IsBundledSkillPath(path) {
 		return true
 	}
-	resolved, err := filepath.EvalSymlinks(path)
+	resolved, err := winpath.EvalLinks(path)
 	return err == nil && enforce.IsBundledSkillPath(resolved)
 }
 

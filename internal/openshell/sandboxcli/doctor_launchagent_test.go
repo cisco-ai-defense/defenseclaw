@@ -90,7 +90,7 @@ func TestManagedMacDoctorLaunchAgentVerdict(t *testing.T) {
 					t.Fatalf("LaunchAgent row = %+v; want %s containing %q", row, tc.wantStatus, tc.wantDetail)
 				}
 			}
-			ta.printDoctor(rep)
+			ta.printDoctor(rep, nil)
 			if tc.wantStatus == "fail" {
 				if rep.OK() || row.Fix == nil || row.Fix.Command != "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair" || !row.Fix.Sudo {
 					t.Fatalf("failed job did not make doctor unready with administrator repair: %+v", row)
@@ -151,7 +151,7 @@ func TestManagedMacDoctorUserDomainLaunchAgent(t *testing.T) {
 		if row == nil || row.Status != openshell.StatusFail || !strings.Contains(row.Detail, user) || row.Fix == nil || !strings.Contains(row.Fix.Command, "enterprise macos repair") || rep.OK() {
 			t.Fatalf("doctor missed failed user-domain job: %+v", row)
 		}
-		ta.printDoctor(rep)
+		ta.printDoctor(rep, nil)
 		has(t, ta.output(), "not ready for sandboxes", "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair")
 		if calls := runner.Calls(); len(calls) != 2 || openshelltest.Argv(calls[0]) != "launchctl print "+gui || openshelltest.Argv(calls[1]) != "launchctl print "+user {
 			t.Fatalf("domain inspection calls = %+v", calls)

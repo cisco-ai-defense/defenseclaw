@@ -92,6 +92,10 @@ class HintEngine:
             return state.panel_keys or sandbox_keys_hint(
                 state.panel_view or "sandboxes", has_rows=state.panel_has_rows
             )
+        if panel == "vault":
+            from defenseclaw.tui.services.vault_state import vault_keys_hint_for
+
+            return vault_keys_hint_for(state.panel_view == "vault-rows")
         if panel == "routing":
             from defenseclaw.tui.services.routing_state import routing_keys_hint_for
 

@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "command": "verify",
+  "management_contract": 1,
+  "product_version": "1.0.10",
+  "generated_at": "2026-11-13T15:04:05Z",
+  "cluster": {
+    "cluster_name": "dc-substrate-e1",
+    "namespace": "defenseclaw-system",
+    "issuer_sha256": "c7049c7841cadaaa1fbb721c55132379b9e3699ed95e5dce973525ffc45fb3f5",
+    "issuer_default": false,
+    "substrate_version": "v1.0.0",
+    "substrate_version_supported": true,
+    "supported_versions": "\u003e=1.0.0 \u003c1.1.0"
+  },
+  "ok": true,
+  "policy_conflicts": {
+    "read": true,
+    "agents": 0,
+    "atespaces": [
+      {
+        "atespace": "data-team",
+        "conflicts": 0
+      },
+      {
+        "atespace": "eng-web",
+        "conflicts": 0
+      }
+    ]
+  },
+  "checks": [
+    {
+      "id": "substrate_version",
+      "status": "pass",
+      "message": "Substrate v1.0.0 is in the tested range \u003e=1.0.0 \u003c1.1.0"
+    },
+    {
+      "id": "issuer_unique",
+      "status": "pass",
+      "message": "the actor JWT issuer is unique to this cluster",
+      "edge_case": "E13"
+    },
+    {
+      "id": "actor_keys",
+      "status": "pass",
+      "message": "the keys URL answers (1 keys) and Substrate signs actor tokens with substrate.identity.issuer"
+    },
+    {
+      "id": "sign_in_server",
+      "status": "pass",
+      "message": "the gateway reaches the OIDC sign-in server (substrate.identity.oidc.issuer)"
+    },
+    {
+      "id": "snapshot_bucket",
+      "status": "pass",
+      "message": "snapshot bucket s3://snapshots/e1/ is encrypted, private, expiring and in the cluster's region",
+      "edge_case": "E10"
+    },
+    {
+      "id": "openfga_grants",
+      "status": "pass",
+      "message": "launcher atespaces are DefenseClaw's alone; the managed and global grants are in place",
+      "edge_case": "E2"
+    },
+    {
+      "id": "callout_registered",
+      "status": "pass",
+      "message": "the DefenseClaw callout is registered (headers only)"
+    },
+    {
+      "id": "ingress_clients",
+      "status": "pass",
+      "message": "only DefenseClaw reaches actors through the router",
+      "edge_case": "E2"
+    },
+    {
+      "id": "actor_service_routes",
+      "status": "pass",
+      "message": "the actor listener serves only actor routes (7 of 30 probed paths answer)",
+      "edge_case": "E1"
+    },
+    {
+      "id": "api_access_label",
+      "status": "pass",
+      "message": "namespace defenseclaw-system may reach ate-api-server"
+    },
+    {
+      "id": "policy_conflict",
+      "status": "pass",
+      "message": "no agent is in policy_conflict"
+    },
+    {
+      "id": "worker_drain",
+      "status": "pass",
+      "message": "no worker is draining"
+    }
+  ]
+}

@@ -949,10 +949,60 @@ func ResolveWindowsCodexManagedRuntimeRegistry(
 	if writerLock {
 		return resolveWindowsCodexManagedRuntimeRegistryStable(writerLockPath, resolve)
 	}
-	if requirementsExists || stateExists {
+	if stateExists {
 		return result, errors.New("the Codex managed artifacts exist without the machine policy lock")
 	}
+	if requirementsExists {
+		// GAP-1832: no writer of any release has run on this host (or the
+		// last one removed its lock on uninstall), so a requirements.toml
+		// here is only DefenseClaw's when it carries DefenseClaw content.
+		// An administrator's file (or the administrator text an uninstall
+		// keeps, GAP-1737) is not a managed artifact: Codex runs no
+		// DefenseClaw hook from it, as the locked read reports such a file
+		// inactive. Anything that may be DefenseClaw's (a managed group of
+		// any release, a command naming the hook image, the managed
+		// directory, or a file that does not parse) still fails closed:
+		// DefenseClaw tables without the lock are a tampered or
+		// half-removed install.
+		owned, err := windowsCodexUnlockedRequirementsMayBeManaged(requirementsPath)
+		if err != nil {
+			return result, err
+		}
+		// The writer creates its lock before it publishes: a lock that
+		// exists now means the content read above may be a writer's.
+		writerLock, err = windowsCodexMachinePathExists(writerLockPath)
+		if err != nil {
+			return result, err
+		}
+		if writerLock {
+			return resolveWindowsCodexManagedRuntimeRegistryStable(writerLockPath, resolve)
+		}
+		if owned {
+			return result, errors.New("the Codex managed artifacts exist without the machine policy lock")
+		}
+	}
 	return result, nil
+}
+
+// windowsCodexUnlockedRequirementsMayBeManaged reads requirementsPath, found
+// without the machine policy writer lock, and reports whether it may hold
+// DefenseClaw content (windowsCodexRequirementsMayHoldDefenseClaw). The read
+// takes the trust checks of the locked path but never repairs: the file is
+// not known to be DefenseClaw's, so its descriptor is the administrator's
+// (a drifted file is still refused on standalone, as Setup refuses it). A
+// file removed since it was seen reads as empty.
+func windowsCodexUnlockedRequirementsMayBeManaged(requirementsPath string) (bool, error) {
+	requirements, err := readWindowsCodexMachineFileRepairable(
+		requirementsPath,
+		windowsCodexMachineRequirementsLimit,
+		true,
+		false,
+		"Codex machine requirements",
+	)
+	if err != nil {
+		return false, err
+	}
+	return windowsCodexRequirementsMayHoldDefenseClaw(requirements.data), nil
 }
 
 // windowsCodexTransactionCounterRead reads the writer lock's transaction
@@ -1205,6 +1255,7 @@ func resolveWindowsCodexManagedRuntimeRegistryLocked(
 		return result, err
 	}
 	result.Active = true
+	result.HookExecutable = state.HookExecutable
 	result.GatewayAddr = state.GatewayAddr
 	result.GatewayServiceName = state.GatewayServiceName
 	result.Targets = targets
@@ -2223,6 +2274,19 @@ func readWindowsCodexMachineFile(
 	allowMissing bool,
 	label string,
 ) (windowsCodexStableFile, error) {
+	return readWindowsCodexMachineFileRepairable(path, limit, allowMissing, true, label)
+}
+
+// readWindowsCodexMachineFileRepairable is readWindowsCodexMachineFile with
+// the permission repair of a drifted leaf (ensureWindowsCodexMachineFileTrust)
+// allowed only when repairable is set.
+func readWindowsCodexMachineFileRepairable(
+	path string,
+	limit int,
+	allowMissing bool,
+	repairable bool,
+	label string,
+) (windowsCodexStableFile, error) {
 	result := windowsCodexStableFile{}
 	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) && allowMissing {
@@ -2237,7 +2301,7 @@ func readWindowsCodexMachineFile(
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > int64(limit) {
 		return result, fmt.Errorf("%s is not a bounded regular file", label)
 	}
-	if err := ensureWindowsCodexMachineFileTrust(path, label, true); err != nil {
+	if err := ensureWindowsCodexMachineFileTrust(path, label, repairable); err != nil {
 		return result, err
 	}
 	handle, err := openWindowsCodexNoFollow(path, windows.GENERIC_READ, false)

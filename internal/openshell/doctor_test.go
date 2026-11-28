@@ -29,7 +29,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
+	"github.com/ai-openshell/sdk-go/openshell/v1/types"
 
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -492,7 +492,7 @@ func TestDoctorOffersTheUpgrade(t *testing.T) {
 	f := newDoctorFixture(t) // OpenShell 0.1.1, CLI and gateway
 	r := f.run()
 	c := expectCheck(t, r, openshell.CheckIDCLI, openshell.StatusWarn,
-		"0.1.1 at /usr/bin/openshell; OpenShell "+openshell.InstallerVersion+" initializes a missing or empty MicroVM hosts file")
+		"0.1.1 at /usr/bin/openshell; OpenShell "+openshell.InstallerVersion+" applies a credential only where its provider places it")
 	if c.Fix == nil || c.Fix.Command != "defenseclaw sandbox setup --install-openshell" || c.Fix.Automatic || c.Fix.Apply != nil ||
 		c.Fix.Summary != "upgrade OpenShell to "+openshell.InstallerVersion+" in place (this pulls its supervisor images from ghcr.io and restarts the gateway, "+
 			"which drops the connections of every sandbox on it)" {
@@ -507,11 +507,17 @@ func TestDoctorOffersTheUpgrade(t *testing.T) {
 	if gw.Fix == nil || gw.Fix.Summary != c.Fix.Summary || gw.Fix.Command != c.Fix.Command {
 		t.Fatalf("gateway-version fix = %+v, want the CLI's %+v", gw.Fix, c.Fix)
 	}
-	// On the release that runs sandboxes, neither is asked for.
+	// On the floor, sandboxes run and the upgrade is only offered; on the
+	// release setup installs, neither is asked for.
 	f = newDoctorFixture(t)
 	f.atRelease(openshell.SupportedMin)
-	if r := f.run(); !r.OK() || r.OpenShellUpgradeNeeded() || r.OpenShellUpgradeAvailable() {
+	if r := f.run(); !r.OK() || r.OpenShellUpgradeNeeded() || !r.OpenShellUpgradeAvailable() {
 		t.Fatalf("on %s:\n%s", openshell.SupportedMin, r)
+	}
+	f = newDoctorFixture(t)
+	f.atRelease(openshell.InstallerVersion)
+	if r := f.run(); !r.OK() || r.OpenShellUpgradeNeeded() || r.OpenShellUpgradeAvailable() {
+		t.Fatalf("on %s:\n%s", openshell.InstallerVersion, r)
 	}
 
 	f = newDoctorFixture(t)
@@ -529,7 +535,7 @@ func TestR108OSMINDoctorNamesUpgradeFrom015(t *testing.T) {
 	r := f.run()
 	c := expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail,
 		"OpenShell 0.1.5 runs no DefenseClaw sandbox: OpenShell 0.1.6 or later is required")
-	if c.Fix == nil || !strings.Contains(c.Fix.Summary, "upgrade OpenShell to 0.1.6 in place") {
+	if c.Fix == nil || !strings.Contains(c.Fix.Summary, "upgrade OpenShell to "+openshell.InstallerVersion+" in place") {
 		t.Fatalf("0.1.5 gateway fix = %+v", c.Fix)
 	}
 	if !r.OpenShellUpgradeNeeded() || !r.OpenShellUpgradeAvailable() {
@@ -860,11 +866,11 @@ func TestDoctorChecks(t *testing.T) {
 		// answers (the upgrade replaced the binaries, the gateway kept
 		// running): the skew does not hide that the gateway runs no
 		// sandbox, and the fix restarts it on the CLI's release.
-		{name: "cli runs sandboxes, older gateway answers", setup: func(f *doctorFixture) { f.atRelease(openshell.SupportedMin); f.fake.SetHealth(true, "0.1.3") },
+		{name: "cli runs sandboxes, older gateway answers", setup: func(f *doctorFixture) { f.atRelease(openshell.InstallerVersion); f.fake.SetHealth(true, "0.1.3") },
 			want: []checkWant{{"gateway-version", fail, "OpenShell 0.1.3 runs no DefenseClaw sandbox"}},
 			then: func(t *testing.T, _ *doctorFixture, r *openshell.DoctorReport) {
 				c := r.Get(openshell.CheckIDGatewayVersion)
-				if !strings.HasSuffix(c.Detail, "; the CLI installed here is OpenShell "+openshell.SupportedMin) || c.Fix == nil || !c.Fix.RestartsGateway ||
+				if !strings.HasSuffix(c.Detail, "; the CLI installed here is OpenShell "+openshell.InstallerVersion) || c.Fix == nil || !c.Fix.RestartsGateway ||
 					!strings.Contains(c.Fix.Summary, "restart the openshell-gateway user service so it runs the gateway installed with the CLI") ||
 					r.OK() || r.OpenShellUpgradeNeeded() || r.OpenShellUpgradeAvailable() {
 					t.Fatalf("gateway-version = %+v (fix %+v), upgrade needed %v", c, c.Fix, r.OpenShellUpgradeNeeded())

@@ -24,6 +24,7 @@ import (
 )
 
 func TestGAP0564RealProviderProxyConnectDisconnect(t *testing.T) {
+	closeBifrostTenantsAfter(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -96,6 +97,7 @@ func TestGAP0564RealProviderProxyConnectDisconnect(t *testing.T) {
 }
 
 func TestGAP0564RealProviderProxyBenignAnswer(t *testing.T) {
+	closeBifrostTenantsAfter(t)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		_ = r.Body.Close()

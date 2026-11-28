@@ -80,6 +80,12 @@ func TestStandaloneSensorHelperServiceLogPath(t *testing.T) {
 }
 
 func TestCreateStandaloneSensorHelperLogDirectoryIsAdministratorOnly(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		// The directory is born with the Administrators owner, which a
+		// standard user cannot assign (rel-1-0-10:GAP-2192); the sensor
+		// helper service that creates it runs as LocalSystem.
+		t.Skip("needs an elevated token: the sensor helper log directory is Administrators-owned, which a standard user cannot assign")
+	}
 	directory := filepath.Join(t.TempDir(), "sensor-helper")
 	if err := createStandaloneSensorHelperLogDirectory(directory); err != nil {
 		t.Fatalf("create: %v", err)

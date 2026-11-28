@@ -1,0 +1,432 @@
+---
+title: Credential vault (Preview)
+description: Keep the secrets your sandboxed agents need in a vault, bound to the one host each may be sent to. The agent sees only a placeholder; DefenseClaw also moves secrets an agent is given into the vault.
+keywords:
+  - DefenseClaw vault
+  - sandbox credentials
+  - secret placeholder
+  - OpenShell credential
+  - sandbox vault add
+  - credential capture
+---
+
+<Callout type="info" title="Preview">
+The credential vault is a preview feature of OpenShell sandboxes on Linux and macOS, for per-user installs and managed computers.
+</Callout>
+
+Coding agents leak credentials because they hold them: a key in the agent's
+environment can end up in the model's context, a transcript, a file or a commit.
+The vault keeps your secrets out of the agent's reach. Each secret is bound to
+the one host it may be sent to. A sandbox started with `--vault NAME` gives the
+agent only a placeholder in `$NAME`; OpenShell puts the real value in on the
+way out, to that host only.
+
+```text
+ your vault (your account only)        sandbox (the agent)              the API
+ STRIPE_API_KEY → api.stripe.com  ──►  $STRIPE_API_KEY = placeholder  ──►  OpenShell swaps the
+                                       curl -H "Authorization: Bearer      placeholder for the
+                                       $STRIPE_API_KEY" api.stripe.com      value, for api.stripe.com only
+```
+
+<Video
+  src="sandbox-vault"
+  aspect="16/10"
+  caption="Claude Code in an OpenShell sandbox on Linux: a secret added to the vault with its value typed hidden, the agent calling a demo API with $DEMO_API_TOKEN (the API gets the real token, the agent only a placeholder), a Stripe-shaped key pasted into a prompt moved into the vault and the prompt stopped, and the Vault tab in the TUI. The keys shown are made up for the recording."
+/>
+
+## Add a secret
+
+```bash
+defenseclaw sandbox vault add STRIPE_API_KEY --host api.stripe.com
+```
+
+The value is typed with echo off. To pipe it instead:
+
+```bash
+printf '%s\n' "$VALUE" | defenseclaw sandbox vault add STRIPE_API_KEY --host api.stripe.com --value-stdin
+```
+
+`NAME` is the environment variable the sandbox sees. `--host` is the only host
+the value is ever sent to: a host name, with `:port` when it is not 443. URLs,
+paths and wildcards are refused.
+
+## Use it in a sandbox
+
+```bash
+defenseclaw sandbox run claude --vault STRIPE_API_KEY
+```
+
+![Claude Code in a sandbox runs curl with "Authorization: Bearer $DEMO_API_TOKEN" against host.openshell.internal:28950 and reports that the API answered accepted: the real token arrived, while the agent held only a placeholder](/images/sandboxes/screens/vault-placeholder-call.png)
+
+`--vault` takes one name and repeats. The run's banner lists each secret and
+its host on the `Secret` line. Inside the sandbox the agent uses the variable as
+usual (`$STRIPE_API_KEY` in a header). It never holds the value.
+
+- A secret works only against its host. Sent anywhere else, the placeholder is
+  just a meaningless string.
+- Do not let the agent print the variable. OpenShell refuses every request whose
+  body carries a placeholder, so once a placeholder lands in the conversation
+  (the agent ran `env`, say) later model calls of that conversation fail. Start
+  a new conversation with `defenseclaw sandbox connect NAME`.
+- A sandbox keeps the secrets it was created with. To give it a new or
+  replaced secret, delete it and start a new one; a stopped sandbox whose
+  secret changed is not started again.
+
+## Secrets DefenseClaw captures for you
+
+When a secret with a well-known shape shows up in any hook call of an agent
+in a sandbox (your prompt, a tool call, a tool's output, the agent's reply),
+the secret goes into your vault and the value is removed from the call before
+DefenseClaw checks, records or forwards it. These kinds of secret are captured:
+
+| Kind | Vault name | Bound to |
+| --- | --- | --- |
+| Anthropic API key | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
+| OpenAI API key | `OPENAI_API_KEY` | `api.openai.com` |
+| GitHub token (classic or fine-grained) | `GITHUB_TOKEN` | `api.github.com` (`gh` and the API; `git push` over HTTPS goes to `github.com` and is not covered) |
+| Slack token | `SLACK_TOKEN` | `slack.com` |
+| Stripe live secret key | `STRIPE_API_KEY` | `api.stripe.com` |
+| Google API key | `GOOGLE_API_KEY` | no host: bind one before use |
+
+A second, different secret of the same kind gets `_2`, `_3` and so on.
+
+Every captured secret starts **unconfirmed**, and no sandbox gets it until you
+run `defenseclaw sandbox vault confirm NAME`. An agent in a sandbox can make a
+call that looks like your prompt, so a captured value may be one it planted.
+`confirm` shows where the secret came from and the last 4 characters of its
+value before it asks.
+
+- **In a prompt that is stopped.** Claude Code and Codex stop the prompt
+  before it reaches the model, and the secret stays unconfirmed. Their hooks cannot edit a prompt, only stop it. Claude Code puts the
+  prompt back in its input box: delete the value, send the prompt again, and
+  confirm the secret and start a sandbox with `--vault NAME` to let the agent
+  use it. The
+  agent's session log inside the sandbox still holds the stopped prompt, and
+  the agent could read that file, so delete the sandbox when you are done
+  (`defenseclaw sandbox delete NAME`).
+- **In a tool call.** The tool call is stopped. The agent's model wrote the
+  value, so it has seen it, and the value may even be the agent's own: the
+  secret is marked **exposed: rotate** and no new sandbox gets it until you
+  rotate it with its issuer and run `defenseclaw sandbox vault replace NAME`
+  with the new value (the same value is refused). A sandbox started with it
+  before keeps it until you delete that sandbox. Only a
+  value written out in the tool call is seen: a command that makes up a value
+  as it runs (from `/dev/urandom`, say) or builds it from parts (a `printf`
+  format and a separate argument) is not. DefenseClaw's secret rules still flag
+  such a value when it shows up in a file or in output, and the value is
+  captured, marked exposed, when it shows up in the tool's output (below).
+- **In a prompt that reaches the model.** Copilot CLI, Hermes and Kiro hooks
+  cannot keep a prompt from the model (or DefenseClaw does not rely on them
+  to). The secret is captured and marked **exposed:
+  rotate**, and the agent is told not to use it where the agent allows that.
+  Rotate it and run `defenseclaw sandbox vault replace NAME`.
+- **In a tool's output.** The model has read the value, so the secret is
+  captured and marked **exposed: rotate**, including a key a command put
+  together as it ran. Where the hook can answer the model (Claude Code and
+  Codex `PostToolUse`), the agent is told not to reuse the
+  value and that you must rotate it; elsewhere DefenseClaw raises an alert that
+  says the same.
+- **In the agent's reply or another hook event.** The value is removed from
+  what DefenseClaw records and passes on, and a secret your vault already
+  holds is marked **exposed: rotate**. A value the vault does not hold is not
+  stored from a reply: rotate it with its issuer.
+
+Where each agent captures:
+
+| Agent | Prompt | Tool call (stopped, exposed) | Tool output (exposed) |
+| --- | --- | --- | --- |
+| Claude Code | stopped, unconfirmed | `PreToolUse`, `PermissionRequest` | `PostToolUse` (answered block), `PostToolBatch`, `PostToolUseFailure` |
+| Codex | stopped, unconfirmed | `PreToolUse`, `PermissionRequest` | `PostToolUse` (answered block) |
+| Copilot CLI | exposed (`userPromptSubmitted`) | `preToolUse`, `permissionRequest` | `postToolUse`, `postToolUseFailure` |
+| OpenCode | no prompt hook | `tool.execute.before` | `tool.execute.after` |
+| Hermes | exposed (`pre_llm_call`) | `pre_tool_call` | `post_tool_call`, `transform_tool_result` |
+| Kiro | exposed (`userPromptSubmit`) | `preToolUse` | `postToolUse` |
+| Antigravity (`agy`) | not sent to hooks | `PreToolUse` | not sent to hooks |
+
+Antigravity's hooks receive neither your prompt nor a tool's output, so a
+secret there is captured only when the model writes it into a tool call.
+Capture in Kiro and Antigravity is in Preview. Amp, Cursor Agent and Devin
+CLI are not verified in a sandbox yet: `sandbox run` refuses them before
+building an image, so they cannot use the vault.
+
+![Claude Code in a sandbox: a prompt with a Stripe-shaped key is stopped by the UserPromptSubmit hook, and DefenseClaw says it moved the secret into the vault as STRIPE_API_KEY, sent only to api.stripe.com](/images/sandboxes/screens/vault-capture-claude.png)
+
+The same in Codex, where a GitHub token in a prompt is moved into the vault and
+a key the model typed into a `printf` command is stopped and marked exposed:
+
+![Codex in a sandbox: a GitHub token in a prompt is moved into the vault as GITHUB_TOKEN, and a printf that writes a Stripe-shaped key the model made up is stopped by the PreToolUse hook and marked exposed](/images/sandboxes/screens/vault-capture-codex.png)
+
+<Video
+  src="sandbox-vault-codex"
+  aspect="16/10"
+  caption="Codex in an OpenShell sandbox on Linux: the demo API call with a vault placeholder, a GitHub token in a prompt moved into the vault, a key the model typed into a tool call stopped and marked exposed, and a sandbox refused that exposed secret until it is rotated and replaced. The keys shown are made up for the recording."
+/>
+
+Each sandbox keeps at most 8 secrets from its prompts that you have not
+confirmed yet and, separately, at most 8 from its tool calls and tool output
+that you have not replaced yet, so tools that keep printing key-shaped test
+values never use up the room a prompt's secret needs. A program inside a
+sandbox can send hook events that look like its agent's, so each sandbox only
+ever fills its own room: one sandbox cannot fill the room another sandbox
+needs or use up the names the vault gives captured secrets. All captures
+together stop at 48 that you have not confirmed or replaced, so at least 16
+entries always stay for secrets you add yourself; several sandboxes together
+can reach that limit, and then their prompts are still stopped.
+Past a limit a call is still answered and the value still removed, but
+nothing more of that kind is stored for that sandbox until you confirm,
+replace or remove some. When a limit is reached, the prompt is still stopped and
+you are told to review the captures: `defenseclaw sandbox vault list` shows
+which sandbox each one came from, and you confirm the ones that are yours and
+remove the others. A secret the vault already holds is still
+marked exposed when the model sees it, even with the vault full. A test
+fixture that looks exactly like a real key (the right prefix and length) is
+treated as one: give fixtures an obviously fake shape.
+
+When another DefenseClaw command is writing the vault at the moment a secret
+is exposed, the exposure is kept in a small record next to the vault (it holds
+a keyed digest, never the value) and written into the vault right after. From
+the moment it is recorded the secret reads as exposed and no sandbox gets it.
+
+Capture follows the hook mode your administrator set for a sandbox. In
+observe mode nothing is stopped: a secret is still moved into the vault and
+reported, and a prompt that goes on to the model is marked **exposed:
+rotate**.
+
+AWS access keys are not captured: AWS signs each request with the key, which a
+placeholder swap cannot do. Turn capture off with `openshell.vault.auto_capture:
+false` ([configuration](/docs/reference/configuration)). On a managed computer
+your administrator's setting applies.
+
+## See and change your secrets
+
+```bash
+defenseclaw sandbox vault list
+```
+
+![defenseclaw sandbox vault list: DEMO_API_TOKEN added by hand and bound to host.openshell.internal:28950, last used by the vault-demo sandbox, and STRIPE_API_KEY captured from a prompt and bound to api.stripe.com](/images/sandboxes/screens/vault-cli-list.png)
+
+A secret an agent wrote into a tool call is listed as **exposed: rotate**, and a
+sandbox refuses it until you replace the value:
+
+![defenseclaw sandbox vault list shows STRIPE_API_KEY as exposed: rotate with the replace command, and sandbox run codex --vault STRIPE_API_KEY refuses it until the value is rotated and replaced](/images/sandboxes/screens/vault-exposed-refused.png)
+
+A sandbox keeps the secrets it was created with. If you later replace, rebind
+or remove one of them, or it is marked exposed, that sandbox is not started
+again (`start`, `connect` or a new `run` in its folder): delete it and start
+a new one.
+
+Values are never printed. `show NAME` gives one secret's details, `confirm`
+accepts a captured one, `replace`
+sets a new value, `bind` sets the host, `rename` changes the variable name and
+`remove` deletes it. See [the sandbox CLI reference](/docs/reference/sandbox-cli#sandbox-vault).
+
+On a per-user install, the TUI's **Vault** tab (`K`) shows the same list and does the same
+changes: `a` add, `v` replace value, `e` set host, `n` rename, `d` delete,
+Enter details. A value is typed in a hidden field and goes to the command on
+standard input.
+
+![DefenseClaw TUI Vault tab on Linux: 2 secrets for your sandboxes, values never shown; the selected DEMO_API_TOKEN line says it reaches a sandbox as $DEMO_API_TOKEN with --vault, is sent only to host.openshell.internal:28950 and was added by you; the table lists DEMO_API_TOKEN and STRIPE_API_KEY with host, status, source and last use](/images/sandboxes/screens/vault-tui-panel.png)
+
+On a managed computer `defenseclaw tui` is not available; use
+`defenseclaw sandbox vault` there ([Managed command availability](/docs/enterprise/managed-commands)).
+
+In the [macOS app](/docs/sandboxes/apps#the-vault-card-preview) (Preview), the
+Sandboxes view has a **Vault (Preview)** card with the same list and changes:
+**Add…**, **Replace value…**, **Set host…**, **Rename…**, **Remove…** and
+**Confirm…** (for a secret captured from a sandbox). A value is typed in a
+hidden field and goes to the command on standard input. To see the last 4
+characters of a captured secret before you confirm it, run
+`defenseclaw sandbox vault confirm NAME` in Terminal; the app does not show
+them. If
+the command refuses on a managed computer, the card says so; run
+`defenseclaw sandbox vault list` in Terminal to see why
+([Managed command availability](/docs/enterprise/managed-commands)).
+
+Only terminal agents run in a sandbox (Claude Code, Codex, Copilot CLI,
+OpenCode, Kiro, Hermes, Antigravity's `agy`), so only they can use the vault.
+Amp, Cursor Agent and Devin CLI do not run in a sandbox yet.
+Desktop apps and IDE agents do not run in an OpenShell sandbox.
+
+## Where the vault lives
+
+| Install | Vault file |
+| --- | --- |
+| Per-user (Linux, macOS) | `~/.defenseclaw/vault/vault.json` |
+| Managed computer, Linux | `~/.local/state/defenseclaw-sandbox/vault/vault.json` |
+| Managed computer, macOS | `~/Library/Application Support/DefenseClaw Sandbox/vault/vault.json` |
+
+The directory is readable by your account only (mode 0700, the file 0600). The
+vault is never mounted into a sandbox. On a managed computer the managed gateway
+never receives a value, and a captured secret is removed from the hook call
+before the call reaches it. While capture is on, a sandboxed harness's own
+telemetry and notify calls are masked the same way (Codex sends the prompt in
+its telemetry).
+
+### Sealed or a plain file
+
+The first line of `defenseclaw sandbox vault list` says how the vault is kept
+(`--json` has it as `storage`, with `sealed` true or false):
+
+| Storage | Meaning |
+| --- | --- |
+| `sealed (macOS Keychain)` | Each value is encrypted. The key is in your default (login) keychain, item `defenseclaw-vault`, which the DefenseClaw program that made it reads without asking. A new DefenseClaw build asks once. |
+| `sealed (Secret Service)` | Each value is encrypted. The key is in your Secret Service keyring (GNOME Keyring or KWallet), reached through `secret-tool`. |
+| `file (owner-only, not encrypted)` | No keystore was usable, or `DEFENSECLAW_VAULT_STORE=file` is set. Anything running as your account can read the values, as it can read your shell environment. |
+
+Sealing starts the first time one of these commands runs with a usable
+keystore: `defenseclaw sandbox setup`, `defenseclaw sandbox run` (before it
+creates or resumes a sandbox), `sandbox start` and `sandbox connect` (before
+they start a stopped sandbox), or a change to the vault (`sandbox vault add`,
+`replace`, `bind`, `rename`, `remove`, `confirm`). With no vault yet it makes an
+empty sealed one, so every secret captured after that point is sealed when it
+is written. The command that seals the vault says so. `vault list` and
+`vault show` only read: they never seal a plain-file vault, with one exception:
+`vault list` seals again a vault that had been sealed and is now a plain file
+(see [The seal pin](#the-seal-pin)).
+
+The gateway and the sandbox daemon never seal a plain-file vault themselves. A
+secret they capture into a vault that is still a plain file (a sandbox that was
+already running when you upgraded, or a run while no keystore was usable) is
+written to that file as before, and is sealed with the rest by the next
+`sandbox run`, `start`, `connect`, `setup` or vault change that can use the
+keystore. A kept sandbox that the gateway resumes on its own does not seal
+the vault, since the gateway never reads the keystore.
+
+`sandbox run`, `start` and `connect` give the keystore about two seconds: one
+that does not answer by then (a Secret Service waiting to be unlocked) leaves
+the vault a plain file for that command, which goes on. On Linux they do not
+try the Secret Service at all when `DBUS_SESSION_BUS_ADDRESS` is not set, as
+in most SSH logins. `sandbox setup` and vault changes wait for the keystore
+as long as it needs.
+
+Over SSH, in a service, or on Linux without a desktop keyring the keystore is
+often not usable; the vault then stays a plain file and `sandbox setup`, the
+vault change and `vault list` say why. Set `DEFENSECLAW_VAULT_STORE=file` to
+keep it a plain file, or `DEFENSECLAW_VAULT_STORE=keychain` to require sealing:
+a vault change, `sandbox setup`, `run`, `start` and `connect` then wait for the
+keystore and stop with a message when the vault cannot be sealed (the
+keystore cannot keep the key, the vault is damaged or busy), instead of
+writing a plain file or starting the sandbox.
+
+Names, hosts, status and use times stay readable, so `vault list` and
+`vault show` work without the key. The gateway and the sandbox daemon store a
+captured secret with the vault's public key only: they never read the
+keystore, so capture also works where the keystore cannot be reached, and it
+never asks you anything. `vault confirm` works without the key too; it then
+shows the secret's other details and says its last characters are not
+readable.
+
+A sealed vault is never written back as a plain file. When its key cannot be
+read (keychain locked over SSH, no Secret Service in this session,
+`DEFENSECLAW_VAULT_STORE=file`), listing, showing, confirming, removing and
+capture keep working; adding, replacing, binding or renaming a secret and
+`sandbox run --vault` stop with a message that says why. Unlock the keychain
+(`security unlock-keychain` on macOS) or run the command in your desktop
+session. After an upgrade, the macOS keychain may also refuse the new
+DefenseClaw build over SSH until you allow it once in a desktop session. On
+Linux, `secret-tool` answers the same way for a missing key and for a keyring
+that is locked or whose unlock was dismissed, so DefenseClaw asks you to unlock
+the keyring and never treats the key as gone. Only if you know the key is gone
+(keychain reset, a vault copied from another account or computer) are the
+values lost: move `vault.json` aside and add the secrets again.
+
+Each sealed value is tied to its entry's name, host and port: a value moved to
+another entry or pointed at another host does not open, and a vault that fails
+this check, or whose header is damaged, is refused and left as it is. The other
+fields (confirmed, exposed, where a secret came from, when it was used) are not
+protected: a program that can write the file as your account can change them.
+
+On macOS, a key made for a change that was then not written stays in the
+keychain as an unused `defenseclaw-vault` item: this happens when two
+DefenseClaw commands seal the vault at the same time (the one that loses
+keeps its key), or when the keychain answered too late. An unused item opens
+nothing. To remove extras, find the key in use: the `key_id` in the `seal`
+part of `vault.json`. Every other item with service `defenseclaw-vault` (its
+account is `vault-` followed by a key ID) is unused; delete one in Keychain
+Access, or with
+`security delete-generic-password -s defenseclaw-vault -a vault-KEY_ID`,
+where `KEY_ID` is the unused key's ID. Never delete the item of the key in
+use: the vault's values cannot be opened without it.
+
+### The seal pin
+
+The gateway and the sandbox daemon seal a captured secret with the public key
+written in the vault file, without the private key, so on their own they
+could not tell a real header from one a program rewrote. They therefore keep a
+pin: a digest of the sealed vault's header (its public key, key ID and
+fingerprint salt) in `vault-pin.json`, next to the `vault` directory (for
+example `~/.defenseclaw/vault-pin.json`), not inside it. The CLI writes the pin
+when it seals the vault, and when it reads the key for a vault that has no pin
+yet. A sealed vault that has no pin yet (sealed by an earlier DefenseClaw) is
+otherwise pinned by its first capture. Only `vault list` replaces a pin that
+differs from the vault.
+
+Before a capture, the gateway and the sandbox daemon compare the vault with
+the pin. When the header is not the pinned one, or a vault that was sealed is
+now a plain file or gone, they keep nothing: the call is still stopped and the
+secret is not sent on, the vault file is left as it is, the answer tells you
+the vault looks changed and to run `defenseclaw sandbox vault list`, and the
+gateway records a high-severity alert. A plain-file vault that was never sealed
+has no pin and captures as before.
+
+`defenseclaw sandbox vault list` then checks the vault:
+
+- Sealed, header not the pinned one: it reads your key and checks that the key
+  matches the header, that every value opens with it, and that every stored
+  fingerprint matches the header's salt. When all of that holds, the pin is
+  renewed and capture works again. When it does not, the vault file was
+  changed: list warns, nothing is pinned, and capture and vault changes stay
+  off. Move `vault.json` aside; the next vault change or `sandbox run` makes a
+  new sealed vault and pins it. Without the key in this session it says it
+  cannot check and changes nothing.
+- Sealed before, now a plain file or gone: with a usable keystore it seals the
+  vault again with a new key and pins it (check the entries: DefenseClaw did not
+  write that plain file). A vault change, `sandbox setup`, `run`, `start` or
+  `connect` that can use the keystore does the same and says so. Without a
+  keystore it warns, and vault changes stop rather than write a plain file. To
+  keep a plain-file vault on purpose, set `DEFENSECLAW_VAULT_STORE=file` and run
+  `vault list`, which removes the pin.
+
+`--output json` has the result as `pin` (`changed`, `unsealed` or
+`not pinned yet`; absent when the vault matches) with `pin_note` or
+`pin_warning`.
+
+What the pin stops: a change to the vault file alone, such as a header
+rewritten in place so later captures would be sealed to someone else's key, a
+sealed vault replaced with a plain copy or with one sealed under another key
+(a restore, a sync, a tool that writes only that file), or a sealed vault
+deleted, so later captures would be written in the clear. An older copy of the
+same sealed vault (same key) matches the pin, so going back to it is not
+detected. What it does not stop: the pin is a file of your account too. A
+program running as your account can rewrite the vault and the pin together, as
+it can run DefenseClaw or read the keystore while it is unlocked. Your account
+is the trust boundary, here and on a managed computer, where the sandbox
+daemon's state directory is also yours.
+
+What sealing protects: a copy of the file (a backup, a synced folder, a copied
+home directory, a program that collects files) does not show the values. What
+it does not: a program running as your account while your keystore is unlocked
+can ask DefenseClaw or the keystore for them; the sandbox stays the boundary.
+Sealing an existing plain file replaces it, but does not wipe its old blocks
+from the disk: rotate a secret if that matters to you.
+
+## Limits
+
+- The vault serves sandboxes only. An agent outside a sandbox gets nothing from it.
+- Secrets are your own. Your administrator's floor (`allowed_credentials`, the
+  egress rules) applies to vault secrets exactly as to `--credential`.
+- A host that echoes the `Authorization` header back would return the value to
+  the agent. Bind secrets to the API host itself.
+- Any program in the sandbox can use a secret against its host.
+- A program in a sandbox can send made-up captures until that sandbox's room
+  (8 from prompts, 8 from tool calls and output) is full. Nothing tells them
+  apart from its agent's, so its real prompts are then still stopped but their
+  secrets are not captured until you remove the made-up entries
+  (`defenseclaw sandbox vault list` shows the sandbox each came from). Other
+  sandboxes and your own secrets keep their room.
+- Going back to an earlier DefenseClaw version: an earlier version counts every
+  captured secret, from prompts and from tool calls and output alike, against
+  the single limit of 16, so it can report the vault full; confirm, replace or
+  remove captured secrets to make room. It also does not read exposures still
+  waiting to be written: run `defenseclaw sandbox vault list` before you go
+  back, which writes them.

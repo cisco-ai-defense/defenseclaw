@@ -16,8 +16,7 @@ import (
 // restricted tier, and it falls to the unknown tier (never clean, never an
 // allow). The same shapes that do write the file stay restricted and block.
 func TestGap0218Gap0219EffectShadowTiers(t *testing.T) {
-	effectResolverOverride = func(p string) (string, bool) { return p, true }
-	defer func() { effectResolverOverride = nil }()
+	defer setEffectResolverIdle(t, func(p string) (string, bool) { return p, true })()
 	defer func(g string) { effectHostGOOS = g }(effectHostGOOS)
 	effectHostGOOS = "linux" // GNU coreutils; the darwin rows are below
 	rows := []struct {
@@ -81,8 +80,7 @@ func TestGap0218Gap0219EffectShadowTiers(t *testing.T) {
 // On a macOS host the BSD rows apply: BSD cp has no -t (the command fails),
 // a valid BSD flag keeps the block, and a GNU coreutils path is read as GNU.
 func TestGap0219EffectShadowDarwinHost(t *testing.T) {
-	effectResolverOverride = func(p string) (string, bool) { return p, true }
-	defer func() { effectResolverOverride = nil }()
+	defer setEffectResolverIdle(t, func(p string) (string, bool) { return p, true })()
 	defer func(g string) { effectHostGOOS = g }(effectHostGOOS)
 	effectHostGOOS = "darwin"
 	rows := []struct {

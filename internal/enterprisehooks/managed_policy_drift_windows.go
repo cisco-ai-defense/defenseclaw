@@ -250,6 +250,14 @@ func renderWindowsClaudeRecordedPolicy(record windowsClaudeManagedPolicyState, c
 	if len(form) > 0 {
 		recorded = form[0]
 	}
+	return windowsClaudeRecordedPolicyRender(record, contract, lock, recorded)
+}
+
+// windowsClaudeRecordedPolicyRender renders the drop-in for record under
+// contract, lock and form. Tests replace it.
+var windowsClaudeRecordedPolicyRender = renderWindowsClaudeRecordedPolicyForm
+
+func renderWindowsClaudeRecordedPolicyForm(record windowsClaudeManagedPolicyState, contract string, lock bool, recorded windowsClaudeRecordedForm) ([]byte, error) {
 	return connector.NewClaudeCodeConnector().ManagedHookPolicy(connector.SetupOpts{
 		APIAddr:                     record.GatewayAddr,
 		HookFailMode:                "closed",

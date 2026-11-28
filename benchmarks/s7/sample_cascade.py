@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
 """Stratified sample for the cascade run: every positive of s2 and s3 plus a seeded benign sample. Strata = corpus x label(unsafe) x dataset.
 Writes ids.txt, weights.json (case -> population weight within its corpus), plan.json. Seeded."""
-import json, random, collections, sys
+
+import collections
+import json
+import random
+import sys
+
 OUT = sys.argv[1]
 targets = {("s3", True): None, ("s3", False): 700, ("s2", True): None, ("s2", False): 500}
 FLOOR = 60
 rnd = random.Random(741983)
-plan = {}; ids = []; weights = {}; decisions = 0
+plan = {}
+ids = []
+weights = {}
+decisions = 0
 for corpus in ("s3", "s2"):
     strata = collections.defaultdict(list)
     for l in open(f"/home/ubuntu/.system-one-data/outputs/{corpus}/cases.jsonl"):
@@ -31,14 +39,27 @@ for corpus in ("s3", "s2"):
             a = min(alloc[k], len(v))
             pick = rnd.sample(v, a)
             w = len(v) / a if a else 0
-            plan[f"{corpus}|{'unsafe' if u else 'benign'}|{k[1]}"] = {"population": len(v), "sampled": a, "weight": w,
-                "decisions": sum(n for _, n in pick)}
+            plan[f"{corpus}|{'unsafe' if u else 'benign'}|{k[1]}"] = {
+                "population": len(v),
+                "sampled": a,
+                "weight": w,
+                "decisions": sum(n for _, n in pick),
+            }
             for cid, n in pick:
-                ids.append(cid); weights[cid] = w; decisions += n
+                ids.append(cid)
+                weights[cid] = w
+                decisions += n
 json.dump(plan, open(f"{OUT}/plan.json", "w"), indent=1)
 json.dump(weights, open(f"{OUT}/weights.json", "w"))
 open(f"{OUT}/ids.txt", "w").write("\n".join(ids) + "\n")
 for corpus in ("s3", "s2"):
-    print(corpus, "cases", sum(v["sampled"] for k, v in plan.items() if k.startswith(corpus)), "decisions", sum(v["decisions"] for k, v in plan.items() if k.startswith(corpus)))
+    print(
+        corpus,
+        "cases",
+        sum(v["sampled"] for k, v in plan.items() if k.startswith(corpus)),
+        "decisions",
+        sum(v["decisions"] for k, v in plan.items() if k.startswith(corpus)),
+    )
 print("total cases", len(ids), "decisions", decisions)
-for k, v in sorted(plan.items()): print(k, v)
+for k, v in sorted(plan.items()):
+    print(k, v)

@@ -133,7 +133,15 @@ var ForwardHeaders = [...]string{
 	"X-Defenseclaw-Kiro-Surface",
 	"X-Defenseclaw-Hook-Refusal",
 	"X-Defenseclaw-Asset-Facts",
+	VaultCaptureHeader,
 }
+
+// VaultCaptureHeader carries what the per-user sandbox daemon captured into
+// the account's vault from a relayed hook call: the event and each entry's
+// name and host, never a value. The daemon drops any copy the sandbox sent
+// and sets its own; the managed gateway answers and records the call as a
+// block.
+const VaultCaptureHeader = "X-Defenseclaw-Vault-Capture"
 
 // DroppedHeaders lists request headers that must never leave the daemon on
 // a relayed call (canonical MIME form). The allowlist already excludes
@@ -418,6 +426,10 @@ type OperationalSettings struct {
 	// gateway could not use the file, and the daemon then builds no image.
 	TrustedCAs     string `json:"trusted_cas,omitempty"`
 	TrustedCAError string `json:"trusted_ca_error,omitempty"`
+	// VaultAutoCapture is the administrator's openshell.vault.auto_capture
+	// (nil: on): whether the daemon captures sandboxed agents' secrets into
+	// the account's vault.
+	VaultAutoCapture *bool `json:"vault_auto_capture,omitempty"`
 }
 
 // ImageSettings mirrors openshell.image.

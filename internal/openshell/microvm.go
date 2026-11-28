@@ -201,7 +201,11 @@ func (r *doctorRun) macChecks(ctx context.Context) {
 	r.report.MicroVM = r.micro
 	docker := r.dockerFound
 	var checks []Check
-	if r.driver() == DriverVM {
+	driver := r.driver()
+	if r.MachineDriver != "" {
+		driver = r.MachineDriver
+	}
+	if driver == DriverVM {
 		landlock := Check{ID: CheckIDLandlock, Title: "Landlock", Status: StatusPass,
 			Detail: "enforced by the MicroVM's own kernel; OpenShell refuses to start a sandbox without it (hard requirement)"}
 		if docker.Status == StatusFail {

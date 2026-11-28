@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -279,7 +280,18 @@ func classifyPOSIXNoExecCandidate(
 }
 
 func classifyCommand(out *parseOutput, command *CommandFact) {
-	if command == nil || command.Executable == "" {
+	if command == nil {
+		return
+	}
+	if command.Executable == "" {
+		// A PowerShell pipeline element that is an expression ("k" >> f,
+		// ("k") > f) or a dynamic command name still writes its output to
+		// its redirection targets: they are the element's paths, read like
+		// those of a command (an unresolved folder marks them too), and the
+		// parse stays partial for the element itself (rel-1-0-10:GAP-2259).
+		if command.Dialect == DialectPowerShell {
+			classifyRedirects(out, command)
+		}
 		return
 	}
 	if len(command.Argv) == 0 || command.Argv[0] == "" {
@@ -2999,6 +3011,9 @@ func searchCommandOptionPresent(
 	program string,
 	option string,
 ) bool {
+	if program == "rg" || program == "ripgrep" {
+		return parseRgCommandLine(argv).has(strings.TrimPrefix(option, "--"))
+	}
 	options := true
 	for i := 1; i < len(argv); i++ {
 		arg := argv[i]
@@ -3036,7 +3051,7 @@ func classifyPatternSearchPaths(
 	command *CommandFact,
 	program string,
 ) {
-	patternFromOption, patternFiles := searchPatternOptions(command.Argv)
+	patternFromOption, patternFiles := searchPatternOptions(command.Argv, program)
 	for _, path := range patternFiles {
 		appendPath(out, command.ID, PathAccessRead, path)
 	}
@@ -3064,6 +3079,9 @@ func searchOperands(argv []string, program string) []string {
 // searchOperandIndexes is searchOperands as argv indexes (the pattern, when
 // no option gives it, first).
 func searchOperandIndexes(argv []string, program string) []int {
+	if program == "rg" || program == "ripgrep" {
+		return parseRgCommandLine(argv).operands
+	}
 	var operands []int
 	options := true
 	for i := 1; i < len(argv); i++ {
@@ -3083,6 +3101,9 @@ func searchOperandIndexes(argv []string, program string) []int {
 	return operands
 }
 
+// searchOptionConsumesValue reports a grep option word that takes the next
+// word as its value. rg reads its argv with parseRgCommandLine
+// (substrate-1:GAP-0673).
 func searchOptionConsumesValue(program, arg string) bool {
 	if strings.Contains(arg, "=") {
 		return false
@@ -3091,13 +3112,8 @@ func searchOptionConsumesValue(program, arg string) bool {
 		lower := strings.ToLower(arg)
 		switch lower {
 		case "--after-context", "--before-context", "--binary-files", "--color",
-			"--context", "--dfa-size-limit", "--devices", "--directories",
-			"--encoding", "--engine", "--exclude", "--exclude-dir",
-			"--field-context-separator", "--field-match-separator", "--file",
-			"--glob", "--iglob", "--include", "--label", "--max-columns",
-			"--max-count", "--max-depth", "--max-filesize", "--path-separator",
-			"--pre", "--pre-glob", "--regexp", "--replace", "--sort", "--sortr",
-			"--type", "--type-not":
+			"--context", "--devices", "--directories", "--exclude", "--exclude-dir",
+			"--file", "--include", "--label", "--max-count", "--regexp":
 			return true
 		default:
 			return false
@@ -3109,17 +3125,14 @@ func searchOptionConsumesValue(program, arg string) bool {
 		case "-A", "-B", "-C", "-D", "-d", "-e", "-f", "-m":
 			return true
 		}
-	case "rg", "ripgrep":
-		switch arg {
-		case "-A", "-B", "-C", "-E", "-e", "-f", "-g", "-j", "-M", "-m",
-			"-r", "-t", "-T":
-			return true
-		}
 	}
 	return false
 }
 
-func searchPatternOptions(argv []string) (bool, []string) {
+func searchPatternOptions(argv []string, program string) (bool, []string) {
+	if program == "rg" || program == "ripgrep" {
+		return parseRgCommandLine(argv).patternOptions()
+	}
 	var files []string
 	for i := 1; i < len(argv); i++ {
 		arg := argv[i]
@@ -8968,6 +8981,31 @@ type nsenterInvocation struct {
 	complete      bool
 }
 
+// staticNSEnterWorkDir accepts the literal POSIX folder shapes that nsenter
+// can open before entering a namespace. Shell expansion and glob operands stay
+// unresolved so the child walk cannot mistake them for a local directory.
+func staticNSEnterWorkDir(value string) bool {
+	if staticAbsolutePOSIXPath(value) {
+		return true
+	}
+	// Keep relative native-path semantics unchanged on Windows (GAP-1881).
+	if runtime.GOOS == "windows" {
+		return false
+	}
+	if value == "" || strings.HasPrefix(value, "/") ||
+		strings.TrimSpace(value) != value || hasUnresolvedPathSyntax(value) ||
+		strings.ContainsAny(value, "*?[]{}$`\\:%") ||
+		strings.ContainsAny(value, "\x00\r\n") {
+		return false
+	}
+	switch pathFlavor(value) {
+	case PathFlavorPOSIX, PathFlavorUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
 func parseNSEnterInvocation(argv []string) nsenterInvocation {
 	result := nsenterInvocation{childIndex: -1, complete: true}
 	target := ""
@@ -9031,14 +9069,14 @@ func parseNSEnterInvocation(argv []string) nsenterInvocation {
 		}
 		if strings.HasPrefix(arg, "--wd=") {
 			result.workDir = strings.TrimPrefix(arg, "--wd=")
-			if !staticAbsolutePOSIXPath(result.workDir) {
+			if !staticNSEnterWorkDir(result.workDir) {
 				result.folderUnknown = true
 			}
 			continue
 		}
 		if strings.HasPrefix(arg, "-w") && len(arg) > 2 {
 			result.workDir = arg[2:]
-			if !staticAbsolutePOSIXPath(result.workDir) {
+			if !staticNSEnterWorkDir(result.workDir) {
 				result.folderUnknown = true
 			}
 			continue
@@ -9185,6 +9223,22 @@ func parseChrootInvocation(argv []string) chrootInvocation {
 		result.complete = false
 	}
 	return result
+}
+
+// ChrootRun reads a chroot call (argv as the program runs it): the new root,
+// the index of the child program and whether the child keeps the working
+// folder (--skip-chdir; otherwise it starts at the new root). ok is false
+// for a call the chroot grammar does not read completely, a preview
+// (--help, --version) and a call with no child.
+func ChrootRun(argv []string) (root string, child int, skipChdir, ok bool) {
+	parsed := parseChrootInvocation(argv)
+	if !parsed.complete || parsed.preview || parsed.childIndex <= 0 {
+		return "", 0, false, false
+	}
+	for _, arg := range argv[1:parsed.childIndex] {
+		skipChdir = skipChdir || arg == "--skip-chdir"
+	}
+	return parsed.root, parsed.childIndex, skipChdir, true
 }
 
 func classifyChroot(out *parseOutput, command *CommandFact) {

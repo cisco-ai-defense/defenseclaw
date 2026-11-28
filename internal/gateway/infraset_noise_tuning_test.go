@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestInfraSetAtomicNoisePosture(t *testing.T) {
@@ -539,6 +540,12 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 			t.Errorf("%s: findings %v, want one enforced %s", test.name, findingIDs(findings), rule)
 		}
 	}
+	// The subtest links a file, which an account without
+	// SeCreateSymbolicLinkPrivilege (the Windows standard-user leg) cannot do:
+	// it is not generated there and runs in the elevated leg (GAP-2168).
+	if !testenv.CanLinkFiles(t) {
+		return
+	}
 	t.Run("existing symlink", func(t *testing.T) {
 		home := t.TempDir()
 		project := filepath.Join(home, "project")
@@ -552,9 +559,7 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		if err := os.WriteFile(keys, []byte("key\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(keys, filepath.Join(project, "keys.link")); err != nil {
-			t.Fatal(err)
-		}
+		testenv.Symlink(t, keys, filepath.Join(project, "keys.link"))
 		for _, input := range []actionfacts.Input{
 			{Tool: "Bash", Args: []byte(`{"command":"echo key >> ./keys.link"}`), CWD: project, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX},
 			{Tool: "Write", Args: []byte(`{"file_path":"./keys.link","content":"key"}`), CWD: project, ActiveHome: home},

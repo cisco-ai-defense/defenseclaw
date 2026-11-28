@@ -1155,7 +1155,7 @@ func TestCorrelationReceiptConflictCannotClaimExactMirrorIdentity(t *testing.T) 
 
 func TestCorrelationMigrationIsAdditiveForPreviousReader(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.db")
-	store, err := NewStore(path)
+	store, err := NewStore(realMigrationPath(path))
 	if err != nil {
 		t.Fatal(err)
 	}

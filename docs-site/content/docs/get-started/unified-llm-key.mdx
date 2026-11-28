@@ -538,6 +538,14 @@ regional Bedrock runtime host — that's the URL the agent's outbound
 calls actually carry. Internal Bedrock mirrors should use the mirror's
 host plus `--base-url`.
 
+A Bedrock Converse stream can pause with no bytes for the client. When the
+model's signed reasoning ends in a number or a key-like value that
+DefenseClaw is still checking and the model then goes quiet, nothing is sent
+until the reasoning continues or the message ends: Converse has no empty
+event the gateway could send meanwhile, and signed reasoning must reach the
+client unchanged. If your client has a stream idle timeout, set it longer
+than the model's longest pause.
+
 The same shape works for Vertex AI (`--vertex-project-id`,
 `--vertex-region`, `--vertex-auth-mode`,
 `--vertex-service-account-json-env`) and Azure OpenAI

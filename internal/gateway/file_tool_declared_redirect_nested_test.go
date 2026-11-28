@@ -12,10 +12,10 @@ import (
 	"testing"
 )
 
-// TestRVGXARGNestedDeclaredLink follows a known link target through each
+// TestFileToolDeclaredLinkThroughNestedShellAssignment follows a known link target through each
 // shell statement body. A later assignment to an ordinary file supersedes it.
-func TestRVGXARGNestedDeclaredLink(t *testing.T) {
-	home, project := rvgxSetup(t)
+func TestFileToolDeclaredLinkThroughNestedShellAssignment(t *testing.T) {
+	home, project := fileToolHookHome(t)
 	link := filepath.Join(project, "stlink")
 	ordinary := filepath.Join(project, "notes.txt")
 	type form struct {
@@ -62,15 +62,15 @@ func TestRVGXARGNestedDeclaredLink(t *testing.T) {
 		form{"export-n-existing-value", `F=%s; export -n F; printf x > "$F"`, true},
 		form{"budget-then-benign-reassignment", `export F=%s; ` + unknownConditions(6) + `F=%s; printf x > "$F"`, false},
 	)
-	for _, cell := range rvgxCells {
+	for _, cell := range fileToolPolicyCells {
 		t.Run(cell.profile+fmt.Sprint(cell.managed), func(t *testing.T) {
-			rvgxInstall(t, cell.profile)
+			installFileToolProfile(t, cell.profile)
 			for i, form := range forms {
 				command := fmt.Sprintf(form.command, link)
 				if !form.block {
 					command = fmt.Sprintf(form.command, link, ordinary)
 				}
-				_, action, _, body := rvgxVerdict(t, "claudecode", "Bash", map[string]any{"command": command}, cell.profile, cell.managed, home, project, fmt.Sprintf("gxarg-r3-%d", i))
+				_, action, _, body := fileToolHookVerdict(t, "claudecode", "Bash", map[string]any{"command": command}, cell.profile, cell.managed, home, project, fmt.Sprintf("gxarg-r3-%d", i))
 				got := strings.Split(action, "/")[0]
 				// A proven state write alerts outside the strict profile
 				// (GAP-0747 owner tiering 2026-11-15T15:20Z).

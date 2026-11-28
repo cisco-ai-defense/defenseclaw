@@ -36,6 +36,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/extproc"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/pushgrant"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 )
@@ -88,7 +90,7 @@ func (d substrateActorDirectory) ResolveActor(ctx context.Context, atespace, nam
 	case !l.Found:
 		return extproc.ActorRecord{}, true, nil
 	}
-	return extproc.ActorRecord{UID: l.UID, Profile: l.Profile, Unattended: l.Unattended}, true, nil
+	return extproc.ActorRecord{UID: l.UID, Profile: l.Profile, Unattended: l.Unattended, Person: l.Person, Principal: l.Principal}, true, nil
 }
 
 // substrateExtprocLeader is the callout's leader client: the chain check
@@ -182,6 +184,7 @@ func runSubstrateExtproc(ctx context.Context, stdout, stderr io.Writer) error {
 	} else {
 		fmt.Fprintln(stderr, "substrate-extproc: judge.url is not the gateway callout route: ask-required hosts are refused")
 	}
+	var shareRates ratelimit.ShareFunc
 	switch {
 	case o.leaderAddress != "":
 		lc, err := substrateExtprocLeader(o)
@@ -189,7 +192,13 @@ func runSubstrateExtproc(ctx context.Context, stdout, stderr io.Writer) error {
 			return err
 		}
 		opts.ChainChecker = substrateChainChecker{client: &chainstate.Client{Leader: lc}}
+		// The per-actor egress rate is the cluster's: the callout
+		// replicas count their requests through the leader (GAP-0635).
+		shareRates = (&chainstate.Client{Leader: lc}).RateShare
 		opts.UIDs = substrateActorDirectory{regs: &registry.Remote{Client: lc}}
+		// GAP-1073: a git push while pull --push-branch holds a grant goes
+		// only to the approved repository.
+		opts.PushGrants = &pushgrant.Client{Leader: lc}
 		// Each decision also reaches the OTLP destinations as log.egress.*,
 		// through the leader and a gateway replica (GAP-0453).
 		relay := &telemetryrelay.Poster{Leader: lc, Method: telemetryrelay.MethodPostEgress}
@@ -207,6 +216,7 @@ func runSubstrateExtproc(ctx context.Context, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer eng.Close()
+	eng.ShareRates(shareRates)
 
 	var tlsCfg *tls.Config
 	switch {
@@ -276,7 +286,11 @@ type substrateRelayEgress struct {
 
 func (s substrateRelayEgress) EgressEvent(ev extproc.Event) {
 	s.next.EgressEvent(ev)
-	if ev.Actor == "" || ev.Host == "" {
+	// A log.secret.injected line stays in the log only: the gateway exports
+	// decisions, and the leader reads a binding's last use from the allowed
+	// decision itself (telemetryrelay host uses, S6b). Relaying it took one
+	// queue record per bound secret per request.
+	if ev.Actor == "" || ev.Host == "" || ev.Event == extproc.EventSecretInjected {
 		return
 	}
 	s.relay.Add(telemetryrelay.Record{Kind: telemetryrelay.KindEgress, At: ev.Time,

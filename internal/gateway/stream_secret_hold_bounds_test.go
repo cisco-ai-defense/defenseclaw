@@ -37,6 +37,7 @@ type gap0429BoundCase struct {
 	name   string
 	secret gap0429Secret
 	text   string
+	piece  int // piece size; 0: gap0429BoundPieceSize
 }
 
 func gap0429BoundCases(t *testing.T) []gap0429BoundCase {
@@ -46,15 +47,21 @@ func gap0429BoundCases(t *testing.T) []gap0429BoundCase {
 	cut := key
 	cut.text, cut.end = key.text[:half], half
 	// An open block with more body than secretshape reads: base64 lines past
-	// streamSecretMaxPEM, then the END line.
+	// streamSecretMaxPEM (by 32 KiB, so a frame of 4096 bytes ends inside
+	// the open block past the cap, whichever frames a read batches), then
+	// the END line.
 	line := strings.Repeat("QUJD", 16) + "\n"
-	big := key.text[:key.body] + strings.Repeat(line, streamSecretMaxPEM/len(line)+64)
+	big := key.text[:key.body] + strings.Repeat(line, streamSecretMaxPEM/len(line)+512)
 	over := gap0429Secret{name: "over-cap", class: "pem", text: big + "-----END " + key.text[len("-----BEGIN "):key.body],
 		body: key.body, end: len(big)}
 	filler := retestFiller(1100)[:1100]
 	return []gap0429BoundCase{
-		{"ends-inside-key", cut, filler + cut.text},
-		{"block-over-cap", over, filler + over.text + "\nDone.\n"},
+		{"ends-inside-key", cut, filler + cut.text, 0},
+		// 4096-byte pieces: every frame is checked over the whole reply
+		// text, so 64 KiB in 24-byte pieces (2700 frames) took 300 s plain
+		// and in 512-byte pieces 295 s under -race, for a bound that is the
+		// same at any piece size (it is crossed by the byte count).
+		{"block-over-cap", over, filler + over.text + "\nDone.\n", 4096},
 	}
 }
 
@@ -79,7 +86,11 @@ func TestGAP0429HoldBoundsAreTheUnknownTier(t *testing.T) {
 				name := fmt.Sprintf("%s/%s/%s", path.name, c.name, tier.pack)
 				rec := httptest.NewRecorder()
 				w := &gap0429Watch{GuardrailInspector: retestInspector(), secret: c.secret.text, rec: rec}
-				log := captureStderr(t, func() { path.run(t, rec, w, tier.pack, gap0429Pieces(c.text, gap0429BoundPieceSize(), nil)) })
+				size := c.piece
+				if size == 0 {
+					size = gap0429BoundPieceSize()
+				}
+				log := captureStderr(t, func() { path.run(t, rec, w, tier.pack, gap0429Pieces(c.text, size, nil)) })
 				got := path.text(rec.Body.String())
 				released := gap0429Released(got, c.secret)
 				if !strings.Contains(log, "TRUNCATED") && !strings.Contains(log, boundedTruncatedTitle) {
@@ -298,6 +309,11 @@ func TestSecretLaneOpenStates(t *testing.T) {
 
 // TestStreamTokenOpenRegexpIsAnchored: the token check reads only the end.
 func TestStreamTokenOpenRegexpIsAnchored(t *testing.T) {
+	for _, re := range streamTokenOpenEach {
+		if !strings.HasSuffix(re.String(), ")$") {
+			t.Fatalf("%s: a token open expression must be anchored at the end", re)
+		}
+	}
 	if !strings.HasSuffix(streamTokenOpen.String(), ")$") {
 		t.Fatal("streamTokenOpen must be anchored at the end")
 	}

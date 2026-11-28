@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 )
@@ -602,7 +603,7 @@ func skipJSONRest(dec *json.Decoder, first json.Token, note *bool) bool {
 func stripReminders(in string) string {
 	in = truncateUTF8(in, 4*routeOnlyTextCap)
 	const open, closeTag = "<system-reminder>", "</system-reminder>"
-	lower := asciiLowerString(in) // same length as in, so indexes carry over
+	lower := asciifold.Lower(in) // same length as in, so indexes carry over
 	var b strings.Builder
 	for {
 		i := strings.Index(lower, open)
@@ -618,22 +619,6 @@ func stripReminders(in string) string {
 		in, lower = in[i+j+len(closeTag):], lower[i+j+len(closeTag):]
 	}
 	return strings.TrimSpace(b.String())
-}
-
-// asciiLowerString lowercases ASCII letters only, so the result has the same byte
-// length as s; s itself when it has none.
-func asciiLowerString(s string) string {
-	i := strings.IndexFunc(s, func(r rune) bool { return r >= 0x41 && r <= 0x5a })
-	if i < 0 {
-		return s
-	}
-	b := []byte(s)
-	for k := i; k < len(b); k++ {
-		if c := b[k]; c >= 0x41 && c <= 0x5a {
-			b[k] = c + 0x20
-		}
-	}
-	return string(b)
 }
 
 func capText(s string) string { return truncateUTF8(s, routeOnlyTextCap) }

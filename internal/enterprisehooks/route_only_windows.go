@@ -71,7 +71,9 @@ func restoreWindowsRouteOnlyAsTarget(conn connector.Connector, sid *windows.SID,
 // SYSTEM only, so that render is neither proven nor drift: verify returns
 // RouteOnlyUnverified and no error, and the caller reports the target as not
 // verified (route_config_unverified, never ok). As LocalSystem the same
-// failure stays drift, which the guardian repairs (GAP-1111).
+// failure stays drift, which the guardian repairs (GAP-1111). A LocalSystem
+// verify that finds the render exact returns its RouteOnlyProof, which the
+// guardian records and Setup readiness compares (GAP-1975).
 func verifyWindowsRouteOnly(conn connector.Connector, sid *windows.SID, home, dataDir string, route *connector.RouteOnlySetup) (string, error) {
 	unverified := false
 	read := func(path string) ([]byte, error) {
@@ -92,7 +94,26 @@ func verifyWindowsRouteOnly(conn connector.Connector, sid *windows.SID, home, da
 		}
 		return nil
 	})
+	if err == nil && status == "" && windowsRouteOnlyVerifierIsLocalSystem() {
+		status = RouteOnlyProof(route)
+	}
 	return status, err
+}
+
+// windowsRouteOnlyInstalledProof reads a render an install just wrote back
+// as the account (verifyWindowsRouteOnly) and returns its RouteOnlyProof, so
+// the guardian records a target it rendered as it records one it verified.
+// Only a LocalSystem read-back gives one; a read or drift failure gives none
+// and fails nothing here: the next reconcile verifies the render again.
+func windowsRouteOnlyInstalledProof(conn connector.Connector, sid *windows.SID, home, dataDir string, route *connector.RouteOnlySetup) string {
+	if route == nil || !windowsRouteOnlyVerifierIsLocalSystem() {
+		return ""
+	}
+	status, err := verifyWindowsRouteOnly(conn, sid, home, dataDir, route)
+	if err != nil || !strings.HasPrefix(status, routeOnlyProofPrefix) {
+		return ""
+	}
+	return status
 }
 
 // windowsRouteOnlyVerifierIsLocalSystem reports whether verify runs as

@@ -1,0 +1,1332 @@
+[
+  {
+    "file": "a",
+    "id": "C01 -MFile::Copy copy",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "C02 -MFile::Copy move",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "C03 use File::Copy copy",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "C04 File::Copy::copy",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "C05 File::Copy=cp",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "C06 rmtree .claude",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "C07 remove_tree .claude",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F01 __END__ data",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F02 POD",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F03 heredoc body",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F04 q{} holds code",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F05 m{} holds code",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F06 comment",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F07 string",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F08 qw names",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F10 rename .bak away",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F11 symlink from hook",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F12 sysopen RDONLY",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F13 2arg no mode read",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F14 +< other file",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F16 &unlink user sub",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F17 die message",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F18 -ne grep rename",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F20 -e filetest",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F21 unlink tmp",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F22 rename local files",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F23 sprintf with open",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F24 hash key unlink",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F25 truncate other",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F26 sysopen other wr",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F27 tr### then print",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F28 q() rename text",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F29 open dup STDERR",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "F30 link read side",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "I01 -i.bak -pe",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "I02 -pi.bak -e",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "I03 -0777 -pi -e",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "I04 -lpi -e",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "I05 -ni -e",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "I06 -i after -e",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "I07 BEGIN $^I",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "I08 -i -p -e",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "I09 -Mstrict -pi -e",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "K01 q## then unlink",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "K02 regex dquote then unlink",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "K03 regex hash then unlink",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "K04 q## then 3arg open",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "K05 comment nl unlink",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "R01 rename space paren",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "R02 rename array",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "R03 rename nested paren",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "R04 rename or die",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "R05 rename trailing comma",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "R06 truncate trailing comma",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "R07 symlink trailing comma",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "R08 &CORE::rename",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "S01 system list rm",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "S02 system string rm",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "S03 backticks rm",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "S04 qx rm",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "S05 exec cp",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "S06 pipe tee 3arg",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "S07 pipe tee 2arg",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U01 0*unlink",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U02 1&unlink",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U02b 1%rename",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U04 unlink nl paren",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U05 open nl paren",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U05b open nl paren +<",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U06 unlink nl string",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U07 unlink comment nl",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U08 rename multiline",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U08b rename nl paren",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U09 sysopen numeric 1",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U10 sysopen numeric 01|01000",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U11 multiple -e",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "U12 heredoc stdin",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "U13 perl - heredoc",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "U14 echo pipe perl",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "U15 IO::File new w",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "U16 ./ path",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U17 ../proj path",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U18 settings.local.json",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U19 abs user unlink",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U19b abs user rename",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U20 single-quoted perl str",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U21 2arg sq",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U22 env perl",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U23 /usr/bin/perl",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U24 perl5.38",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U25 bash -c perl",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U26 -E unlink",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U27 -we",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U28 -le truncate",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U29 -MFcntl sysopen no paren",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U30 link onto",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U31 unlink glob()",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "U32 unlink <glob>",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "U33 unlink spaces",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U34 3arg || die",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U35 2arg spaces >>",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U36 CORE::rename",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U37 unlink then semicolon-less nl",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U38 if block unlink",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U39 do block unlink",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "U40 map unlink",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "X01 q{} 3arg open",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "X02 qq{} unlink",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "X03 q() unlink paren",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "X04 qw unlink",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "X05 concat 2arg open",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "X06 concat path 3arg",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "X07 concat unlink",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "X08 interp var unlink",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "a",
+    "id": "X09 ENV HOME 3arg open",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "X10 ENV HOME unlink",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "X11 ENV HOME 2arg open",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "X12 bareword 3arg noparen",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "X13 bareword 3arg paren",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "a",
+    "id": "X14 bareword +< noparen",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "B01 sysopen RDONLY|NOFOLLOW",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "b",
+    "id": "B02 sysopen 00",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "b",
+    "id": "B03 heredoc text",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "b",
+    "id": "B04 pod text",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "b",
+    "id": "B05 format text",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "b",
+    "id": "B06 bare regex rename text",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "b",
+    "id": "B07 => key ctl",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "b",
+    "id": "B08 method unlink ctl",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "b",
+    "id": "B09 qq text ctl",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "b",
+    "id": "B10 mid-line __END__",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "b",
+    "id": "B11 sysopen RDONLY ctl",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "b",
+    "id": "B12 s{}{} no e ctl",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "b",
+    "id": "B13 sysopen RDONLY()",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "b",
+    "id": "B14 and &unlink user sub",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "b",
+    "id": "B15 open read 2arg ctl",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "b",
+    "id": "B16 -n print rename text",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "b",
+    "id": "N01 hashkey y",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N02 hashkey s",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N03 arrow key m",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N04 filetest -s",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N05 split \\s+ regex",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N06 method named s",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N07 q #comment delim",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N08 s{}NL{}e",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N09 heredoc __END__",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N10 heredoc dquote",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N11 pod __END__",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N12 format dquote",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "b",
+    "id": "N13 utf8 sub eq",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N14 hash elem *unlink",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N15 hash elem &unlink(",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N16 q => key ctl",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N17 hashkey q",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N18 q{} escaped ctl",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N19 q{} nested ctl",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N20 s{}{}e ctl",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N21 CORE::GLOBAL ctl",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N22 ref CORE::rename",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "b",
+    "id": "N23 __END__ in string ctl",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N24 CORE::rename ctl",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N25 &CORE::rename ctl",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N26 hashkey y then open3",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N27 -s then open3",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N28 s{}#c NL{}e",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N29 rename q{a,b} arg",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "b",
+    "id": "N30 y/// tr then unlink ctl",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "C01 custom sub",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "C02 use constant",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "C03 amp sub",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "C04 spoof O_NOFOLLOW",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "E01 mode var",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "E02 mode concat",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "E03 read then write same line",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "E04 two arg plus less",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "E05 layer raw write",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "E06 heredoc after reads",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "E07 end marker after reads",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "d",
+    "id": "E08 trailing write after 600 reads",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "E09 middle write in 600 reads",
+    "kind": "w",
+    "rel": "LB",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "E10 newline boundary",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "E11 comment boundary",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "E12 package flag",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "E13 posix flag",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "E14 hash flag",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "AA"
+  },
+  {
+    "file": "d",
+    "id": "E15 hex flag",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "E16 numeric expr",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "E17 variable flag",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "E18 default arithmetic",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "E19 sysopen four args",
+    "kind": "w",
+    "rel": "AA",
+    "spec": "LB"
+  },
+  {
+    "file": "d",
+    "id": "E20 read nofollow",
+    "kind": "b",
+    "rel": "AA",
+    "spec": "AA"
+  }
+]

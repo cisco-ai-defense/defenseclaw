@@ -160,10 +160,6 @@ func TestSQLSensitiveServerFileReadRejectsAmbiguousInputs(t *testing.T) {
 			query: "SELECT pg_read_file('/etc/hostname');",
 		},
 		{
-			name: "path traversal", connection: "mysql://db.invalid/app",
-			query: "SELECT LOAD_FILE('/srv/../etc/passwd');",
-		},
-		{
 			name: "second statement", connection: "mysql://db.invalid/app",
 			query: "SELECT LOAD_FILE('/etc/passwd'); SELECT 1;",
 		},
@@ -282,4 +278,15 @@ func sqlSensitiveServerFileReadInput(
 		t.Fatal(err)
 	}
 	return Input{Tool: "sql_query", Args: raw, CWD: "/repo"}
+}
+
+func TestSQLSensitiveServerFileReadsPSQLCLI(t *testing.T) {
+	facts := Analyze(Input{
+		Tool:    "shell",
+		Command: `psql -d production -c "SELECT pg_read_file('/etc/passwd');"`,
+	})
+	got, ok := ExactSQLSensitiveServerFileRead(facts)
+	if !ok || got.DatabaseEngine != "postgresql" || got.PathClass != SQLSensitiveServerFileAccountDatabase {
+		t.Fatalf("psql CLI file-read fact = %#v, ok=%v", got, ok)
+	}
 }

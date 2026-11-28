@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"maps"
@@ -17,8 +18,11 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
+	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
@@ -152,7 +156,7 @@ func trustedLauncherRedirectAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 
 func trustedCMDPrivateKeyRead(input actionfacts.Input) bool {
 	body, ok := trustedCMDBody(input)
-	if !ok || !strings.HasPrefix(strings.ToLower(body), "type ") {
+	if !ok || !strings.HasPrefix(asciifold.Lower(body), "type ") {
 		return false
 	}
 	operand := strings.TrimSpace(body[len("type "):])
@@ -182,15 +186,15 @@ func appendTrustedCMDPrivateKeyReadFinding(
 	if !ok {
 		return findings
 	}
-	enforcement := findingEnforcementDetectionOnly
+	enforcement := recordProof
 	if request.EnforcementCapable {
-		enforcement = findingEnforcementAllowed
+		enforcement = enforcingProof
 	}
 	return append(findings, adjustConfidence(input.Tool, RuleFinding{
 		RuleID: rule.ID, Title: rule.Title, Severity: rule.Severity,
 		Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
 		Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
-		enforcement: enforcement,
+		Proof: enforcement,
 	}))
 }
 
@@ -1061,11 +1065,213 @@ func trustedSymlinkName(input actionfacts.Input, name string) string {
 	return filepath.Clean(name)
 }
 
+// copyModeWholeCallByName reports a copy-mode actor's whole call (not one of
+// its statements, twins or host readings) that runs in a guest folder and
+// that this gateway judges in no folder (substrate-1 GAP-0922). A statement
+// after a cd keeps the call's guest folder, not its own, and the whole
+// call's decision already follows the cd.
+//
+// The reading is a second decision, so it runs only for a call whose words
+// may name the guest's SSH folder (copyModeCallMayNameSSHFolder): the other
+// calls kept their cost (substrate-1 GAP-0999).
+func copyModeWholeCallByName(request trustedActionRequest, input actionfacts.Input, home string) bool {
+	return request.byNameGuestCWD != "" && !request.ProtectedHomeHook &&
+		!request.simpleCommandPass && !request.readingTwin && request.hostTwinDepth == 0 &&
+		input.Command != "" && !filepath.IsAbs(input.CWD) &&
+		copyModeCallMayNameSSHFolder(input.Command, request.byNameGuestCWD, home)
+}
+
+// copyModeByNameGuestCWD is the folder the by-name reading judges a
+// copy-mode actor's call in: a sandbox hook request with no folder on this
+// host (its Input.CWD is no host path). It is the call's guest folder
+// (SandboxGuestCWD), or the guest home when the hook client sent no
+// absolute folder, as the actor's shell starts there (substrate-1
+// GAP-0996). An explicitly supplied workdir the guest resolver cannot
+// place stays unresolved rather than using that fallback (GAP-1024).
+// Every hook path sets SandboxGuestCWD; only Claude Code and
+// Codex also set SkipLocalFilesystemResolution, which the reading needed
+// before, so Amp, OpenCode and Cursor actors never had it (GAP-0993).
+func copyModeByNameGuestCWD(ctx context.Context, request trustedActionRequest) string {
+	if !isSandboxHookRequest(ctx) || request.ProtectedHomeHook || request.guestToolCWDUnresolved || filepath.IsAbs(request.Input.CWD) {
+		return ""
+	}
+	if cwd := request.SandboxGuestCWD; path.IsAbs(cwd) {
+		return cwd
+	}
+	if home := request.Input.ActiveHome; path.IsAbs(home) && !strings.ContainsAny(home, "\\\x00") {
+		return path.Clean(home)
+	}
+	return sandboxauth.SandboxHome
+}
+
+// copyModeCallMayNameSSHFolder is a lexical gate on the by-name reading
+// (GAP-0999): it holds for a call that may name home's SSH folder or a place
+// in it, the only target whose finding the reading adds
+// (appendTrustedHomeResolvedSSHKeyWriteFinding). The gate is there for speed
+// only, so it says no only where the reading, which follows bash, finds
+// nothing (TestFX0999GateNeverSkipsAByNameDecision); anything it cannot
+// read holds. Quotes and backslashes are dropped first, so ~/'.ssh',
+// ~/.s"sh" and .\ssh still name the folder. It holds for:
+//   - a call in the folder itself;
+//   - the folder's or the keys file's name;
+//   - any expansion or a name built at run time: $x, ${x:-s}, ${HOME},
+//     $(...), $'...', `...`, printf, eval, a decoder. x=s; tar cz ~/.s${x}h,
+//     D=~/.s; tar cz ${D}sh and sh -c "x=s; tar cz ~/.s\${x}h" passed the
+//     old gate, and the actor allowed what the laptop blocks
+//     (substrate-1 GAP-1022);
+//   - a nested shell, whose words its shell reads again;
+//   - a pattern in a name that starts with a dot (~/.ss?, ~/.s*, ~/.[s]sh,
+//     ~/.*), a brace expansion ({.s,}sh), and a pattern right under a
+//     folder that may be home (~/*, ./?ssh, /*);
+//   - any pattern in a call that may turn on dotglob, GLOBIGNORE or globdots
+//     (shopt -s dotglob; tar cz *, GAP-1022).
+//
+// Without dotglob bash's * and ? never match a leading dot, so src/* names
+// no SSH folder and passes no second decision.
+func copyModeCallMayNameSSHFolder(command, cwd, home string) bool {
+	if pathWithin(cwd, path.Join(home, ".ssh")) {
+		return true
+	}
+	text := strings.ToLower(strings.Map(func(r rune) rune {
+		switch r {
+		case '\'', '"', '\\':
+			return -1
+		}
+		return r
+	}, command))
+	for _, word := range copyModeRunTimeNames {
+		if strings.Contains(text, word) {
+			return true
+		}
+	}
+	// A bracket class can spell a leading dot without spelling the folder's
+	// name literally. Let the by-name decision settle these uncommon calls.
+	if strings.Contains(text, "[") {
+		return true
+	}
+	// The by-name decision also sees inherited shell options. If they can
+	// expose leading-dot names, no bare pattern is safe to skip here.
+	if strings.ContainsAny(text, "*?") && (hookpaths.CommandMayDotglob(command) ||
+		strings.Contains(os.Getenv("BASHOPTS"), "dotglob") || os.Getenv("GLOBIGNORE") != "") {
+		return true
+	}
+	homeBase := strings.ToLower(path.Base(home))
+	component := 0 // where the path component before text[i] starts
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		next := byte(0)
+		if i+1 < len(text) {
+			next = text[i+1]
+		}
+		switch {
+		case c == '.':
+			j := i + 1
+			for j < len(text) && j < i+3 && text[j] == 's' {
+				j++
+			}
+			if j < len(text) && strings.IndexByte("?*[{", text[j]) >= 0 {
+				return true
+			}
+		case (c == '/' || c == '~') && strings.IndexByte("?*[", next) >= 0 && next != 0:
+			if c == '~' {
+				return true
+			}
+			switch folder := text[component:i]; {
+			case folder == "", folder == ".", folder == "..", folder == homeBase, folder[0] == '~':
+				return true
+			}
+		case c == '{' && copyModeBraceExpansion(text[i+1:]):
+			return true
+		}
+		if c == '/' || strings.IndexByte(copyModeWordBreaks, c) >= 0 {
+			component = i + 1
+		}
+	}
+	return copyModeNestedShell(text)
+}
+
+// copyModeRunTimeNames are the gate's words for a name the call may build at
+// run time, or the folder's own (lowercased, quotes dropped). One spec
+// string: $ is every expansion.
+var copyModeRunTimeNames = strings.Fields("ssh authorized $ ` printf eval base64 xxd")
+
+// copyModeWordBreaks end a word or a path component for the gate.
+const copyModeWordBreaks = " \t\n;&|()<>=:,{}"
+
+// copyModeShells are the shells whose -c or script words are read again.
+var copyModeShells = strings.Fields("sh bash zsh dash ksh mksh ash yash fish busybox pwsh powershell")
+
+// copyModeBraceExpansion reports text after a { that bash brace-expands:
+// a word that is not empty, with a comma or .. before its }.
+func copyModeBraceExpansion(text string) bool {
+	if text == "" || strings.IndexByte(" \t\n}", text[0]) >= 0 {
+		return false
+	}
+	for i := 0; i < len(text) && text[i] != '}'; i++ {
+		if text[i] == ',' || text[i] == '.' && i+1 < len(text) && text[i+1] == '.' {
+			return true
+		}
+	}
+	return false
+}
+
+// copyModeNestedShell reports a word of text that runs a shell (sh,
+// /bin/bash, busybox): the words it is given are read again. A shell whose
+// statement is only a here-string of one word (bash <<< true) reads that
+// word, which the gate has read in the text already, and nothing else: no
+// file, no other input, no option. It made the by-name reading run on every
+// 8 KB call that opens with bash <<< 'true' (rel-1-0-10:GAP-2249).
+func copyModeNestedShell(text string) bool {
+	for start := 0; start < len(text); {
+		end := start
+		for end < len(text) && (text[end] >= 'a' && text[end] <= 'z' || text[end] >= '0' && text[end] <= '9' ||
+			strings.IndexByte("_.+-/", text[end]) >= 0) {
+			end++
+		}
+		if end > start {
+			word := text[start:end]
+			if slices.Contains(copyModeShells, word[strings.LastIndexByte(word, '/')+1:]) && !copyModeLiteralHereString(text[end:]) {
+				return true
+			}
+			start = end
+			continue
+		}
+		start++
+	}
+	return false
+}
+
+// copyModeLiteralHereString reports text after a shell word that is only a
+// here-string of one word up to the end of its statement: <<< w and then a
+// newline, ;, &, |, ) or the end. Any other word or redirection (a script
+// file, -s, < file, 0<f) is not. It is sound because the gate drops quotes
+// and backslashes before it reads (copyModeCallMayNameSSHFolder) and reads
+// every later line itself: a change that stops that strip, or a by-name
+// decision that follows fish or pwsh escapes, must read this exception again.
+func copyModeLiteralHereString(text string) bool {
+	text = strings.TrimLeft(text, " \t")
+	rest, ok := strings.CutPrefix(text, "<<<")
+	if !ok {
+		return false
+	}
+	rest = strings.TrimLeft(rest, " \t")
+	word := 0
+	for word < len(rest) && strings.IndexByte(" \t\n;&|()<>", rest[word]) < 0 {
+		word++
+	}
+	if word == 0 {
+		return false
+	}
+	rest = strings.TrimLeft(rest[word:], " \t")
+	return rest == "" || strings.IndexByte("\n;&|)", rest[0]) >= 0
+}
+
 func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, facts actionfacts.Facts) bool {
 	// The link proof places the links of the call by the hook's folder (its own
 	// walk of the command); a write after a cd is judged by the other readers
 	// at the folder it reaches (actionfacts working_folder.go), so a link
 	// operation this walk cannot place never makes it an unproven link write.
+	ownFacts := facts
 	facts = facts.AtHookFolder()
 	if command, ok := trustedBashCommandInput(request.Input); ok &&
 		trustedNoDereferenceTouchSafe(command, request.Input.CWD, facts.ActiveHome,
@@ -1119,6 +1325,30 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			*request.resolvedTarget = true
 		}
 		return true
+	}
+	if command, ok := trustedBashCommandInput(request.Input); ok &&
+		request.guestProtectedWriteCommand != "" && command == request.guestProtectedWriteCommand {
+		// A Substrate actor's kit ran this decision on this command in the
+		// actor's file system, which this gateway cannot open, and found a
+		// protected target (a link to the actor's authorized_keys): the
+		// managed hook client's ActionDecisionKey proof below, made where
+		// the links are (substrate-1 GAP-0471).
+		if request.guestWriteClaimOnly != nil {
+			// Whether this gateway finds the write without the claim: only a
+			// write the claim alone holds may be read as an own SSH folder
+			// copy through the kit's places (substrate-1 GAP-0549).
+			own := request
+			own.guestProtectedWriteCommand, own.guestWriteClaimOnly = "", nil
+			// The by-name reading in the guest folder (copyModeWholeCallByName)
+			// sees no more of the actor than the claim does: it cannot place
+			// the copy's destination either, so the kit's places still decide
+			// (substrate-1 GAP-0922).
+			own.SandboxGuestCWD, own.byNameGuestCWD, own.guestByNameOnly = "", "", nil
+			own.resolvedTarget, own.unprovenTarget, own.unresolvedTarget, own.overBudgetOmission, own.nonWriteMention =
+				nil, nil, nil, nil, nil
+			*request.guestWriteClaimOnly = !trustedExistingAuthorizedKeysSymlinkWrite(own, facts)
+		}
+		return confirmed()
 	}
 	// unproven answers true for a write whose target is unknown, not a
 	// protected file: class (hookpaths.UnprovenWriteTitle) names why. The
@@ -1246,6 +1476,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 	}
 	cannotResolveLocally := request.ProtectedHomeHook || request.SkipLocalFilesystemResolution
+	// Judge the Linux guest's root and same-command links in its own
+	// namespace on every POSIX gateway host.
+	guestRootProof := cannotResolveLocally && request.sandboxGuest && runtime.GOOS != "windows"
 	if !request.ProtectedHomeHook {
 		// Only the managed hook client walks the user's home for the gateway.
 		opaqueFacts = nil
@@ -1253,6 +1486,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// The links the command creates, read as the hook reads them; set once
 	// the command is known, before the first writeTarget call.
 	var links hookpaths.Links
+	var guestAliasLinks hookpaths.Links
 	var safeRedirects []hookpaths.RedirectOccurrence
 	// A plain mv onto an existing link to a file replaces the link entry
 	// and writes neither file (GAP-2559); a gateway that reads the file
@@ -1298,8 +1532,65 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		return "", false
 	}
-	writeTarget := func(target string, safeRedirect, ownCopy bool) bool {
+	// The guest uses case-sensitive names. A link created in the same shell
+	// command can place a relative redirect even when the event cwd is not
+	// attested: its absolute link text is independent of that cwd.
+	guestProtected := func(path string) bool {
+		path = hookpaths.GuestOwnRootPath(path)
+		if !filepath.IsAbs(path) {
+			return false
+		}
+		path = filepath.Clean(path)
+		for _, protected := range protectedPaths {
+			if path == protected {
+				return true
+			}
+		}
+		return false
+	}
+	// The same-command link text is a write spelling too. Keep its raw
+	// process-link suffix until the proof decides whether it is knowable.
+	linkNameUnproved := func(path string, guest bool) bool {
+		base := filepath.Base(path)
+		protectedName := slices.Contains(hookpaths.AuthorizedKeysFiles[:], base) ||
+			filepath.Base(filepath.Dir(path)) == ".ssh" && slices.Contains(hookpaths.SSHControlFiles[:], base)
+		return protectedName && hookpaths.ProcessLinkWriteUnproved(path, guest)
+	}
+	guestAliases := func(path string) []string {
+		if filepath.IsAbs(request.SandboxGuestCWD) && !filepath.IsAbs(path) {
+			path = hookpaths.OperandPath(path, request.SandboxGuestCWD)
+		}
+		return guestAliasLinks.GuestAliasTargets(path, false)
+	}
+	guestAliasProtected := func(path string) bool {
+		for _, alias := range guestAliases(path) {
+			folded := hookpaths.GuestOwnRootPath(alias)
+			if guestProtected(folded) || linkNameUnproved(folded, true) {
+				return true
+			}
+		}
+		return false
+	}
+	guestAliasUnproved := func(path string, guest bool) bool {
+		for _, alias := range guestAliases(path) {
+			if linkNameUnproved(hookpaths.GuestOwnRootPath(alias), guest) {
+				return true
+			}
+		}
+		return false
+	}
+	writeTarget := func(target string, safeRedirect, ownCopy, absoluteRedirect bool) bool {
 		if !filepath.IsAbs(target) && (target == "" || !filepath.IsAbs(clientCWD)) {
+			if guestRootProof && filepath.IsAbs(request.SandboxGuestCWD) &&
+				guestProtected(request.SandboxGuestCWD+"/"+target) {
+				return confirmed()
+			}
+			if guestRootProof && guestAliasProtected(target) {
+				return confirmed()
+			}
+			if cannotResolveLocally && request.sandboxGuest && guestAliasUnproved(target, true) {
+				return unproven(hookpaths.UnprovenTargetUnresolved, target)
+			}
 			// No directory places this operand: the gateway cannot see the
 			// caller's cwd and the client evidence that would carry it is
 			// incomplete or was rejected as malformed. Such evidence never
@@ -1328,6 +1619,16 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				}
 			}
 		}
+		// A sandbox guest opens its own cwd link at the guest cwd attested
+		// for this call, never at the host-side one: the operand names the
+		// file below it, as its plain spelling does (rel-1-0-10:GAP-2265).
+		// The command's links name the operand as written.
+		written := target
+		if request.sandboxGuest && filepath.IsAbs(request.SandboxGuestCWD) {
+			if placed, ok := actionfacts.ProcessCWDLinkSpelling(target, request.SandboxGuestCWD); ok {
+				target = placed
+			}
+		}
 		// Only the event cwd can interpret the process-dependent alias.
 		if hookpaths.ProcCWDWriteOperand(target) {
 			if !strings.HasPrefix(target, "/proc/self/cwd/") {
@@ -1351,6 +1652,52 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if isProtected(target) {
 			return confirmed()
 		}
+		if guestRootProof && (guestProtected(target) || guestAliasProtected(target)) {
+			return confirmed()
+		}
+		// A guest write spelled through its own cwd link that the placed
+		// reading does not prove protected keeps the reading of the link as
+		// written: where this gateway cannot place the link itself the write
+		// stays unknown on every gateway OS, as before the placement
+		// (rel-1-0-10:GAP-2265 parity). The placement only adds a proof.
+		if written != target && hookpaths.ProcCWDWriteOperand(written) {
+			if !strings.HasPrefix(written, "/proc/self/cwd/") {
+				return unproven(hookpaths.UnprovenTargetUnresolved, written)
+			}
+			if resolved, present := request.ResolvedWriteTargets[written]; present {
+				if resolved == "" {
+					return unproven(hookpaths.UnprovenTargetUnresolved, written)
+				}
+				if isProtected(resolved) {
+					return confirmed()
+				}
+			} else if cannotResolveLocally {
+				return unproven(hookpaths.UnprovenTargetUnresolved, written)
+			} else if _, ok := hookpaths.ResolveProcSelfCWDTarget(written, clientCWD); !ok {
+				return unproven(hookpaths.UnprovenTargetUnresolved, written)
+			}
+		}
+		if runtime.GOOS == "linux" && guestAliasUnproved(target, cannotResolveLocally && request.sandboxGuest) {
+			return unproven(hookpaths.UnprovenTargetUnresolved, target)
+		}
+		// A key file name below another process's root, cwd, exe or
+		// descriptor link is resolved in that process's tree. Unless this
+		// host proves the link (never for a sandbox guest, whose processes
+		// are not this host's), it may be the user's key file and is
+		// unknown, as a write that names one after a directory change the
+		// walk cannot place (rel-1-0-10:GAP-2227). A macOS or Windows laptop
+		// has no such /proc link to write through and keeps its reading.
+		if guest := cannotResolveLocally && request.sandboxGuest; guest || runtime.GOOS == "linux" {
+			operand := target
+			if guest {
+				operand = hookpaths.GuestOwnRootPath(target)
+			}
+			// SSH control names are protected only inside .ssh. An
+			// ordinary config, rc or environment elsewhere stays ordinary.
+			if linkNameUnproved(operand, guest) {
+				return unproven(hookpaths.UnprovenTargetUnresolved, target)
+			}
+		}
 		if moved := hookpaths.PlainMovePath(target); movedOntoLinks[moved] || windowsMovedOntoLink(moved) {
 			parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(moved))
 			if !ok {
@@ -1372,7 +1719,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// so the device is read without following links. A managed gateway
 		// cannot walk the user's home (ProtectHome); the hook client's walk of
 		// the same operand replaces only that missing view (GAP-0278).
-		if !safeRedirect && links.OpaqueTargetWithFacts(target, ownCopy, opaqueFacts) {
+		if !safeRedirect && (links.OpaqueTargetWithFacts(target, ownCopy, opaqueFacts) ||
+			written != target && links.OpaqueTargetWithFacts(written, ownCopy, opaqueFacts)) &&
+			(!absoluteRedirect || !links.AbsoluteRedirectOutsideCDScopes(target, opaqueFacts)) {
 			if info, err := laneLstat(target); err != nil || info.Mode()&os.ModeCharDevice == 0 {
 				return unproven(hookpaths.UnprovenLinkUnread, target)
 			}
@@ -1412,7 +1761,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 						return false
 					}
 					unresolved := !windowsLocationOrdinaryWriteTarget(target)
-					if !unresolved {
+					if !unresolved || powerShellReadingPlacesEveryWrite(request, ownFacts, target, isProtected) {
+						// A Copilot powershell call that places this write in
+						// ordinary files only (rel-1-0-10:GAP-1157).
 						return false
 					}
 					if request.unresolvedTarget != nil {
@@ -1430,7 +1781,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 					// operand: the plain ones are allowed in the others. The
 					// statement-bounded reading leaves the omitted operands
 					// to the reading judged before it (GAP-1069).
-					if request.statementBounded || omittedPlain[target] && !request.StrictPolicy {
+					if request.statementBounded || omittedPlain[target] && !request.tierEnforces(tierGateStrict) {
 						return false
 					}
 					omitted := !windowsLocationOrdinaryWriteTarget(target)
@@ -1555,14 +1906,48 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if input.DialectHint != "" {
 		decision = request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
 	}
+	// mentionCWD and readMentions are the folder and the reads of the
+	// mention checks below: the decision's own.
+	mentionCWD, readMentions := input.CWD, func(read func()) { read() }
+	if decision == "" && copyModeWholeCallByName(request, input, facts.ActiveHome) {
+		// A copy-mode actor's call has no folder on this host: its files
+		// stay in the actor. The laptop's decision reads the call's words
+		// by name in the hook's folder and says protected for tar cz
+		// ~/.ssh, cd .ssh && tar cz . or a cd chain into ~/.ssh; in no
+		// folder it reads nothing, so the actor allowed what the laptop
+		// blocks (substrate-1 GAP-0922). Only this decision, and the
+		// mention checks of its verdict, run in the guest's folder, by name
+		// alone: no read reaches this host's file system
+		// (fixturefs.Unread), and the rest of the call stays in no folder.
+		// The first fix moved the whole proof to the guest folder: it
+		// opened host files and blocked calls the laptop allows.
+		guestCWD := request.byNameGuestCWD
+		posixShell := trustedPOSIXShellCall(input, facts)
+		readMentions = fixturefs.Unread
+		readMentions(func() {
+			// One memo for every by-name decision of the call, apart from
+			// the host's answers; a repeat is answered once (FIX-F3PERF).
+			decision = request.targetMemo.UnreadCommandDecision(input.Command, guestCWD, facts.ActiveHome, input.DialectHint, globFacts, posixShell)
+		})
+		if decision != "" {
+			mentionCWD = guestCWD
+			if request.guestByNameOnly != nil {
+				*request.guestByNameOnly = true
+			}
+		}
+	}
 	if decision != "" {
 		if request.nonWriteMention != nil && trustedShellCommandInput(request.Input) {
-			readsOnly := hookpaths.ActionMentionsNoWriteRole(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
+			var readsOnly, noKnownWrite bool
+			readMentions(func() {
+				readsOnly = hookpaths.ActionMentionsNoWriteRole(input.Command, mentionCWD, facts.ActiveHome, input.DialectHint, globFacts)
+				noKnownWrite = !readsOnly && request.unknownMention != nil &&
+					hookpaths.ActionMentionsNoKnownWrite(input.Command, mentionCWD, facts.ActiveHome, input.DialectHint, globFacts)
+			})
 			switch {
-			case readsOnly && !request.StrictPolicy && !request.ManagedInstall && !request.ProtectedHomeHook:
+			case readsOnly && !request.tierEnforces(tierGateManaged) && !request.ProtectedHomeHook:
 				*request.nonWriteMention = true
-			case !readsOnly && request.unknownMention != nil &&
-				hookpaths.ActionMentionsNoKnownWrite(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) &&
+			case noKnownWrite &&
 				(!request.ProtectedHomeHook || clientMapClearsKeyFiles(clientTargets, facts.ActiveHome)):
 				// The unknown tier (rel-1-0-10:GAP-0843, ONE BOUND RULE): the
 				// shared unknown-tier finding decides, in every pack. A call
@@ -1584,12 +1969,69 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// the user's hook ran the same decision on the same command and
 		// found a protected target, as a per-user gateway does (GAP-2514,
 		// GAP-2515).
+		//
+		// The client carries that decision for every call with a word the
+		// shell expands (rel-1-0-10:GAP-0415), so it also reaches a call
+		// whose keys file is named only beside a program the scan has no
+		// write model of: that call, and each of its statements, is held at
+		// the unknown tier, as a per-user gateway holds it (GAP-0843, the
+		// branch above; clientCarryIsUnknownMention).
+		if request.nonWriteMention != nil && request.unknownMention != nil {
+			whole := input
+			if request.simpleCommandPass && request.parentPatch != nil && request.parentPatch.Command != "" {
+				whole = *request.parentPatch
+				if !filepath.IsAbs(whole.CWD) {
+					whole.CWD = input.CWD
+				}
+			}
+			if clientCarryIsUnknownMention(request, clientTargets, whole.Command, whole.CWD, facts.ActiveHome, whole.DialectHint) {
+				*request.unknownMention = true
+			}
+		}
 		return confirmed()
 	}
 	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {
 		return true
 	}
 	links = hookpaths.CommandLinksWithFacts(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
+	guestAliasLinks = links
+	if request.sandboxGuest && filepath.IsAbs(request.SandboxGuestCWD) {
+		// The host-side cwd can be empty or name a mount; a link the
+		// Linux guest creates need not be visible in the host-side walk.
+		// Read its bounded command in the authenticated guest namespace.
+		guestAliasLinks = hookpaths.GuestCommandLinksWithFacts(request.Input.Tool, input.Command,
+			request.SandboxGuestCWD, facts.ActiveHome, request.ResolvedWriteTargets)
+	}
+	if request.sandboxGuest && guestAliasLinks.HasAliases() && filepath.IsAbs(request.SandboxGuestCWD) {
+		// The ordinary host-side write readers may have no cwd for a
+		// sandbox actor. Only a same-command alias is judged here, using
+		// the guest cwd attested for this call.
+		writes, _, _ := hookpaths.ShellWriteOperands(input.Command, request.SandboxGuestCWD, facts.ActiveHome)
+		writes = append(writes, hookpaths.LiteralWriteOperands(input.Command, request.SandboxGuestCWD, facts.ActiveHome)...)
+		// ShellWriteOperands keeps the initial cwd for a redirect after cd.
+		// Place those writes in the guest before checking a link made there.
+		for _, placed := range hookpaths.GuestStaticDirectoryWriteOperands(
+			input.Command, request.SandboxGuestCWD, facts.ActiveHome) {
+			writes = append(writes, placed.Path)
+		}
+		for _, write := range writes {
+			if guestAliasProtected(write) {
+				return confirmed()
+			}
+		}
+	}
+	if request.sandboxGuest && filepath.IsAbs(request.SandboxGuestCWD) && request.SandboxGuestCWD != input.CWD &&
+		strings.Contains(input.Command, "/proc/") && strings.Contains(input.Command, "cwd") {
+		// A writer operand through the guest's own cwd link names the file
+		// below the guest cwd attested for this call, which the host-side
+		// readers below cannot place: read the writers once more in that
+		// cwd. Only a protected target counts (rel-1-0-10:GAP-2265).
+		for _, write := range hookpaths.LiteralWriteOperands(input.Command, request.SandboxGuestCWD, facts.ActiveHome) {
+			if guestProtected(write) {
+				return confirmed()
+			}
+		}
+	}
 	safeRedirects = hookpaths.SafeShellRedirectOccurrencesWithFacts(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
 	replacedBySed := hookpaths.SedReplacedOperands(input.Command, input.CWD, facts.ActiveHome)
 	// The claudecode scoping above drops the client's reading of the
@@ -1613,6 +2055,19 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			directoryFacts[hookpaths.DirectoryFactPrefix+input.CWD] = start
 		}
 	}
+	if guestRootProof && filepath.IsAbs(request.SandboxGuestCWD) &&
+		strings.Contains(input.Command, "/proc/") && strings.Contains(input.Command, "cd ") {
+		// The host cwd is not the guest cwd. A concrete write after a
+		// guest directory change can still be proved protected; an
+		// unknown eval keeps the existing host-side answer.
+		placed := hookpaths.GuestStaticDirectoryWriteOperands(
+			input.Command, request.SandboxGuestCWD, facts.ActiveHome)
+		for _, write := range placed {
+			if guestProtected(write.Path) || guestAliasProtected(write.Path) {
+				return confirmed()
+			}
+		}
+	}
 	var operands []string
 	if input.Command != "" {
 		var dynamic bool
@@ -1634,7 +2089,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		for i, operand := range operands {
 			safe := i < len(safeRedirects) && safeRedirects[i].Safe
-			if writeTarget(operand, safe, false) {
+			if writeTarget(operand, safe, false, i < len(safeRedirects) && safeRedirects[i].Absolute) {
 				return true
 			}
 		}
@@ -1650,7 +2105,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			if ownCopy {
 				ownCopies[operand]--
 			}
-			if writeTarget(operand, false, ownCopy) {
+			if writeTarget(operand, false, ownCopy, false) {
 				return true
 			}
 		}
@@ -1665,7 +2120,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			}
 		}
 		for _, operand := range hookpaths.AdjacentAssignedWriteOperands(input.Command, input.CWD, input.ActiveHome) {
-			if writeTarget(operand, false, false) {
+			if writeTarget(operand, false, false, false) {
 				return true
 			}
 		}
@@ -1677,38 +2132,48 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return unproven("dynamic-argument", "")
 		}
 		for _, operand := range boundedOperands {
-			if writeTarget(operand, false, false) {
+			if writeTarget(operand, false, false, false) {
 				return true
 			}
 		}
 		for _, operand := range hookpaths.QuotedDynamicCopyDestinations(input.Command, input.CWD, input.ActiveHome) {
-			if writeTarget(operand, false, true) {
+			if writeTarget(operand, false, true, false) {
 				return true
 			}
 		}
 		for _, operand := range hookpaths.BoundedLoopCopyDestinations(input.Command, input.CWD, input.ActiveHome) {
-			if writeTarget(operand, false, true) {
+			if writeTarget(operand, false, true, false) {
 				return true
 			}
 		}
 		for _, operand := range hookpaths.CopySourceGlobDestinations(input.Command, input.CWD, input.ActiveHome, request.ResolvedWriteTargets) {
-			if writeTarget(operand, false, true) {
+			if writeTarget(operand, false, true, false) {
 				return true
 			}
 		}
 		for _, operand := range hookpaths.BoundedGlobLoopCopyDestinations(input.Command, input.CWD, input.ActiveHome, request.ResolvedWriteTargets) {
-			if writeTarget(operand, false, true) {
+			if writeTarget(operand, false, true, false) {
 				return true
 			}
 		}
-		directoryOperands, directoryUnknown := hookpaths.ShellDirectoryWriteOperands(
-			input.Command, input.CWD, input.ActiveHome, directoryFacts, false, cannotResolveLocally,
-		)
+		var directoryOperands []hookpaths.RedirectOccurrence
+		var directoryUnknown bool
+		if cannotResolveLocally && request.sandboxGuest {
+			// A sandbox guest's folders follow the Linux guest layout on
+			// every gateway OS, never this host's (rel-1-0-10:GAP-2203).
+			directoryOperands, directoryUnknown = hookpaths.GuestShellDirectoryWriteOperands(
+				input.Command, input.CWD, input.ActiveHome, directoryFacts,
+			)
+		} else {
+			directoryOperands, directoryUnknown = hookpaths.ShellDirectoryWriteOperands(
+				input.Command, input.CWD, input.ActiveHome, directoryFacts, false, cannotResolveLocally,
+			)
+		}
 		if directoryUnknown {
 			return unproven(hookpaths.UnprovenTargetUnresolved, "")
 		}
 		for _, operand := range directoryOperands {
-			if writeTarget(operand.Path, operand.Safe, operand.OwnCopy) {
+			if writeTarget(operand.Path, operand.Safe, operand.OwnCopy, operand.Absolute) {
 				return true
 			}
 		}
@@ -1775,8 +2240,17 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			!strings.ContainsAny(candidate.Normalized, "*?[]$`") && !strings.HasPrefix(candidate.Normalized, "~") {
 			target = candidate.Normalized
 		}
-		if raw, ok := hookpaths.RawDotDotOperand(candidate.Value, clientCWD); ok {
-			target = raw
+		if _, ok := hookpaths.RawDotDotOperand(candidate.Value, clientCWD); ok {
+			// A dot-dot operand is judged by its OperandPath spelling: the
+			// dot-dot steps applied where the kernel climbs to the same
+			// folder, every other step raw for the link-aware walk
+			// (rel-1-0-10:GAP-1648), the spelling the copy destinations and
+			// the link reading use. RawDotDotOperand itself is the uncleaned
+			// key of the client's answers since rel-1-0-10:GAP-2294; taken
+			// here, cp ../../a.txt ../../b.txt after cd .cache; $CMD; cd sub;
+			// $CMD raised the authorized keys rule on the laptop
+			// (TestGAP0377SandboxGuestPlacementKeepsLaptopCandidates b-cp).
+			target = hookpaths.OperandPath(candidate.Value, clientCWD)
 		}
 		// The own destination of the copy, also after a directory change
 		// that the path facts follow (GAP-2579).
@@ -1798,7 +2272,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// and Tee-Object open their file at the first input instead; they
 		// are no redirect operator, so they are never matched here.
 		if integrityCommandOwnsStaticRedirect(command, candidate) && slices.ContainsFunc(safeRedirects, func(redirect hookpaths.RedirectOccurrence) bool {
-			return redirect.NoInnerCommand && filepath.Clean(filepath.FromSlash(redirect.Path)) == filepath.Clean(filepath.FromSlash(target))
+			return (redirect.NoInnerCommand || redirect.Absolute && links.AbsoluteRedirectOutsideCDScopes(target, opaqueFacts)) &&
+				filepath.Clean(filepath.FromSlash(redirect.Path)) == filepath.Clean(filepath.FromSlash(target))
 		}) {
 			continue
 		}
@@ -1811,14 +2286,14 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			// starting directory names no write of it (GAP-2579).
 			if placed := links.PlacedCopyDestinations(candidate.Value); len(placed) > 0 {
 				for _, destination := range placed {
-					if writeTarget(destination, false, true) {
+					if writeTarget(destination, false, true, false) {
 						return true
 					}
 				}
 				continue
 			}
 		}
-		if writeTarget(target, false, ownCopy) {
+		if writeTarget(target, false, ownCopy, false) {
 			return true
 		}
 	}
@@ -1924,7 +2399,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		) || hookpaths.PatchCallNamesProtectedTarget("", nil, request.LegacyText, clientCWD, facts.ActiveHome, clientTargets)
 	}
 	for _, target := range patchTargets {
-		if writeTarget(target, false, false) {
+		if writeTarget(target, false, false, false) {
 			return true
 		}
 	}
@@ -2465,6 +2940,32 @@ func nativeFileToolWriteOperand(input actionfacts.Input, facts actionfacts.Facts
 // left to the shell reading.
 func placedByCodexClient(connector, resolved string) bool {
 	return connector == "codex" && resolved != ""
+}
+
+// clientCarryIsUnknownMention reports a managed call (ProtectedHomeHook)
+// whose hook client carried a protected decision (ActionDecisionKey) for
+// command, the whole call (targets: the client's map before connector
+// scoping, which is also its glob facts), where a per-user gateway holds
+// the same call at the unknown tier (rel-1-0-10:GAP-0843): the call names a keys file only
+// beside a program the scan has no write model of (the two readings of the
+// GAP-0843 branch of trustedExistingAuthorizedKeysSymlinkWrite: not reads
+// only, which keeps the managed block of GAP-0018, and no known write), and
+// the client resolved no write into ~/.ssh or the state. Since GAP-0415 the
+// client carries its decision for every call with a word the shell expands,
+// so for such a call that decision is the same unknown-program reading, not
+// a key write the client found. A known write or a write the client
+// resolved there keeps the block, and the unknown tier blocks in strict and
+// managed-strict.
+func clientCarryIsUnknownMention(request trustedActionRequest, targets map[string]string, command, cwd, home string, dialect actionfacts.Dialect) bool {
+	if !request.ProtectedHomeHook || command == "" || targets[hookpaths.ActionDecisionKey] != hookpaths.ProtectedTargetDecision ||
+		!trustedShellCommandInput(request.Input) || !clientMapClearsKeyFiles(targets, home) {
+		return false
+	}
+	if !filepath.IsAbs(cwd) {
+		cwd = targets[hookpaths.CWDKey]
+	}
+	return !hookpaths.ActionMentionsNoWriteRole(command, cwd, home, dialect, targets) &&
+		hookpaths.ActionMentionsNoKnownWrite(command, cwd, home, dialect, targets)
 }
 
 // clientMapClearsKeyFiles reports whether the managed hook client, which

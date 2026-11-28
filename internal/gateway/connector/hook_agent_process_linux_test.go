@@ -53,6 +53,20 @@ func TestAccountAgentProcessMayRunIgnoresManagementArguments(t *testing.T) {
 	}
 }
 
+// rel-1-0-10 GAP-1446 (parent GAP-1457): a process that ends while its command
+// line is read answers ESRCH ("no such process"), not ENOENT, on a loaded box.
+// It is not running: the scan skips it and does not keep the tombstone for it.
+func TestAccountAgentProcessMayRunSkipsAProcessThatEndedDuringTheScan(t *testing.T) {
+	original := procReadFile
+	t.Cleanup(func() { procReadFile = original })
+	procReadFile = func(name string) ([]byte, error) {
+		return nil, &os.PathError{Op: "read", Path: name, Err: syscall.ESRCH}
+	}
+	if accountAgentProcessMayRun(t.TempDir(), "dcagentprobe-ended-"+strconv.Itoa(os.Getpid())) {
+		t.Fatal("a process that ended during the scan was counted as a running agent")
+	}
+}
+
 func TestRemovePerUserConnectorHookFilesAfterWrappedRemoval(t *testing.T) {
 	for _, name := range []string{"devin", "kiro"} {
 		for _, running := range []bool{false, true} {

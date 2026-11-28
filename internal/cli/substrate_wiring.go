@@ -20,12 +20,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"reflect"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
@@ -51,10 +54,10 @@ func newSubstrateController(cfg *config.Config, client ateapi.Client, reg contro
 		Client: client, Attestor: lv.Attestor, Activity: act, CPU: cpu,
 		Registry: reg, Resolver: lv.Resolver,
 		Sink:     sink,
-		Settings: lv.Settings, Secrets: lv.Secrets,
+		Settings: lv.Settings, Secrets: lv.Secrets, Bindings: lv.Bindings,
 		LauncherAtespaces: lv.LauncherAtespaces, RequireAttestation: lv.RequireAttestation, Templates: lv.Templates,
 		KitVersion: appVersion, IdleSuspendAfter: lv.IdleSuspendAfter, IdleSuspendWithoutCPU: lv.IdleSuspendWithoutCPU,
-		Resets: resets, Namespace: namespace,
+		Resets: resets, Namespace: namespace, CalloutMode: lv.CalloutMode,
 	}
 	if src != nil {
 		o.Config, o.Live = src, live
@@ -89,8 +92,10 @@ func substrateControllerLive(cfg *config.Config, idle bool, resolver controller.
 	}
 	return controller.Live{
 		Settings: controller.SettingsFromConfig(cfg), Secrets: controller.SecretsFromConfig(cfg),
+		Bindings:          controller.BindingsFrom(substrateBindingStore(cfg), cfg, time.Now),
 		LauncherAtespaces: controller.LauncherSet(cfg), RequireAttestation: sub.AttestationRequired(), Templates: sub.Templates,
 		Attestor: attestor, Resolver: resolver, IdleSuspendAfter: after, IdleSuspendWithoutCPU: sub.IdleSuspendWithoutCPU,
+		CalloutMode: controller.CalloutFailModeFromConfig(cfg),
 	}
 }
 
@@ -118,7 +123,7 @@ func substrateTemplateKit(a controller.Attestor) func(context.Context, *ateapi.A
 			return gateway.SubstrateTemplateKit{}, &gateway.SubstrateTemplateAttestation{Reason: "the attestation carries no connector label", Unlabeled: true}
 		}
 		return gateway.SubstrateTemplateKit{Connector: att.Connector, AgentVersion: att.AgentVersion,
-			HookContract: att.HookContract, KitVersion: att.KitVersion, Digest: att.Digest}, nil
+			HookContract: att.HookContract, KitVersion: att.KitVersion, Digest: att.Digest, RelayStreams: att.RelayStreams}, nil
 	}
 }
 
@@ -137,11 +142,64 @@ func substrateEnsurer(ctl *controller.Controller) gateway.SubstratePolicyEnsurer
 
 // runtimeSkillScanner is the gateway's skill folder scan (GAP-0039): A9's
 // runtime scanner with the host admission rules (attest.RuntimeScanner).
-type runtimeSkillScanner struct{ rt *attest.RuntimeScanner }
+type runtimeSkillScanner struct {
+	rt *attest.RuntimeScanner
+	// remote is the scanner sidecar client, nil without the sidecar folder.
+	remote *scanner.RemoteScanner
+	// enabled is substrate.skills.scan.enabled, read on each scan (hot).
+	enabled func() bool
+}
 
 func newRuntimeSkillScanner(cfg *config.Config) runtimeSkillScanner {
-	return runtimeSkillScanner{rt: attest.NewRuntimeScanner(cfg)}
+	rt := attest.NewRuntimeScanner(cfg)
+	var remote *scanner.RemoteScanner
+	// GAP-0477: the gateway image has no Python, so skill-scanner runs in the
+	// chart's scanner sidecar. Its shared folder exists only when the chart
+	// renders the sidecar; without it the scan is unavailable as in rel and
+	// the fail mode decides.
+	if fi, err := os.Stat(substrateScanDir); err == nil && fi.IsDir() {
+		// The client waits skills.scan.timeout, as the chart's worker
+		// --timeout does (GAP-0934: with 0 it waited 20s and cut at 25s
+		// whatever the key said). The gateway's own deadline is the live
+		// value, so a lower reload applies at once.
+		if rs, err := scanner.NewRemoteSkillScanner(cfg.Scanners.SkillScanner, cfg.Substrate.EffectiveSkillScanTimeout()); err == nil {
+			rs.Dir = substrateScanDir
+			rt.Skill = rs
+			remote = rs
+		}
+	}
+	return runtimeSkillScanner{rt: rt, remote: remote}
 }
+
+// checkSidecar is the missing-tool check (GAP-0477): with the chart's
+// scanner sidecar, serve start asks it whether skill-scanner is ready and
+// says so once. The sidecar can start after the gateway, so it asks tries
+// times, every apart, before it reports the scanner missing; new skills then
+// follow the fail mode (the doctor row substrate.skill_scan shows the same).
+func (s runtimeSkillScanner) checkSidecar(ctx context.Context, w io.Writer, tries int, every time.Duration) scanner.RemoteHealth {
+	if s.remote == nil {
+		return scanner.RemoteHealth{}
+	}
+	var h scanner.RemoteHealth
+	for i := 0; i < tries; i++ {
+		if h = s.remote.Health(ctx); h.Ready {
+			fmt.Fprintf(w, "substrate: skill scanner ready (skill-scanner %s)\n", h.Version)
+			return h
+		}
+		if i+1 < tries {
+			select {
+			case <-ctx.Done():
+				i = tries
+			case <-time.After(every):
+			}
+		}
+	}
+	fmt.Fprintf(w, "substrate: skill scanner is not running (%s); new skills follow the hook fail mode. Check: kubectl logs deploy/defenseclaw-gateway -c skill-scanner\n", h.Error)
+	return h
+}
+
+// substrateScanDir is the scanner sidecar's shared folder (a var for tests).
+var substrateScanDir = scanner.DefaultScanDir
 
 // ScanSkillFolder implements gateway.SubstrateSkillScanner.
 func (s runtimeSkillScanner) ScanSkillFolder(ctx context.Context, name, dir string, files []gateway.SubstrateAttachedFile) (bool, string, error) {
@@ -149,7 +207,15 @@ func (s runtimeSkillScanner) ScanSkillFolder(ctx context.Context, name, dir stri
 	for _, f := range files {
 		asset.Files = append(asset.Files, attest.AttachedFile{Role: attest.RoleSkillFile, Path: f.Path, Content: f.Content, Truncated: f.Truncated})
 	}
+	if s.enabled != nil && !s.enabled() {
+		// The admin-off switch (substrate.skills.scan.enabled: false): no
+		// scan, the fail mode decides (managed installs refuse new skills).
+		return false, "", fmt.Errorf("%w: skill scanning is turned off (substrate.skills.scan.enabled: false)", gateway.ErrSubstrateSkillScannerUnavailable)
+	}
 	d, err := s.rt.Scan(ctx, asset)
+	if errors.Is(err, scanner.ErrScanTimeout) {
+		return false, "", fmt.Errorf("%w: %v", gateway.ErrSubstrateSkillScanTimeout, err)
+	}
 	if err != nil {
 		return false, "", err
 	}
@@ -207,6 +273,9 @@ func substrateControllerLiveFunc(boot *config.Config, idle bool, resolver contro
 		// holds llm_providers on Substrate, GAP-0589): rendering their hosts
 		// live would open egress before the callout inspects it (GAP-0306).
 		lv.Settings.MCPHosts, lv.Settings.ProviderHosts = bootSettings.MCPHosts, bootSettings.ProviderHosts
+		// substrate.extproc is restart-only: a callout replacement follows
+		// the fail mode the pods started with (GAP-0505).
+		lv.CalloutMode = controller.CalloutFailModeFromConfig(boot)
 		return lv
 	}
 }

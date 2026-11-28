@@ -36,7 +36,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
+	"github.com/ai-openshell/sdk-go/openshell/v1/types"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -431,7 +431,7 @@ func createdButLost(e *harnessEnv, labels map[string]string) {
 			return nil
 		}
 		done = true
-		if _, err := e.fake.SDK().Sandboxes().Create(context.Background(), openshell.DefaultWorkspace, "rb-box", &types.SandboxSpec{}, labels); err != nil {
+		if _, err := e.fake.SDK().Sandboxes().Create(context.Background(), openshell.DefaultWorkspace, "rb-box", &types.SandboxSpec{}, types.WithLabels(labels)); err != nil {
 			e.t.Errorf("create the sandbox under the call: %v", err)
 		}
 		return &types.StatusError{Code: types.ErrorUnavailable, Message: "the gateway restarted"}
@@ -1327,7 +1327,7 @@ func replaceOutside(t *testing.T, e *harnessEnv, name string, labels map[string]
 	e.m.mu.Unlock()
 	_, err := e.client.DeleteSandbox(t.Context(), name)
 	must(t, err)
-	_, err = e.fake.SDK().Sandboxes().Create(t.Context(), openshell.DefaultWorkspace, name, &types.SandboxSpec{}, labels)
+	_, err = e.fake.SDK().Sandboxes().Create(t.Context(), openshell.DefaultWorkspace, name, &types.SandboxSpec{}, types.WithLabels(labels))
 	must(t, err)
 	must(t, e.fake.SetPhase(openshell.DefaultWorkspace, name, phase))
 	sb, err := e.client.GetSandbox(t.Context(), name)

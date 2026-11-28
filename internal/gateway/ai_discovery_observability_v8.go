@@ -40,9 +40,8 @@ type aiDiscoveryV8Runtime interface {
 
 type aiDiscoveryV8Adapter struct {
 	runtime aiDiscoveryV8Runtime
-	// publishGate is the managed_enterprise change gate, nil in every other
-	// deployment mode. A nil gate never suppresses, so the lifecycle-delta
-	// contract for non-managed modes is unaffected.
+	// publishGate is the endpoint inventory change gate, in every product;
+	// nil only without a data folder. A nil gate never suppresses.
 	publishGate *managedInventoryPublishState
 }
 

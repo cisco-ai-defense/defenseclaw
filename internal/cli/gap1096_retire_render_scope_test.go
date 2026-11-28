@@ -20,7 +20,8 @@ import (
 // release's render. It must not open the GAP-2463 earlier-matrix wait, which
 // trusts the account's own Hermes config: an account owner who strips only
 // fail_closed from this release's matrix before disconnecting stays failed,
-// as at rel. A lock an earlier release wrote keeps the GAP-2463 wait.
+// as at rel. A lock a release before fail_closed wrote keeps the GAP-2463
+// wait; one from 1.0.4 on does not (GAP-1537).
 func TestEnterpriseHookRetireRenderAdmitsOnlyThePriorRenderProof(t *testing.T) {
 	f := newUpgradeWaitFixture(t)
 	previousRetire, previousMatrix := enterpriseHookReconcileTargetRetireRender, enterpriseHookReconcileTargetEarlierMatrix
@@ -87,14 +88,21 @@ func TestEnterpriseHookRetireRenderAdmitsOnlyThePriorRenderProof(t *testing.T) {
 	retireRender(false)
 	wantFailed("this release lock without a retire render", run())
 
-	// 3. A lock 1.0.9 wrote with the earlier matrix: GAP-2463 unchanged.
+	// 3. A lock 1.0.3 wrote with the earlier matrix: the GAP-2463 wait.
 	f.staleRender = false
-	enterpriseHookReconcileTargetRelease = func(enterprisehooks.InstallOptions) (string, bool, error) { return "1.0.9", true, nil }
+	enterpriseHookReconcileTargetRelease = func(enterprisehooks.InstallOptions) (string, bool, error) { return "1.0.3", true, nil }
 	err = run()
 	if !errors.Is(err, errEnterpriseHookAwaitingSignIn) ||
 		!strings.Contains(err.Error(), enterpriseHookAwaitingSignInEarlierMatrix) ||
-		!strings.Contains(err.Error(), "DefenseClaw 1.0.9 registered them without fail_closed") {
-		t.Fatalf("lock 1.0.9 with the earlier matrix: err=%v, want the GAP-2463 wait", err)
+		!strings.Contains(err.Error(), "DefenseClaw 1.0.3 registered them without fail_closed") {
+		t.Fatalf("lock 1.0.3 with the earlier matrix: err=%v, want the GAP-2463 wait", err)
+	}
+
+	// 3b. A lock 1.0.9 wrote: 1.0.9 rendered fail_closed, so a matrix
+	// without it was changed after the render (GAP-1537).
+	enterpriseHookReconcileTargetRelease = func(enterprisehooks.InstallOptions) (string, bool, error) { return "1.0.9", true, nil }
+	if err := run(); errors.Is(err, errEnterpriseHookAwaitingSignIn) {
+		t.Fatalf("lock 1.0.9 with the earlier matrix: err=%v, want no GAP-2463 wait", err)
 	}
 
 	// 4. Secure Client never takes a retire render (no prior-render branch).

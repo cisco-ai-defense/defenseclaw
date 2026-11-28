@@ -38,7 +38,7 @@ func gap0749ResolveReaders(command, cwd, home string) {
 	var concrete actionConcreteOperands
 	actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concrete)
 	actionClientProvedSafeVariableTargetsForHook(command, cwd, home)
-	ActionCommandDecision(command, cwd, home)
+	clientCommandDecision(command, cwd, home, dialect)
 	actionSedInPlaceDecision(command, cwd, home, nil)
 	SedInPlaceBackupUnresolved(command, cwd, home)
 	actionClientProvedOverwrittenRedirect(command, cwd, home)
@@ -98,7 +98,7 @@ func gap0749ResolveReaders(command, cwd, home string) {
 		twin := fallback
 		twin.Command = shellTwin
 		actionfacts.Analyze(twin)
-		clientProtectedDecision(shellTwin, cwd, home)
+		clientProtectedDecision(shellTwin, cwd, home, dialect)
 		ShellWriteOperands(shellTwin, cwd, home)
 		LiteralWriteOperands(shellTwin, cwd, home)
 		ShellDirectoryWriteOperands(shellTwin, cwd, home, sourceFacts, true, false)
@@ -138,7 +138,7 @@ func gap0749ResolveReaders(command, cwd, home string) {
 		for _, body := range awked.Bodies {
 			// The decision of a body is a plain command's (the command
 			// readers above), read here as the command text of the body.
-			ActionCommandDecision(body, cwd, home)
+			clientCommandDecision(body, cwd, home, dialect)
 		}
 		if len(awked.Bodies) == 1 && awked.Text == awked.Bodies[0] && NoDereferenceTouchShape(awked.Text, cwd, home) {
 			noDereferenceTouchStatus(awked.Text, cwd, home)
@@ -178,7 +178,7 @@ func gap0749ResolveReaders(command, cwd, home string) {
 // command text, and the readers of gap0749ResolveReaders that run it.
 // TestGAP0749ResolveReadersCoverResolve fails when the two differ.
 var gap0749ResolveReaderCalls = []string{
-	"ActionCommandAuditReasonWithDialect", "ActionCommandDecision", "AdjacentAssignedWriteOperands",
+	"ActionCommandAuditReasonWithDialect", "clientCommandDecision", "AdjacentAssignedWriteOperands",
 	"BoundCommandOperands", "BudgetStateReading", "BoundedGlobLoopCopyDestinations", "BoundedLoopCopyDestinations", "BoundedShellWriteOperands",
 	"CopySourceGlobDestinations", "DeclaredRedirectWriteOperands", "LinkWalkFacts", "LiteralWriteOperands",
 	"MayNameState", "NoDereferenceTouchShape", "QuotedDynamicCopyDestinations",

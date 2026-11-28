@@ -2461,7 +2461,7 @@ func TestScansSkipMacOSPromptFoldersWithoutFullDiskAccess(t *testing.T) {
 	fullDiskAccess := false
 	macOSFullDiskAccess = func() bool { return fullDiskAccess }
 
-	home := t.TempDir()
+	home := realTempDir(t)
 	for _, dir := range []string{"Desktop/app", "Documents/app", "Downloads/app", "work/app"} {
 		mustWrite(t, filepath.Join(home, dir, "package.json"), `{"dependencies": {"ai": "^3.0.0"}}`)
 	}
@@ -3116,6 +3116,13 @@ func TestAIDiscoveryOptionsFromConfigPublishJitter(t *testing.T) {
 // The test holds scanMu across a scheduled tick. That makes runScan block
 // synchronously while the timer is running. Report observers run in separate
 // goroutines, so sleeping in one cannot simulate a slow scan.
+//
+// The assertion is about the scheduler's idle gap, not about how fast a scan
+// runs: the time between the two scheduled reports minus the second scan's own
+// reported duration. Reset-before starts the second scan as soon as the first
+// ends (gap near 0); reset-after waits a whole interval first. A loaded box
+// stretches the scan, which the subtraction removes, instead of failing a
+// fixed wall-clock window (GAP-2018).
 func TestRunClaimedResetsTimerBeforeScan(t *testing.T) {
 	dataDir := t.TempDir()
 	homeDir := t.TempDir()
@@ -3135,9 +3142,13 @@ func TestRunClaimedResetsTimerBeforeScan(t *testing.T) {
 		}
 	})
 
-	arrivals := make(chan struct{}, 4)
-	svc.AddReportObserver(func(_ context.Context, _ AIDiscoveryReport) {
-		arrivals <- struct{}{}
+	type arrival struct {
+		at       time.Time
+		duration time.Duration
+	}
+	arrivals := make(chan arrival, 4)
+	svc.AddReportObserver(func(_ context.Context, report AIDiscoveryReport) {
+		arrivals <- arrival{at: time.Now(), duration: time.Duration(report.Summary.DurationMs) * time.Millisecond}
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -3149,23 +3160,32 @@ func TestRunClaimedResetsTimerBeforeScan(t *testing.T) {
 			t.Errorf("Run error = %v, want context.Canceled", err)
 		}
 	}()
-	await := func(label string, timeout time.Duration) {
+	await := func(label string, timeout time.Duration) arrival {
 		t.Helper()
 		select {
-		case <-arrivals:
+		case got := <-arrivals:
+			return got
 		case <-time.After(timeout):
 			t.Fatalf("%s scan did not complete within %s", label, timeout)
+			return arrival{}
 		}
 	}
-	await("startup", 5*time.Second)
+	await("startup", 30*time.Second)
 	// Hold the real scan lock through the first scheduled tick and past the
 	// next timer deadline. Reset-before queues the next tick while blocked;
 	// reset-after cannot fire it until a full interval after release.
 	svc.scanMu.Lock()
 	time.Sleep(2 * scanInterval)
 	svc.scanMu.Unlock()
-	await("first scheduled", 5*time.Second)
-	await("queued second scheduled", scanInterval/2)
+	first := await("first scheduled", 30*time.Second)
+	second := await("queued second scheduled", 30*time.Second)
+	// The second scan's duration is the load; what is left is the wait the
+	// scheduler added. Reset-after adds at least scanInterval; allow 80% of it
+	// so the bound is far from both the quiet value and the regression.
+	idle := second.at.Sub(first.at) - second.duration
+	if limit := scanInterval * 8 / 10; idle > limit {
+		t.Fatalf("second scheduled scan started %s after the first finished (second scan took %s), want under %s: the next tick was not queued while the first was blocked", idle, second.duration, limit)
+	}
 }
 
 // A Secure Client host still loads the packs in <data_dir>/signature-packs

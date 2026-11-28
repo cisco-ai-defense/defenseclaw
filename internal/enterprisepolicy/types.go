@@ -146,6 +146,14 @@ type Options struct {
 	CursorFailOpen bool
 	// SkipTrustChecks disables ancestor ownership checks; only tests set it.
 	SkipTrustChecks bool
+	// AdoptAdministratorEdits makes a publish take an edit made to the
+	// shared Codex requirements.toml since DefenseClaw last wrote it as the
+	// administrator's new text. Only the unix reconcile action sets it: it is
+	// the administrator's explicit acceptance of the edited file, after which
+	// reconcile re-pins the policy view. Every other publish (ensure, repair,
+	// upgrade and the restore the hook guardian starts) puts back the text
+	// DefenseClaw last published, so a heal never trusts an edit.
+	AdoptAdministratorEdits bool
 
 	// keptLinks are the policy paths on which RemoveWindowsGoOwned kept a link
 	// (lower-cased): the removal of the target skips those paths alone and
@@ -287,6 +295,12 @@ type State struct {
 	// VersionFloor is Claude Code's requiredMinimumVersion state (claudecode
 	// only).
 	VersionFloor *VersionFloorState `json:"version_floor,omitempty"`
+	// SavedEdit is where this publish kept the edited file it replaced with
+	// the published one (Codex requirements.toml on Linux and macOS).
+	SavedEdit string `json:"saved_edit,omitempty"`
+	// ReplacedLink is the target of the symbolic link this publish replaced
+	// with the published file.
+	ReplacedLink string `json:"replaced_link,omitempty"`
 	// replacing holds the untrusted files a reconcile replaces at
 	// DefenseClaw's own drop-in names (replaceUntrustedPolicyFile).
 	replacing map[string]policyFileBase

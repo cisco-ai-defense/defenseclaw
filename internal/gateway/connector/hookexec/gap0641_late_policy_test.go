@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func gap0641Payload(cwd, command string) []byte {
@@ -54,8 +56,17 @@ func TestGAP0641LateOutcomeFollowsTierAndNamedTarget(t *testing.T) {
 	}
 }
 
+// An ordinary call follows the open tier only when its payload look (a
+// goroutine armed with the deadline) is done by the deadline; a look still
+// running leaves the closed answer by design. On a loaded Windows runner a
+// 300 ms budget lost that race (hx5 of PR 1493, GAP-2312), so the ordinary
+// rows get a budget a loaded runner meets. A named target is closed at any
+// budget, so those rows keep the short one.
 func TestGAP0641OrdinaryTimeoutWarnsWhileNamedTargetStaysClosed(t *testing.T) {
-	shortAnswerBudget(t, 300*time.Millisecond)
+	const (
+		ordinaryBudget = 2 * time.Second
+		namedBudget    = 300 * time.Millisecond
+	)
 	addr := hungGateway(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
@@ -77,6 +88,11 @@ func TestGAP0641OrdinaryTimeoutWarnsWhileNamedTargetStaysClosed(t *testing.T) {
 		{"named target", "cat ~/.ssh/authorized_keys", true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
+			if row.blocked {
+				shortAnswerBudget(t, namedBudget)
+			} else {
+				shortAnswerBudget(t, ordinaryBudget)
+			}
 			result, _ := runAgainstGateway(t, "claudecode", addr, func(opts *Options) {
 				opts.FailMode = "open"
 				opts.OutageFailModeNow = func() string { return "open" }
@@ -109,9 +125,7 @@ func TestGAP0641ProcessRelativeProtectedAliasIsNotOrdinary(t *testing.T) {
 	if err := os.WriteFile(protected, []byte("state"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(protected, filepath.Join(cwd, "alias")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, protected, filepath.Join(cwd, "alias"))
 	if err := os.WriteFile(filepath.Join(cwd, "notes"), []byte("notes"), 0o600); err != nil {
 		t.Fatal(err)
 	}

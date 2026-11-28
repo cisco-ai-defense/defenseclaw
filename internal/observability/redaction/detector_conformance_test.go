@@ -302,7 +302,11 @@ func TestAssignmentEveryKeySeparatorAndExclusion(t *testing.T) {
 	for _, excluded := range []string{"", "true", "FALSE", "null", "example", "sample", "dummy", "changeme", "redacted", "*****", "${FIXTURE}"} {
 		assertDetectorAbsent(t, "secrets.assignment", "password="+excluded)
 	}
-	assertDetectorAbsent(t, "secrets.assignment", "not_password=reserved-fixture")
+	// GAP-0426: a prefixed key that ends in a credential word (DB_PASSWORD,
+	// SERVICE_API_TOKEN) is an assignment too; a word inside a longer word
+	// is not.
+	assertDetectorExact(t, "secrets.assignment", "not_password=reserved-fixture", "reserved-fixture")
+	assertDetectorAbsent(t, "secrets.assignment", "notpassword=reserved-fixture")
 	assignmentPrefix := "password="
 	assignmentBoundary := strings.Repeat("A", 8192-len(assignmentPrefix))
 	assertDetectorExact(t, "secrets.assignment", assignmentPrefix+assignmentBoundary, assignmentBoundary)

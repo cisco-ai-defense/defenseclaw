@@ -191,11 +191,19 @@ func (e mcpReason) Error() string { return string(e) }
 // writeSubstrateMCPRefusal is the answer the kit turns into the agent's own
 // closed deny (kit.MCPRefusedCode).
 func writeSubstrateMCPRefusal(w http.ResponseWriter, message string) {
+	writeSubstrateSkillRefusal(w, message, nil)
+}
+
+// writeSubstrateSkillRefusal is writeSubstrateMCPRefusal naming the folders
+// still being checked (substrate_pending, GAP-0980) for the kit's record.
+func writeSubstrateSkillRefusal(w http.ResponseWriter, message string, held []SubstrateUnscanned) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusForbidden)
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"error": http.StatusText(http.StatusForbidden), "reason": kit.MCPRefusedCode, "message": message,
-	})
+	body := map[string]any{"error": http.StatusText(http.StatusForbidden), "reason": kit.MCPRefusedCode, "message": message}
+	if len(held) > 0 {
+		body[SubstratePendingField] = held
+	}
+	_ = json.NewEncoder(w).Encode(body)
 }

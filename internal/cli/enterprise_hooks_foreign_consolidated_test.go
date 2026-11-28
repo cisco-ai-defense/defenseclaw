@@ -67,12 +67,12 @@ func useForeignHookGuardian(t *testing.T, policy map[string]config.EnterpriseCon
 }
 
 // skipForeignHookLedgerOnWindows skips a test that writes the removal
-// ledger: on Windows the protected write sets a SYSTEM-owned DACL.
+// ledger under a standard Windows token: the protected write sets a
+// SYSTEM-owned DACL, which needs an administrator token. The elevated native
+// set and Windows Native CI run it (rel-1-0-10:GAP-1512).
 func skipForeignHookLedgerOnWindows(t *testing.T) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("the protected ledger write sets a SYSTEM-owned DACL")
-	}
+	requireAdministratorTestToken(t, "the protected ledger write sets a SYSTEM-owned DACL")
 }
 
 // removals is the ledger ("" entries when there is none).
@@ -219,9 +219,9 @@ type foreignHookRemovalTrace struct {
 func traceForeignHookRemovals(t *testing.T) *foreignHookRemovalTrace {
 	t.Helper()
 	trace := &foreignHookRemovalTrace{}
-	lock, owner := enterpriseForeignHookLockAccount, enterpriseHookAuthorizationOwnershipSetter
+	lock, ledger := enterpriseForeignHookLockAccount, enterpriseForeignHookLockLedger
 	t.Cleanup(func() {
-		enterpriseForeignHookLockAccount, enterpriseHookAuthorizationOwnershipSetter = lock, owner
+		enterpriseForeignHookLockAccount, enterpriseForeignHookLockLedger = lock, ledger
 	})
 	enterpriseForeignHookLockAccount = func(ctx context.Context, dataDir, identity string) (func(), bool, error) {
 		release, drained, err := lock(ctx, dataDir, identity)
@@ -233,11 +233,16 @@ func traceForeignHookRemovals(t *testing.T) *foreignHookRemovalTrace {
 		var once sync.Once
 		return func() { once.Do(func() { trace.add("release"); release() }) }, drained, nil
 	}
-	enterpriseHookAuthorizationOwnershipSetter = func(path string) error {
-		if strings.Contains(filepath.Base(path), enterprisepolicy.ForeignHookRemovalsFile) {
+	// "ledger" is one write of the removal ledger, taken at its lock: the
+	// file still holds what the write replaces. The ownership stamp is no
+	// such point: Unix stamps the temporary file before the rename, Windows
+	// the ledger after its write (rel-1-0-10:GAP-1729).
+	enterpriseForeignHookLockLedger = func(ctx context.Context, dir string) (func(), error) {
+		release, err := ledger(ctx, dir)
+		if err == nil {
 			trace.add("ledger")
 		}
-		return owner(path)
+		return release, err
 	}
 	return trace
 }
@@ -325,9 +330,19 @@ func useInProcessCleanupAsSelf(t *testing.T) {
 
 func foreignHookTestTarget(home string) enterprisehooks.TargetCredentials {
 	if runtime.GOOS == "windows" {
-		return enterprisehooks.TargetCredentials{UserHome: home, UID: -1, GID: -1, SID: "S-1-5-21-1-2-3-1001"}
+		// The account the test runs as: a cleanup reads the target's
+		// environment from its registry hive, which a synthetic SID has
+		// none of (rel-1-0-10:GAP-1729).
+		return enterprisehooks.TargetCredentials{UserHome: home, UID: -1, GID: -1, SID: foreignHookTestAccountSID()}
 	}
 	return enterprisehooks.TargetCredentials{UserHome: home, UID: 1001, GID: 1001}
+}
+
+// foreignHookTestIdentity is the ledger identity of foreignHookTestTarget:
+// "1001" off Windows, the test account's SID on Windows.
+func foreignHookTestIdentity(home string) string {
+	target := foreignHookTestTarget(home)
+	return enterpriseForeignHookAccountID(target.SID, target.UID)
 }
 
 // recordingCleanupFence is a cleanup fence that records its use.
@@ -422,8 +437,8 @@ func TestForeignHookRemovalGuardFencesEachRemovalOnItsOwn(t *testing.T) {
 }
 
 // foreignHookRemovalOrderCase is one removal entry point: run removes the
-// unapproved hook in the Cursor hooks file path of home for the account
-// "1001" through it.
+// unapproved hook in the Cursor hooks file path of home for the test account
+// (foreignHookTestIdentity) through it.
 type foreignHookRemovalOrderCase struct {
 	name string
 	// want is the trace of the run.
@@ -443,7 +458,6 @@ type foreignHookRemovalOrderCase struct {
 // its account lock and a ledger write before changing the hook file.
 func runForeignHookRemovalOrderCases(t *testing.T, cases []foreignHookRemovalOrderCase) {
 	t.Helper()
-	const identity = "1001"
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			g := useForeignHookGuardian(t, nil)
@@ -451,6 +465,7 @@ func runForeignHookRemovalOrderCases(t *testing.T, cases []foreignHookRemovalOrd
 			if tc.home != nil {
 				home = tc.home(t)
 			}
+			identity := foreignHookTestIdentity(home)
 			path := foreignHookTestCursorHook(t, home)
 			trace := traceForeignHookRemovals(t)
 			changed, ledgers := false, 0
@@ -516,7 +531,7 @@ func TestForeignHookRemovalRecordsBeforeTheFileChanges(t *testing.T) {
 			want:       "lock,ledger,change,ledger,release",
 			logsChange: true,
 			run: func(t *testing.T, trace *foreignHookRemovalTrace, home, path string) {
-				guard := enterpriseForeignHookRemovalGuard("cursor", newEnterpriseForeignHookInProcessFence("1001", home))
+				guard := enterpriseForeignHookRemovalGuard("cursor", newEnterpriseForeignHookInProcessFence(foreignHookTestIdentity(home), home))
 				if err := guard([]string{path}, func() error {
 					trace.add("change")
 					return foreignHookTestRemoveHook(path)
@@ -545,7 +560,7 @@ func TestForeignHookRemovalRecordsBeforeTheFileChanges(t *testing.T) {
 					t.Fatal(err)
 				}
 				var stderr bytes.Buffer
-				recordEnterpriseForeignHookRemovals(&stderr, "1001", home, "cursor", []string{path})
+				recordEnterpriseForeignHookRemovals(&stderr, foreignHookTestIdentity(home), home, "cursor", []string{path})
 				if stderr.Len() != 0 {
 					t.Fatal(stderr.String())
 				}

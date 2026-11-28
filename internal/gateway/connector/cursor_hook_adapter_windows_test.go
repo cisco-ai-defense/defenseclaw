@@ -34,6 +34,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 const cursorAdapterHelperMode = "TEST_CURSOR_ADAPTER_MODE"
@@ -117,6 +119,18 @@ func prepareConnectorTestProcess() {
 		time.Sleep(2 * time.Duration(cursorWindowsHookContractTimeoutMS) * time.Millisecond)
 		os.Exit(0)
 	default:
+		// The token user owns every file and folder these tests create. An
+		// elevated administrator token (an SSH Administrator, a CI runner)
+		// names BUILTIN\Administrators as the default owner, and safefile
+		// rightly refuses the fixture's data dir as foreign-owned ("prepare
+		// stable compare-and-swap transaction directory"). The per-user
+		// binaries make the same change at start
+		// (managed.UseCurrentUserAsWindowsDefaultOwner), so the product check
+		// is unchanged (GAP-2032).
+		if _, err := testenv.OwnNewObjectsAsTokenUser(); err != nil {
+			fmt.Fprintln(os.Stderr, "connector tests: make the token user the owner of new files:", err)
+			os.Exit(2)
+		}
 		// Pre-existing connector fixtures exercise config, trust, CAS, and
 		// teardown behavior without provisioning a real Codex installation.
 		// Dedicated production-path tests explicitly restore the native policy

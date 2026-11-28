@@ -103,6 +103,9 @@ func apiKubeconfig(server, cluster string) string {
 func TestKubeVerifyEndpoint(t *testing.T) {
 	dir := t.TempDir()
 	api, admin := newRecorder(t), newRecorder(t)
+	// Cleanups run last in, first out: the slow handler returns before the server closes.
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
 	ca := certPEM(api.srv.Certificate().Raw)
 	caData := "    certificate-authority-data: " + base64.StdEncoding.EncodeToString(ca) + "\n"
 	writeFile(t, dir, "ca.pem", string(ca))
@@ -141,7 +144,16 @@ func TestKubeVerifyEndpoint(t *testing.T) {
 		{name: "insecure-skip-tls-verify refused", cluster: "    insecure-skip-tls-verify: true\n", wantErr: `the kube cluster "c1" sets insecure-skip-tls-verify; the launcher does not send a Kubernetes credential`, noRequest: true},
 		{name: "plain http server refused", server: "http://k8s.example.test:6443", wantErr: `the server of the kube cluster "c1" must be an https URL`, noRequest: true},
 		{name: "bad namespace", namespace: "Bad_NS", wantErr: `kube_namespace "Bad_NS" is not a valid Kubernetes namespace name`, noRequest: true},
-		{name: "API server too slow", timeout: 50 * time.Millisecond, fn: func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }, wantErr: "did not answer within 50ms"},
+		// The slow server never answers while the test runs (it is released at cleanup), so the client's own
+		// 50ms deadline is the only way the call ends. A handler that returned when the client gave up
+		// (r.Context().Done()) answered 200 with an empty body in the same instant, and on a loaded runner
+		// that answer could reach the client before its deadline error did (GAP-2091).
+		{name: "API server too slow", timeout: 50 * time.Millisecond, fn: func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-release:
+			case <-time.After(30 * time.Second):
+			}
+		}, wantErr: "did not answer within 50ms"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

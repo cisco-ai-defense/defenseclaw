@@ -17,7 +17,7 @@ func TestPrintDoctorNamesTheFixCommandOnce(t *testing.T) {
 			Fix: &openshell.Fix{Summary: "switch the gateway to the docker compute driver", Command: CommandName + " doctor --fix", Automatic: true}},
 		{Title: "Gateway", Status: openshell.StatusWarn, Detail: "stale",
 			Fix: &openshell.Fix{Summary: "restart the gateway", Command: "systemctl --user restart openshell-gateway", Automatic: true}},
-	}})
+	}}, nil)
 	out := ta.output()
 	has(t, out, "→ switch the gateway to the docker compute driver: defenseclaw sandbox doctor --fix",
 		"restart the gateway: systemctl --user restart openshell-gateway  (defenseclaw sandbox doctor --fix)")

@@ -610,7 +610,8 @@ detect_value() {
 # detect.sh prints busy while a lifecycle run holds the lock, and an MDM
 # retries it later. The apply job's redundant ensure (see retry_busy) can still
 # hold the lock when the MDM checks start: retry only a busy answer, for at most
-# three minutes.
+# three minutes. Every detect.sh check of the lane goes through detect_settled
+# (GAP-2118: a one-sample --require-security-complete check failed on busy).
 detect_settled() {
     local deadline=$((SECONDS + 180)) value
     value=$(detect_value "$@" || true)
@@ -1054,7 +1055,7 @@ detected=$(detect_settled --require-healthy --min-version "$version")
 echo "detect.sh --require-healthy: $detected"
 want_secure=$want_healthy
 [ "$(json_field "$results/04-verify.json" security_complete)" = True ] || want_secure=unhealthy
-detected=$(detect_value --require-security-complete --min-version "$version" || true)
+detected=$(detect_settled --require-security-complete --min-version "$version")
 [ "$detected" = "$want_secure" ] || die "detect.sh --require-security-complete printed '$detected', want '$want_secure'"
 echo "detect.sh --require-security-complete: $detected"
 
@@ -1093,7 +1094,7 @@ case "$kind" in
     rpm) ! rpm -q "$linux_package_name" >/dev/null 2>&1 || die "rpm still reports $linux_package_name installed" ;;
     pkg) ! pkgutil --pkg-info "$macos_package_id" >/dev/null 2>&1 || die "the package receipt $macos_package_id remains" ;;
 esac
-detected=$(detect_value || true)
+detected=$(detect_settled)
 [ "$detected" = not-installed ] || die "detect.sh printed '$detected' after uninstall, want 'not-installed'"
 echo "detect.sh: $detected"
 

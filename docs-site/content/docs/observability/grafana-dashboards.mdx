@@ -113,7 +113,7 @@ Directory shows `unreported` for a Linux SSSD account whose domain is not a join
 
 The **Sandboxes** board (`defenseclaw-sandboxes`) shows [OpenShell sandbox](/docs/observability/sandbox-telemetry) activity. It has seven boxes:
 
-- **Environment** (`$environment`, the gateway's `deployment.environment.name`, set with `defenseclaw setup observability add --environment`) and **Host** (`$host`, the computer's `host.name`). Every panel follows both, so you can scope the board to one computer and show, for example, that a Windows computer has no sandboxes.
+- **Environment** (`$environment`, the gateway's `deployment.environment.name`, set with `defenseclaw setup observability add --environment`; a gateway with none set reports its platform, `linux`, `macos`, `windows` or `dgx-spark`, so the box lists those names too) and **Host** (`$host`, the computer's `host.name`). Every panel follows both, so you can scope the board to one computer and show, for example, that a Windows computer has no sandboxes.
 - **Connector** (`$connector`, the sandbox's harness connector) for the metric panels.
 - **Sandbox** (`$sandbox`, the sandbox name) for the log panels. Sandbox names are never metric labels, so the metric panels ignore it and say "(all names)" in their titles: **Active (all names)**, **Active sandboxes by connector (all names)** and **Egress by source and decision (metric, all names)**.
 - **OS** (`$os`), **Driver** (`$driver`, `docker` or `vm`) and **Profile** (`$profile`, a guardrail profile name as a regular expression, default `.*`) for the managed-fleet panels. Selecting a driver hides records that name none, such as host-run refusals.
@@ -160,7 +160,7 @@ The **Substrate agents** board (`defenseclaw-substrate`) shows [Agent Substrate]
 | Actor lifecycle | Lifecycle changes by trigger, Phase transitions, Recent lifecycle records | What caused each change (create, resume re-check, fork, drift, idle suspend) and which phase it entered |
 | Egress through the callout | Egress decisions, Bodies read and bodies over the cap, Secrets injected, Recent blocked requests | What the callout allowed and refused, how often it read a body, and which secrets it injected (names only) |
 
-The board has no panel for `defenseclaw.substrate.first_hook_after_resume`: no component records it in this release (see [Agent Substrate metrics](/docs/observability/sandbox-telemetry)).
+The board has no panel for `defenseclaw.substrate.first_hook_after_resume` yet; the gateway records it (see [Agent Substrate metrics](/docs/observability/sandbox-telemetry)).
 
 The metric panels have no actor, atespace or person label, because those are never metric labels. Actor names appear only in the log panels. Alert rules for the same signals are in the chart (`metrics.prometheusRule.enabled`).
 

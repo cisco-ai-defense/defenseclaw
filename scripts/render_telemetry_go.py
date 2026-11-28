@@ -599,7 +599,13 @@ def _render_compact_catalog_body(
     lines = [
         "package observability",
         "",
-        "var generatedFamilyBaseContracts = map[string]familyDescriptorContract{",
+        'import "sync"',
+        "",
+        # The contract tables are built on first use, not at package init:
+        # every process that links observability (the hook among them) paid
+        # for them at start, used or not.
+        "var generatedFamilyBaseContracts = sync.OnceValue(func() map[string]familyDescriptorContract {",
+        "\treturn map[string]familyDescriptorContract{",
     ]
     base_key_width = max(len(_go_string(_read(item, "family_id", "descriptor"), "descriptor")) for item in descriptors)
     for position, descriptor in enumerate(descriptors):
@@ -608,16 +614,18 @@ def _render_compact_catalog_body(
         base = _read(_read(descriptor, "catalog_contract", path), "base", path)
         key = _go_string(family_id, path)
         lines.append(
-            f"\t{key}: "
+            f"\t\t{key}: "
             + " " * (base_key_width - len(key))
             + compact_base(base, f"{path}.base", elide_outer=True)
             + ","
         )
     lines.extend(
         (
-            "}",
+            "\t}",
+            "})",
             "",
-            "var generatedFamilyMetricContracts = map[string]familyMetricContract{",
+            "var generatedFamilyMetricContracts = sync.OnceValue(func() map[string]familyMetricContract {",
+            "\treturn map[string]familyMetricContract{",
         )
     )
     metric_descriptors = [
@@ -638,7 +646,7 @@ def _render_compact_catalog_body(
         base = _read(catalog, "base", path)
         key = _go_string(family_id, path)
         lines.append(
-            f"\t{key}: "
+            f"\t\t{key}: "
             + " " * (metric_key_width - len(key))
             + f"{{familyDescriptorContract: {compact_base(base, f'{path}.base', elide_outer=False)}, "
             f"valueType: {_typed_symbol(_read(metric, 'value_type', path), path)}, "
@@ -650,9 +658,11 @@ def _render_compact_catalog_body(
         )
     lines.extend(
         (
-            "}",
+            "\t}",
+            "})",
             "",
-            "var generatedFamilyTraceContracts = map[string]familyTraceContract{",
+            "var generatedFamilyTraceContracts = sync.OnceValue(func() map[string]familyTraceContract {",
+            "\treturn map[string]familyTraceContract{",
         )
     )
     event_rows: list[tuple[str, str]] = []
@@ -682,7 +692,7 @@ def _render_compact_catalog_body(
         )
         key = _go_string(family_id, path)
         lines.append(
-            f"\t{key}: "
+            f"\t\t{key}: "
             + " " * (trace_key_width - len(key))
             + f"{{familyDescriptorContract: {compact_base(base, f'{path}.base', elide_outer=False)}, "
             f"allowedKinds: []string{{{allowed_kinds}}}, spanName: {_span_name_literal(_read(trace, 'span_name', path), path)}, "
@@ -712,7 +722,8 @@ def _render_compact_catalog_body(
             event_rows.append((helper, literal))
     lines.extend(
         (
-            "}",
+            "\t}",
+            "})",
             "",
         )
     )
@@ -726,7 +737,7 @@ def _render_compact_catalog_body(
         lines.extend(
             (
                 f"func ({symbol}) familyDescriptorContract() familyDescriptorContract {{",
-                f"\treturn generatedFamilyBaseContracts[{_go_string(family_id, 'family descriptor')}]",
+                f"\treturn generatedFamilyBaseContracts()[{_go_string(family_id, 'family descriptor')}]",
                 "}",
                 "",
             )
@@ -735,7 +746,7 @@ def _render_compact_catalog_body(
             lines.extend(
                 (
                     f"func ({symbol}) familyMetricContract() familyMetricContract {{",
-                    f"\treturn generatedFamilyMetricContracts[{_go_string(family_id, 'metric descriptor')}]",
+                    f"\treturn generatedFamilyMetricContracts()[{_go_string(family_id, 'metric descriptor')}]",
                     "}",
                     "",
                 )
@@ -744,7 +755,7 @@ def _render_compact_catalog_body(
             lines.extend(
                 (
                     f"func (descriptor {symbol}) familyTraceContract() familyTraceContract {{",
-                    f"\tcontract := generatedFamilyTraceContracts[{_go_string(family_id, 'trace descriptor')}]",
+                    f"\tcontract := generatedFamilyTraceContracts()[{_go_string(family_id, 'trace descriptor')}]",
                     "\tcontract.resourceFields = append(append([]familyFieldDescriptor(nil), contract.resourceFields...), descriptor.dynamicResourceFields...)",
                     "\treturn contract",
                     "}",
@@ -2440,10 +2451,12 @@ def _render_inbound_descriptors(lines: list[str], inbound: Any) -> None:
         (
             "}",
             "",
-            "var generatedInboundMatches, generatedInboundTargets = deriveGeneratedInboundNativeCatalog(",
-            "\tgeneratedInboundNonNativeMatches,",
-            "\tgeneratedInboundNonNativeTargets,",
-            ")",
+            "func generatedInboundNativeCatalog() ([]generatedInboundMatch, []generatedInboundTarget) {",
+            "\treturn deriveGeneratedInboundNativeCatalog(",
+            "\t\tgeneratedInboundNonNativeMatches,",
+            "\t\tgeneratedInboundNonNativeTargets,",
+            "\t)",
+            "}",
             "",
         )
     )

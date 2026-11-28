@@ -28,8 +28,9 @@ type trustedPOSIXHomeRewrite struct {
 	tildeOperands map[string]string
 	// homeGlobs is set when a $HOME or ${HOME} pattern was rewritten.
 	homeGlobs bool
-	// optionHomeValues is set when a long option's attached $HOME value
-	// was rewritten (`--work-tree=$HOME/.x`, GAP-2047 row d).
+	// optionHomeValues is set when an option's attached $HOME value was
+	// rewritten (`--work-tree=$HOME/.x`, GAP-2047 row d; `sort -o$HOME/.x`,
+	// GAP-2152).
 	optionHomeValues bool
 }
 
@@ -169,8 +170,9 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 			continue
 		}
 		if prefix, ok := findOptionHomeWord(word); ok {
-			// `-f$HOME/...`: the -f path of BSD find, attached (GAP-2135);
-			// `--work-tree=$HOME/...`: a long option's value (GAP-2047).
+			// `-o$HOME/...`: a short option's attached value (GAP-2152, the
+			// -f path of BSD find, GAP-2135); `--work-tree=$HOME/...`: a long
+			// option's value (GAP-2047).
 			suffix, _ := homeAnchoredLiteralWord(&syntax.Word{Parts: word.Parts[1:]})
 			start, end := int(word.Pos().Offset()), int(word.End().Offset())
 			if start < last || end > len(source) {
@@ -179,9 +181,7 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 			out.WriteString(source[last:start])
 			out.WriteString(prefix + activeHome + suffix)
 			last = end
-			if strings.HasPrefix(prefix, "--") {
-				rewrite.optionHomeValues = true
-			}
+			rewrite.optionHomeValues = true
 			continue
 		}
 		if suffix, user := userHomeRewriteWord(word, activeHome); user {
@@ -958,17 +958,18 @@ func staticHomeRewriteWord(word *syntax.Word) bool {
 
 // findOptionHomeWord reports an option word whose path value is attached
 // and starts with a plain $HOME or ${HOME} and returns the option text
-// before it: the -f path of BSD find (`-f$HOME/.x`, `-xf${HOME}/.x`,
+// before it: a short option cluster's value (`sort -o$HOME/.x`,
+// `sort -o"$HOME/.x"`, GAP-2152; the -f path of BSD find, `-xf${HOME}/.x`,
 // GAP-2135) or a long option's `=` value (`--work-tree=$HOME/.x`,
-// `--work-tree="$HOME/.x"`, GAP-2047 row d). The shell expands that HOME
-// as in a separate word, so the value names the same path as `$HOME/.x`.
+// `--work-tree="$HOME/.x"`, GAP-2047 row d). The shell expands that HOME,
+// quoted or not, as in a separate word, so the value names the same path
+// as `$HOME/.x`; which letter takes a value is the program's grammar.
 func findOptionHomeWord(word *syntax.Word) (string, bool) {
 	literal, ok := firstLiteral(word)
 	if !ok || len(word.Parts) < 2 {
 		return "", false
 	}
-	find := findAttachedPathOption.MatchString(literal.Value)
-	if !find && !longAttachedValueOption.MatchString(literal.Value) {
+	if !shortAttachedValueOption.MatchString(literal.Value) && !longAttachedValueOption.MatchString(literal.Value) {
 		return "", false
 	}
 	rest := &syntax.Word{Parts: word.Parts[1:]}
@@ -978,9 +979,9 @@ func findOptionHomeWord(word *syntax.Word) (string, bool) {
 	switch typed := word.Parts[1].(type) {
 	case *syntax.ParamExp:
 	case *syntax.DblQuoted:
-		// Only a long option value: the quoted HOME reads the same
-		// unquoted once plainHomeRewriteWord accepted its text.
-		if find || len(typed.Parts) == 0 {
+		// The quoted HOME reads the same unquoted once
+		// plainHomeRewriteWord accepted its text.
+		if len(typed.Parts) == 0 {
 			return "", false
 		}
 		if _, home := typed.Parts[0].(*syntax.ParamExp); !home {
@@ -993,8 +994,8 @@ func findOptionHomeWord(word *syntax.Word) (string, bool) {
 }
 
 var (
-	findAttachedPathOption  = regexp.MustCompile(`^-[EHLPXdsx]*f$`)
-	longAttachedValueOption = regexp.MustCompile(`^--[A-Za-z][A-Za-z0-9-]*=$`)
+	shortAttachedValueOption = regexp.MustCompile(`^-[A-Za-z]+$`)
+	longAttachedValueOption  = regexp.MustCompile(`^--[A-Za-z][A-Za-z0-9-]*=$`)
 )
 
 // bareHomeWord reports a word that is the home directory itself through a

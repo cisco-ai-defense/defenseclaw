@@ -24,8 +24,14 @@ type gap0039Post struct {
 
 func gap0039Do(t *testing.T, block bool, posts ...gap0039Post) (outs []map[string]json.RawMessage, alerts []string) {
 	t.Helper()
+	return gap0039DoWith(t, &fakeSkillScanner{}, block, posts...)
+}
+
+// gap0039DoWith is gap0039Do with the caller's scanner, to see what it scanned.
+func gap0039DoWith(t *testing.T, scan *fakeSkillScanner, block bool, posts ...gap0039Post) (outs []map[string]json.RawMessage, alerts []string) {
+	t.Helper()
 	f := newSubstrateFixture(t, func(c *SubstrateConfig) {
-		c.Skills = &fakeSkillScanner{}
+		c.Skills = scan
 		c.SkillReceiptKey = []byte("shared receipt key for all replicas")
 		c.BlockUnscannedSkills = func(string) bool { return block }
 	})

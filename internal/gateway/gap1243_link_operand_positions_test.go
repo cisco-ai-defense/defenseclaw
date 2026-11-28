@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // gap1243Layout is a home with a synthetic SSH key, AWS credentials, the
@@ -139,6 +140,10 @@ func TestGAP1243LinkOperandPositionsFollowTheLinkFiveTiers(t *testing.T) {
 	for _, p := range gap0437Packs {
 		hook := gap0437Server(t, p, "claudecode", "action")
 		inspect := gap0437Server(t, p, "openclaw", "action")
+		// The rows compare verdicts, not speed: a scan deadline a loaded box
+		// reaches would answer 504 for a call that has a verdict (GAP-0708,
+		// 504 at load 48 under -race).
+		hook.inspectToolScanTimeout, inspect.inspectToolScanTimeout = 30*time.Second, 30*time.Second
 		routes := []struct {
 			name string
 			run  func(id, command string) map[string]any

@@ -27,15 +27,12 @@ import (
 func TestTrustedActionProofBoundaryDemotesUnprovenShadowAndIncomplete(t *testing.T) {
 	raw := RuleFinding{
 		RuleID: "CMD-RAW-REGEX", Severity: "CRITICAL",
-		enforcement: findingEnforcementAllowed,
 	}
 	shadow := RuleFinding{
 		RuleID: "CMD-PARSER-SHADOW", Severity: "LOW",
-		enforcement: findingEnforcementAllowed,
 	}.withTrustedActionProof(newParserShadowFindingProof("CMD-PARSER-SHADOW"))
 	incomplete := RuleFinding{
 		RuleID: "CMD-INCOMPLETE", Severity: "HIGH",
-		enforcement: findingEnforcementAllowed,
 	}.withTrustedActionProof(newActionFactsSemanticFindingProof(
 		"CMD-INCOMPLETE",
 		actionFactsSemanticProofInput{
@@ -109,7 +106,6 @@ func TestTrustedActionProofBoundaryAllowsSemanticAndExactProof(t *testing.T) {
 func TestTrustedActionProofBoundaryAllowsBoundedActionFactsSubgraph(t *testing.T) {
 	finding := RuleFinding{
 		RuleID: "CMD-REMOTE-PAYLOAD-EXEC-CLEANUP", Severity: "CRITICAL",
-		enforcement: findingEnforcementAllowed,
 	}.withTrustedActionProof(newActionFactsSubgraphFindingProof(
 		"CMD-REMOTE-PAYLOAD-EXEC-CLEANUP", true, true,
 	))
@@ -204,7 +200,7 @@ func TestTrustedSemanticOwnerFindingProofRequiresCompleteOuterAction(t *testing.
 func TestTrustedActionProofBoundaryNeverPromotesExistingAdvisory(t *testing.T) {
 	finding := RuleFinding{
 		RuleID: "integrity.git_hooks_bypass", Severity: "MEDIUM",
-		enforcement: findingEnforcementDetectionOnly,
+		Proof: recordProof,
 	}.withTrustedActionProof(newActionFactsSemanticFindingProof(
 		"integrity.git_hooks_bypass",
 		actionFactsSemanticProofInput{

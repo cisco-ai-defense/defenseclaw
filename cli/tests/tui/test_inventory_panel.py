@@ -744,3 +744,60 @@ def test_ide_table_fits_wide_unicode_cells() -> None:
     fitted, = _fit_cells(columns, (row,), 80, keep=("Enabled", "AI"))
     assert sum(cell_len(cell) for cell in fitted) <= 80 - 8 - 2 * len(columns)
     assert fitted[4:] == ("yes", "yes")
+
+
+async def test_inventory_sub_tabs_are_drawn_once_at_80x24(tmp_path) -> None:
+    # GAP-2051: the sub-tab strip was drawn as body text and again as the button
+    # bar below it, which took two rows and left the table 3 to 6 rows.
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from fixtures import snapshot_app
+
+    app = snapshot_app(tmp_path)
+    async with app.run_test(size=(80, 24)) as pilot:
+        app.action_switch_panel("inventory")
+        await pilot.pause()
+        body = app._inventory_body_text()
+    assert not any(label in body for label in ("Summary", "Skills", "Plugins", "MCPs", "Memory")), body
+    assert body.count("\n") <= 1, body
+
+
+async def test_inventory_tables_fit_80x24_without_scrolling_sideways(tmp_path) -> None:
+    # GAP-2051: a long Source value ("All 10 connectors: Amp, Antigravity, ...")
+    # made the Summary table wider than the screen, so it scrolled sideways and
+    # drew a scrollbar of block glyphs instead of ending in an ellipsis. The
+    # Skills tab spent 7 rows on two boxed bars.
+    import sys
+    from pathlib import Path
+
+    from textual.widgets import DataTable
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from fixtures import screen_text, snapshot_app
+
+    names = ("amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode")
+    app = snapshot_app(tmp_path)
+    app.inventory_model.show_connector_column = True
+    app.inventory_model.apply_merged(
+        [(name, json.dumps({"connector": name, "skills": [{"id": f"skill-{name}"}]})) for name in names]
+    )
+    async with app.run_test(size=(80, 24)) as pilot:
+        app.action_switch_panel("inventory")
+        await pilot.pause()
+        table = app.query_one("#panel-table", DataTable)
+        assert not table.show_horizontal_scrollbar
+        assert any(cell.endswith("…") for row in app._table_rows for cell in row), app._table_rows
+        source = next(row[1] for row in app._table_rows if row[0] == "Source")
+        assert source.startswith("All 10 connectors") and len(source) <= 80 - 9 - 16, source
+
+        await pilot.press("l")
+        await pilot.pause()
+        await pilot.pause()
+        assert not table.show_horizontal_scrollbar
+        # Tab bar 3 rows (border and tabs), the filter chips 1 row, no scrollbar rows.
+        text = screen_text(app).splitlines()
+        header = next(i for i, line in enumerate(text) if "Verdict" in line)
+        chips = next(i for i, line in enumerate(text) if "Eligible" in line)
+        assert header - chips == 1, text

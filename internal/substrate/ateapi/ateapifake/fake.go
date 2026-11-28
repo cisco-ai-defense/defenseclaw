@@ -85,7 +85,11 @@ type Fake struct {
 	epoch int64
 }
 
-var _ ateapi.Client = (*Fake)(nil)
+var (
+	_ ateapi.Client           = (*Fake)(nil)
+	_ ateapi.Reverter         = (*Fake)(nil)
+	_ ateapi.DurableSuspender = (*Fake)(nil)
+)
 
 // New returns an empty Fake.
 func New() *Fake {
@@ -508,6 +512,32 @@ func (f *Fake) SuspendActor(_ context.Context, ref *ateapi.ObjectRef) (*ateapi.A
 	case ateapi.ActorStateSuspended:
 	case ateapi.ActorStateRunning:
 		f.suspendLocked(a)
+		f.bump(a.Metadata)
+	default:
+		return nil, status.Errorf(codes.FailedPrecondition, "actor %s is %s", key(ref), a.Status.State)
+	}
+	return clone(a), nil
+}
+
+// SuspendActorDurable implements ateapi.DurableSuspender: a running actor
+// is suspended to a new snapshot generation that is uploaded when the call
+// returns (as DURABILITY_MODE_SYNCHRONOUS does); a SUSPENDED actor is
+// returned as it is.
+func (f *Fake) SuspendActorDurable(_ context.Context, ref *ateapi.ObjectRef) (*ateapi.Actor, error) {
+	if err := f.enter("SuspendActorDurable", key(ref)); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.actors[key(ref)]
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "actor %s not found", key(ref))
+	}
+	switch a.Status.State {
+	case ateapi.ActorStateSuspended:
+	case ateapi.ActorStateRunning:
+		f.suspendLocked(a)
+		head(a.Status).DurableSnapshot = &ateapi.SnapshotStorage{State: ateapi.SnapshotStorageCompleted}
 		f.bump(a.Metadata)
 	default:
 		return nil, status.Errorf(codes.FailedPrecondition, "actor %s is %s", key(ref), a.Status.State)

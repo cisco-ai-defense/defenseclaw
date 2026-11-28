@@ -142,7 +142,20 @@ type Options struct {
 	// detection under the alert action, is answered at once. Known limit: a
 	// gateway with a long note backlog, or a leader too busy to take a note,
 	// can deliver one after the grace.
+	//
+	// The grace never lasts past startGraceCap(StartGrace) after the leader
+	// term began (Leading; New when Leading is never called): a new leader
+	// is reachable within its readiness period, and a gateway's waiting
+	// note arrives within one retry and its timeout after that. Without the
+	// cap the first clear check after any restart was refused, however long
+	// after the restart it came (GAP-0601, IB5 TST-2593).
 	StartGrace time.Duration
+	// Born says whether this leader registered the actor itself in its own
+	// term (its own state, not a timestamp another node wrote: GAP-1148) and
+	// returns the actor's parent UID ("" for none). An actor registered in
+	// this leader term with no parent skips the start grace (bornInTerm,
+	// GAP-0642). Nil, an error or no registration keeps the grace.
+	Born func(ctx context.Context, atespace, uid string) (registeredThisTerm bool, parentUID string, err error)
 }
 
 // Service is the leader's chain and intent state. Every actor has its own
@@ -154,10 +167,15 @@ type Service struct {
 	// action is the chain egress action in force: opts.EgressAction at
 	// start, then SetEgressAction (a config.yaml change, GAP-0276).
 	action atomic.Pointer[string]
-	// servingAt is when the first clear egress check came, for
-	// opts.StartGrace (monotonic with the default clock).
-	servingOnce sync.Once
-	servingAt   time.Time
+	// servingAt is when the term's first clear egress check came (served
+	// says it did), and termAt is when the term began, for
+	// opts.StartGrace and its cap; graceMu guards them (monotonic with the
+	// default clock). Before GAP-0601 (IB5) a sync.Once kept servingAt for
+	// the process and nothing capped the grace.
+	graceMu   sync.Mutex
+	served    bool
+	servingAt time.Time
+	termAt    time.Time
 
 	mu      sync.Mutex
 	actors  map[string]*actorEntry // atespace/uid
@@ -287,6 +305,10 @@ type actorState struct {
 	// Forked is set once the child's clock started from its parent's; a
 	// later or repeated fork event copies missing windows only (GAP-0142).
 	Forked bool `json:"forked,omitempty"`
+	// Checkpoints marks the workspace checkpoints the owner reported, the
+	// newest last (at most maxCheckpointMarks): an undo to one forgets the
+	// facts recorded after it about the files it put back (GAP-0476).
+	Checkpoints []checkpointMark `json:"checkpoints,omitempty"`
 	// Task is the launcher-registered --task text.
 	Task string `json:"task,omitempty"`
 	// UnrecordedUnixNano is the actor's running time of its last tool step
@@ -384,6 +406,7 @@ func New(opts Options) (*Service, error) {
 	}
 	s := &Service{opts: opts, actors: map[string]*actorEntry{}, purging: map[string]bool{}, gone: map[string]bool{},
 		calls: newCallTable()}
+	s.termAt = opts.Now()
 	s.action.Store(&opts.EgressAction)
 	if err := s.load(); err != nil {
 		return nil, err
@@ -1305,7 +1328,9 @@ func toResponse(snap intentstore.Snapshot, task string) IntentResponse {
 	return out
 }
 
-// IntentGet serves IntentGet: a session's context without recording.
+// IntentGet serves IntentGet: a session's context without recording. Found
+// reports a context for the key or a task of the actor. Only the actor's
+// own store is read: the leader keys every store by the verified actor.
 func (s *Service) IntentGet(_ context.Context, in IntentRequest) (IntentResponse, error) {
 	e, release, err := s.acquire(in.Actor)
 	if err != nil {
@@ -1313,8 +1338,11 @@ func (s *Service) IntentGet(_ context.Context, in IntentRequest) (IntentResponse
 	}
 	defer release()
 	s.touch(e)
-	snap, _ := s.intents(e).Peek(in.Key)
-	return toResponse(snap, s.stateOf(e).Task), nil
+	snap, found := s.intents(e).Peek(in.Key)
+	task := s.stateOf(e).Task
+	out := toResponse(snap, task)
+	out.Found = found || task != ""
+	return out, nil
 }
 
 // IntentPut serves IntentPut.
@@ -1469,6 +1497,10 @@ func (s *Service) Lifecycle(ctx context.Context, in LifecycleEvent) (LifecycleRe
 		return s.copyFork(ctx, e, st, instance, *in.Parent, at)
 	case LifecycleReverted:
 		return s.revert(ctx, e, at)
+	case LifecycleCheckpointed:
+		return s.checkpointed(e, in)
+	case LifecycleUndone:
+		return s.undone(ctx, e, in)
 	}
 	return LifecycleResult{}, bad(fmt.Errorf("chainstate: unknown lifecycle event %q", in.Event))
 }
@@ -1539,6 +1571,126 @@ func (s *Service) revert(ctx context.Context, e *actorEntry, at time.Time) (Life
 	}
 	s.syncMemo(ctx, st, e)
 	return LifecycleResult{Barriers: n}, nil
+}
+
+// checkpointMark is a workspace checkpoint's place in the actor's running
+// time: the leader's stamp when the owner reported it, never a time the
+// caller gives, so every chain event recorded before the report is at or
+// before it.
+type checkpointMark struct {
+	Commit          string `json:"commit"`
+	RunningUnixNano int64  `json:"running_unix_nano"`
+}
+
+const maxCheckpointMarks = 64
+
+// checkpointed records the mark of a workspace checkpoint (GAP-0476). A
+// report that comes late only moves the mark later: facts recorded between
+// the checkpoint and its report count as from before it and stay.
+func (s *Service) checkpointed(e *actorEntry, in LifecycleEvent) (LifecycleResult, error) {
+	if !validCommit(in.Checkpoint) {
+		return LifecycleResult{}, bad(errors.New("chainstate: a checkpoint names its commit"))
+	}
+	defer s.lock(e.actor)()
+	mark := s.stamp(e, s.opts.Now())
+	st := s.stateOf(e)
+	marks := make([]checkpointMark, 0, len(st.Checkpoints)+1)
+	for _, c := range st.Checkpoints {
+		if c.Commit != in.Checkpoint {
+			marks = append(marks, c)
+		}
+	}
+	marks = append(marks, checkpointMark{Commit: in.Checkpoint, RunningUnixNano: mark.UnixNano()})
+	if len(marks) > maxCheckpointMarks {
+		marks = marks[len(marks)-maxCheckpointMarks:]
+	}
+	st.Checkpoints = marks
+	return LifecycleResult{}, s.setState(e, st)
+}
+
+// undone takes the facts about the files a workspace undo reverted out of
+// the actor's artifact chains (download then run, decode, sensitive-egress
+// artifact; GAP-0476): the facts recorded after the checkpoint about the
+// files it removed or put back. Without the checkpoint's mark (taken
+// before this version, or its report failed) every fact about a removed
+// file goes, since the file did not exist at the checkpoint and is gone
+// now, and the facts about the files put back stay. Facts about files
+// outside the folder, and every other step, stay: a barrier like a
+// revert's would forget a download outside the folder that still exists.
+func (s *Service) undone(ctx context.Context, e *actorEntry, in LifecycleEvent) (LifecycleResult, error) {
+	if in.Checkpoint != "" && !validCommit(in.Checkpoint) {
+		return LifecycleResult{}, bad(errors.New("chainstate: invalid checkpoint commit"))
+	}
+	removed, err := digestSet(in.Removed)
+	if err != nil {
+		return LifecycleResult{}, bad(err)
+	}
+	restored, err := digestSet(in.Restored)
+	if err != nil {
+		return LifecycleResult{}, bad(err)
+	}
+	st, instance, err := s.storeOf(ctx, e)
+	if err != nil {
+		return LifecycleResult{}, err
+	}
+	defer s.lock(e.actor)()
+	var mark int64
+	known := false
+	for _, c := range s.stateOf(e).Checkpoints {
+		if in.Checkpoint != "" && c.Commit == in.Checkpoint {
+			mark, known = c.RunningUnixNano, true
+		}
+	}
+	res := LifecycleResult{CheckpointUnknown: !known}
+	if len(removed)+len(restored) == 0 {
+		return res, nil
+	}
+	upto := s.stamp(e, s.opts.Now()).UnixNano()
+	res.Forgotten, err = st.ForgetToolChainArtifacts(ctx, instance, func(digest string, received time.Time) bool {
+		return undoForgets(removed[digest], restored[digest], known, mark, upto, received.UnixNano())
+	})
+	return res, err
+}
+
+// undoForgets says whether an undo forgets a stored fact about one file
+// recorded at received (running time): a removed file's facts after the
+// checkpoint's mark (all of them without a mark), a put-back file's only
+// after the mark, and never a fact the leader recorded after it received
+// the undo report (upto, its own stamp), such as a download of the same
+// path after the undo.
+func undoForgets(isRemoved, isRestored, known bool, mark, upto, received int64) bool {
+	if received > upto {
+		return false
+	}
+	after := known && received > mark
+	return (isRemoved && (after || !known)) || (isRestored && after)
+}
+
+func validCommit(c string) bool {
+	return (len(c) == 40 || len(c) == 64) && isLowerHex(c)
+}
+
+func digestSet(digests []string) (map[string]bool, error) {
+	if len(digests) > MaxUndoFiles {
+		return nil, fmt.Errorf("chainstate: an undo names at most %d files of each kind", MaxUndoFiles)
+	}
+	out := make(map[string]bool, len(digests))
+	for _, d := range digests {
+		if len(d) != 64 || !isLowerHex(d) {
+			return nil, errors.New("chainstate: invalid path digest")
+		}
+		out[d] = true
+	}
+	return out, nil
+}
+
+func isLowerHex(v string) bool {
+	for _, r := range v {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // Egress serves ChainEgress: the callout's synchronous chain check. It
@@ -1629,7 +1781,7 @@ func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, 
 		return EgressVerdict{}, errWarming
 	case !v.Deny:
 		// A detection under the alert action is answered, as a hit is.
-		if len(v.Detected) == 0 && s.starting() {
+		if len(v.Detected) == 0 && s.starting() && !s.bornInTerm(ctx, in.Actor) {
 			// Not recorded: as during the outage, the callout refuses a
 			// send and the step is not the actor's yet.
 			return EgressVerdict{}, errStarting
@@ -1646,14 +1798,63 @@ var errStarting = &leader.WireError{Code: leader.CodeUnavailable,
 	Message: "the gateway leader started moments ago; tool calls a gateway could not record while no leader answered may still be arriving"}
 
 // starting reports whether a clear egress check is within opts.StartGrace
-// of the first one this leader answered.
+// of the first one this leader term answered, and within startGraceCap of
+// the term's start.
 func (s *Service) starting() bool {
 	if s.opts.StartGrace <= 0 {
 		return false
 	}
+	s.graceMu.Lock()
+	defer s.graceMu.Unlock()
 	now := s.opts.Now()
-	s.servingOnce.Do(func() { s.servingAt = now })
+	if now.Sub(s.termAt) >= startGraceCap(s.opts.StartGrace) {
+		return false
+	}
+	if !s.served {
+		s.servingAt, s.served = now, true
+	}
 	return now.Sub(s.servingAt) < s.opts.StartGrace
+}
+
+// bornInTerm reports whether the actor was registered in this leader term
+// and is not a fork. Then the start grace has nothing to wait for
+// (GAP-0642). The grace waits for a gateway's note of a tool step it could
+// not record while no leader answered. A registration is written through
+// the leader, so an actor registered in this term did not exist during that
+// outage and took no such step. Its first clone right after a restart is
+// answered at once. Before, it was refused for up to the grace, and a run
+// --clone right after a rollout failed with 503. A fork starts from its
+// parent's windows, which may still be waiting for a note, so it waits like
+// any older actor.
+func (s *Service) bornInTerm(ctx context.Context, a Actor) bool {
+	if s.opts.Born == nil || a.UID == "" {
+		return false
+	}
+	born, parent, err := s.opts.Born(ctx, a.Atespace, a.UID)
+	return err == nil && born && parent == ""
+}
+
+// startGraceCap is how long after the start of a leader term the start
+// grace can last at most: twice the grace (30 s on the leader). A new
+// leader is reachable within its readiness period (5 s) and the Service
+// endpoint update; a gateway's waiting note then arrives within one retry
+// (5 s) and its timeout (2 s). A clear check later than that cannot be
+// ahead of a note, so it is answered: before the cap, the first git clone
+// after any leader restart was refused (GAP-0601, IB5 TST-2593).
+func startGraceCap(grace time.Duration) time.Duration { return 2 * grace }
+
+// Leading starts the leader term (leader.Elector OnStarted, once per
+// process: the elector leads once per Run, and the leader exits when Run
+// ends): the start grace and its cap run from here, not from New, which
+// can come a lease duration earlier while the old leader's lease expires.
+func (s *Service) Leading() {
+	if s == nil {
+		return
+	}
+	s.graceMu.Lock()
+	defer s.graceMu.Unlock()
+	s.served, s.servingAt = false, time.Time{}
+	s.termAt = s.opts.Now()
 }
 
 // staleVerdict answers an egress check under a UID that is not the

@@ -174,6 +174,27 @@ func (s *Store) wantBusyTimeoutLocked() int {
 	return auditBusyTimeoutMillis
 }
 
+// followWriteLockHold sets busy timeout 0 on the store's connection before a
+// write takes it, when the lock is held and the background apply that
+// setWriteLockHeld started has not landed. That apply waits for the
+// connection like any statement, and the call that met the hold usually goes
+// straight on to its next write: with one P (GOMAXPROCS 1) or a loaded host,
+// that write took the connection first, ran with the full busy timeout and
+// waited it out under the held lock, so a benign hook call was answered
+// after about 1.1 s instead of 0.3 s (GAP-1108). The caller must not hold
+// the connection.
+func (s *Store) followWriteLockHold() {
+	if s == nil {
+		return
+	}
+	s.lockWait.mu.Lock()
+	pending := s.lockWait.held && s.lockWait.applied != 0
+	s.lockWait.mu.Unlock()
+	if pending {
+		s.applyWriteLockWait(writeLockApplyWait)
+	}
+}
+
 // applyWriteLockWait sets the busy timeout the hold wants on the store's
 // connection, waiting at most wait for the connection. The caller must not
 // hold that connection.

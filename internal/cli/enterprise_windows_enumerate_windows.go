@@ -1207,6 +1207,7 @@ func standaloneWindowsEnumerateOptions(cfg *config.Config, opts enterprisehooks.
 	opts.ExemptUsers = append([]string(nil), enrollment.ExemptUsers...)
 	opts.IncludeGroups = append([]string(nil), enrollment.IncludeGroups...)
 	opts.ExcludeGroups = append([]string(nil), enrollment.ExcludeGroups...)
+	opts.Enrolled = enterpriseHookEnrolledAccounts(cfg.DataDir, managed.HookGuardianAuthorizationDir(cfg.DataDir))
 	return opts
 }
 

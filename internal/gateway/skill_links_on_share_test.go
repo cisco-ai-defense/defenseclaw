@@ -72,7 +72,7 @@ func newShareSkillFixture(t *testing.T, strict, held bool, liveDelay time.Durati
 	f.ctx = withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Name: "fixture", Home: home})
 	f.projectD = filepath.Join(home, "proj")
 	release := make(chan struct{})
-	restore := hookpaths.OverrideNetworkSharesForTest(func(path string) string {
+	restore := overrideNetworkSharesIdle(t, func(path string) string {
 		for _, root := range append([]string{f.live}, f.dead...) {
 			if path == root || strings.HasPrefix(path, root+string(filepath.Separator)) {
 				return root

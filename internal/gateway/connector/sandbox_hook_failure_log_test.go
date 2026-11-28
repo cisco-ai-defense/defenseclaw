@@ -40,7 +40,7 @@ func TestSandboxHookFailuresPersistInWorkloadHome(t *testing.T) {
 				}
 				assertSandboxFailureLog(t, h, "open", "fail_open")
 			} else {
-				if result.exitCode != 2 {
+				if !codexBlockAnswer(event, result.exitCode, result.stdout) {
 					t.Fatalf("prompt must block: %+v", result)
 				}
 				assertSandboxFailureLog(t, h, "closed", "fail_closed")

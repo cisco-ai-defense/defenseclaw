@@ -2372,7 +2372,7 @@ attributes:
     overrides:
       max_utf8_bytes: 512
       pattern: '^~/[^\x00-\x1f\x7f]*$'
-    notes: The skill folder relative to the user's home, with forward slashes and a ~/ prefix. Present for user, bundled, and plugin skills when their folders are under a scanned home
+    notes: The skill folder relative to the user's home, with forward slashes and a ~/ prefix. It never contains the account name, and raw local paths never leave the endpoint. Present for user, bundled, and plugin skills when their folders are under a scanned home
   introduced_in: telemetry-registry-v3
 - id: defenseclaw.inventory.skill.agents
   type: string[]
@@ -2395,13 +2395,13 @@ attributes:
   examples: [OpenAI]
   stability: stable
   owner: defenseclaw
-  field_class: metadata
+  field_class: content
   sensitivity: internal
   cardinality: bounded
   normalization:
     id: bounded-v1
     overrides: {max_utf8_bytes: 128}
-    notes: The agent vendor for a bundled skill, else the author of the plugin that ships it, else the author its SKILL.md declares; publisher_source says which. Absent when unknown
+    notes: The agent vendor for a bundled skill, else the author of the plugin that ships it, else the author its SKILL.md declares; publisher_source says which. Absent when unknown. Content class because a declared author is free text the skill's author chose, so it is subject to destination redaction like the declared description and version
   introduced_in: telemetry-registry-v3
 - id: defenseclaw.inventory.skill.publisher_source
   type: string
@@ -2471,7 +2471,7 @@ attributes:
   normalization:
     id: redacted-content-v1
     overrides: {max_utf8_bytes: 262144}
-    notes: Sent when ai_discovery.include_skill_manifests is on and the managed gateway can read the file. Files over 256 KiB use ordered parts that end at a line and keep a PEM block whole, one part per publish. A file that cannot be split that way or needs more than 128 parts sends only manifest_hash. A durable receipt can prompt retransmission of missing parts after the grace interval, and complete receipts suppress retransmission of unchanged content. The text is subject to destination redaction
+    notes: Sent when ai_discovery.include_skill_manifests is on and the gateway can read the file. Files over 256 KiB use ordered parts that end at a line and keep a PEM block whole, one part per publish. A file that cannot be split that way or needs more than 128 parts sends only manifest_hash. On a Secure Client endpoint, a durable AI Defense receipt can prompt retransmission of missing parts after the grace interval, and complete receipts suppress retransmission of unchanged content. The text is subject to destination redaction
   introduced_in: telemetry-registry-v3
 - id: defenseclaw.inventory.skill.manifest_hash
   type: string
@@ -3825,8 +3825,8 @@ attributes:
   cardinality: bounded
   normalization:
     id: identifier-v1
-    overrides: {max_utf8_bytes: 63, pattern: '^[a-z0-9][a-z0-9-]{0,62}$'}
-    notes: the --name of enterprise secret set or remove, or the name of a Substrate secret an egress rule injected (log.secret.injected); a name the command refused is left out. Never the value, a prefix, a placeholder or a hash of it
+    overrides: {max_utf8_bytes: 253, pattern: '^[a-z0-9][a-z0-9.-]{0,252}$'}
+    notes: the --name of enterprise secret set or remove, or the name of a Substrate secret (substrate.secrets[].name, a DNS-1123 subdomain, so it may hold dots) an egress rule injected (log.secret.injected) or a change set; a name the command refused is left out. Never the value, a prefix, a placeholder or a hash of it
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.secret.action
   type: string
@@ -3842,6 +3842,20 @@ attributes:
     overrides: {enum: [set, remove]}
     notes: the enterprise secret verb
   introduced_in: telemetry-registry-v2
+- id: defenseclaw.substrate.secret.operation
+  type: string
+  brief: What a Substrate secret change did to a person's value or binding
+  examples: [set]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [set, removed, binding_added, binding_approved, binding_denied, expired]}
+    notes: the self-service Substrate secret verb; never the value, a prefix or a placeholder
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.metric.policy.bundle.result
   type: string
   brief: Canonical bounded metric dimension projected as bundle.result for local observability
@@ -14321,6 +14335,44 @@ groups:
     mandatory_floor: []
     compatibility_profiles:
     - local-observability-v1
+- id: body.substrate.secret.changed
+  type: body_group
+  brief: A Substrate secret value or binding was set, removed, added, approved, denied or expired; carries the secret name, the bound host and the owner's keyed pseudonym, never the value.
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.secret.name
+    requirement_level: required
+  - ref: defenseclaw.substrate.secret.operation
+    requirement_level: required
+  - ref: defenseclaw.network.target_ref
+    requirement_level: recommended
+  - ref: defenseclaw.subject.key
+    requirement_level: recommended
+- id: log.substrate.secret.changed
+  type: log
+  brief: Canonical substrate.secret.changed log identity; one record per Substrate secret value or binding change by the gateway, without the secret value.
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends:
+  - body.substrate.secret.changed
+  attributes: []
+  body_fields: []
+  log:
+    event_name: substrate.secret.changed
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
+    - failed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
 - id: metric.defenseclaw.sandbox.transitions
   type: metric
   brief: Sandbox lifecycle phase transitions aggregated by harness connector and phase pair; sandbox identities are never labels.
@@ -17512,6 +17564,11 @@ producer_identity_sets:
   - event_name: config.secret.changed
     bucket: compliance.activity
     family: log.config.secret.changed
+- id: identity_set.substrate_secret_changed
+  identities:
+  - event_name: substrate.secret.changed
+    bucket: compliance.activity
+    family: log.substrate.secret.changed
 - id: identity_set.config_secret_change_failed
   identities:
   - event_name: config.secret.change_failed
@@ -22131,6 +22188,17 @@ producer_mappings:
   companion_rules: []
   compatibility:
     introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
+- producer: audit_action
+  key: substrate.secret.changed
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.substrate_secret_changed
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v4
     disposition: translate_to_v8
 - producer: audit_action
   key: config.secret.change_failed

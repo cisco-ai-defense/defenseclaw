@@ -997,13 +997,7 @@ func validateWindowsClaudeManagedPolicyTeardownState(
 }
 
 func requireWindowsClaudeTeardownAdministrator() error {
-	token := windows.GetCurrentProcessToken()
-	if token.IsElevated() {
-		return nil
-	}
-	user, err := token.GetTokenUser()
-	if err == nil && user != nil && user.User.Sid != nil &&
-		user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
+	if privileged, _ := CurrentWindowsTokenAdminFacts().ElevatedOrSystem(); privileged {
 		return nil
 	}
 	return errors.New(
@@ -1361,7 +1355,12 @@ func defaultWindowsClaudeManagedPolicyPath() (string, error) {
 	return filepath.Join(programFiles, "ClaudeCode", "managed-settings.d", windowsClaudeManagedPolicyFile), nil
 }
 
-func defaultWindowsClaudeHigherPolicyCheck() error {
+// defaultWindowsClaudeHigherPolicyCheck authenticates the HKLM policy key,
+// then lets the connector decide whether its Settings leave DefenseClaw's
+// managed-settings.d hooks effective for this target's client: the policy
+// carries the DefenseClaw matrix itself, carries only source-control keys, or
+// sets managedSourcesBehavior: merge on a client that honours it (GAP-1731).
+func defaultWindowsClaudeHigherPolicyCheck(opts connector.SetupOpts) error {
 	key, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Policies\ClaudeCode`, registry.READ)
 	if errors.Is(err, registry.ErrNotExist) {
 		return nil
@@ -1380,8 +1379,12 @@ func defaultWindowsClaudeHigherPolicyCheck() error {
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: read Claude Code HKLM Settings policy: %w", err)
 	}
-	if strings.TrimSpace(settings) != "" {
-		return fmt.Errorf("enterprise hooks: Claude Code HKLM Settings policy has higher precedence than file-based policy; deploy the DefenseClaw hook matrix through the existing MDM/GPO source")
+	if err := connector.ClaudeCodeOSAdminPolicyAdmitsManagedHooks(
+		settings,
+		`HKLM Settings policy (HKLM\SOFTWARE\Policies\ClaudeCode\Settings)`,
+		opts,
+	); err != nil {
+		return fmt.Errorf("enterprise hooks: %w", err)
 	}
 	return nil
 }
@@ -1649,9 +1652,31 @@ func installWindowsClaudeManagedPolicyKeepingPublished(
 ) (path string, rollback func() error, err error) {
 	var unlockedRollback func() error
 	var installedState []byte
+	// The recorded-form search of an ensure pass renders the Claude policy
+	// up to once per hook contract, lock and form, and every rendering
+	// checks the hook executables it names; on a managed host that took
+	// 9-14 s, all of it under the transaction lock, so Setup /uninstall and
+	// the drop-in watcher timed out waiting for it (rel-1-0-10 GAP-1713).
+	// The renderings are made here, before the lock; under it the drop-in
+	// and its record are read and authenticated again, and any rendering
+	// they need that was not made here is made there.
+	renders := &windowsClaudeRecordedRenders{}
+	if targetSID == nil {
+		warmWindowsClaudeRecordedRenders(renders, opts)
+	}
+	// The same holds for keep: deferred staging of a pending account with no
+	// known Claude version proves the published drop-in is a rendering of a
+	// known contract, every contract, lock and form, which held the lock
+	// about 5 s (rel-1-0-10 GAP-1742, after GAP-1713). It is decided here on
+	// an unlocked read; under the lock that decision is used only for the
+	// same bytes, after they are authenticated, and other bytes are decided
+	// there.
+	if keep != nil {
+		keep = windowsClaudeKeepDecidedBeforeLock(keep)
+	}
 	err = windowsClaudeManagedPolicyTransaction(func() error {
 		var transactionErr error
-		path, unlockedRollback, transactionErr = installWindowsClaudeManagedPolicyUnlocked(&body, keep, opts, targetSID)
+		path, unlockedRollback, transactionErr = installWindowsClaudeManagedPolicyUnlocked(&body, keep, opts, targetSID, renders)
 		if transactionErr == nil {
 			installedState, transactionErr = os.ReadFile(filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile))
 			if transactionErr != nil && unlockedRollback != nil {
@@ -1677,17 +1702,228 @@ func installWindowsClaudeManagedPolicyKeepingPublished(
 	return path, rollback, err
 }
 
+// matchWindowsClaudeRecordedPolicy finds the recorded form of the published
+// drop-in for record: the current rendering or an earlier form (the direct
+// command, the 1.0.9 guard texts) under any recorded contract, with or without
+// the managed-hooks-only lock. Any recorded form is this deployment's drop-in
+// (rel-1-0-10 GAP-1495; while the launch folders are retired the form this
+// process writes is the 1.0.9 one, GAP-1540). It reports unchanged when the
+// published drop-in already is the current rendering for the image it names,
+// and otherwise returns that rendering, for hookExecutable when moved (the
+// same contract and lock, GAP-0751). A drop-in in no recorded form is refused.
+//
+// The contract and lock opts renders (the ones this process writes) are
+// searched first: in steady state the published drop-in is that rendering,
+// so an unchanged ensure pass renders it once instead of rendering every
+// earlier contract, lock and form first, each rendering checking the hook
+// executables again (about 12 s of CPU every guardian pass on a managed
+// host, rel-1-0-10 GAP-1742). The set of recorded forms is unchanged.
+func matchWindowsClaudeRecordedPolicy(
+	renders *windowsClaudeRecordedRenders,
+	record windowsClaudeManagedPolicyState,
+	published []byte,
+	moved bool,
+	opts connector.SetupOpts,
+) (body []byte, unchanged bool, err error) {
+	for _, combo := range windowsClaudeRecordedCombos(strings.TrimSpace(opts.HookContractID), opts.ClaudeAllowManagedHooksOnly) {
+		contract, lock := combo.contract, combo.lock
+		current, err := renders.render(record, contract, lock)
+		if err != nil {
+			return nil, false, err
+		}
+		recognized := bytes.Equal(published, current)
+		for _, form := range windowsClaudeRecordedForms {
+			if recognized {
+				break
+			}
+			earlier, err := renders.render(record, contract, lock, form)
+			if err != nil {
+				return nil, false, err
+			}
+			recognized = bytes.Equal(published, earlier)
+		}
+		if !recognized {
+			continue
+		}
+		if !moved {
+			return current, bytes.Equal(published, current), nil
+		}
+		next := record
+		next.HookExecutable = filepath.Clean(opts.HookExecutable)
+		current, err = renders.render(next, contract, lock)
+		if err != nil {
+			return nil, false, err
+		}
+		return current, false, nil
+	}
+	return nil, false, errors.New("enterprise hooks: existing Claude machine policy has an unrecognized registered command")
+}
+
+// windowsClaudeRecordedCombo is a hook contract and managed-hooks-only lock a
+// recorded drop-in may have been rendered under.
+type windowsClaudeRecordedCombo struct {
+	contract string
+	lock     bool
+}
+
+// windowsClaudeRecordedCombos is every contract and lock of
+// windowsClaudeRecordedPolicyContracts, locked first, with contract and lock
+// moved to the front when they are one of them. A contract that is not
+// recorded is not added: the search accepts exactly the recorded set.
+func windowsClaudeRecordedCombos(contract string, lock bool) []windowsClaudeRecordedCombo {
+	preferred := windowsClaudeRecordedCombo{contract: contract, lock: lock}
+	var combos []windowsClaudeRecordedCombo
+	found := false
+	for _, recorded := range windowsClaudeRecordedPolicyContracts() {
+		for _, locked := range []bool{true, false} {
+			combo := windowsClaudeRecordedCombo{contract: recorded, lock: locked}
+			if combo == preferred {
+				found = true
+				continue
+			}
+			combos = append(combos, combo)
+		}
+	}
+	if found {
+		combos = append([]windowsClaudeRecordedCombo{preferred}, combos...)
+	}
+	return combos
+}
+
+// windowsClaudeRecordedRenderKey is everything a recorded-form rendering
+// depends on that can differ within one process.
+type windowsClaudeRecordedRenderKey struct {
+	hookExecutable string
+	gatewayAddr    string
+	contract       string
+	lock           bool
+	form           windowsClaudeRecordedForm
+	// delivery is the hook delivery the render reads
+	// (renderWindowsClaudeRecordedPolicyForm): a rendering made for one
+	// delivery mode never answers for the other (GAP-1761).
+	delivery bool
+}
+
+// windowsClaudeRecordedRenders keeps the recorded-form renderings of one
+// policy install, so the search under the transaction lock reuses the ones
+// warmWindowsClaudeRecordedRenders made before it (GAP-1713). A nil value
+// renders every time. It lives for one install only: a later pass renders,
+// and checks the hook executables, again.
+type windowsClaudeRecordedRenders struct {
+	bodies map[windowsClaudeRecordedRenderKey][]byte
+}
+
+func (r *windowsClaudeRecordedRenders) render(
+	record windowsClaudeManagedPolicyState,
+	contract string,
+	lock bool,
+	form ...windowsClaudeRecordedForm,
+) ([]byte, error) {
+	resolved := windowsClaudeWrittenForm(record.HookExecutable)
+	if len(form) > 0 {
+		resolved = form[0]
+	}
+	if r == nil {
+		return windowsClaudeRecordedPolicyRender(record, contract, lock, resolved)
+	}
+	key := windowsClaudeRecordedRenderKey{
+		hookExecutable: record.HookExecutable,
+		gatewayAddr:    record.GatewayAddr,
+		contract:       contract,
+		lock:           lock,
+		form:           resolved,
+		delivery:       secureClientHookDelivery() || resolved == windowsClaudeFormDirect,
+	}
+	if body, ok := r.bodies[key]; ok {
+		return body, nil
+	}
+	body, err := windowsClaudeRecordedPolicyRender(record, contract, lock, resolved)
+	if err != nil {
+		return nil, err
+	}
+	if r.bodies == nil {
+		r.bodies = make(map[windowsClaudeRecordedRenderKey][]byte)
+	}
+	r.bodies[key] = body
+	return body, nil
+}
+
+// warmWindowsClaudeRecordedRenders runs, before the transaction lock, the
+// recorded-form search an ensure pass then runs under it, on an unlocked
+// read of the drop-in and its ownership record, and keeps the renderings in
+// renders. Nothing is decided from this read; a read that fails, or a drop-in
+// that is absent, in no recorded form or behind a link kept at the folder
+// (nothing behind it is read, GAP-0758), leaves renders as it is.
+func warmWindowsClaudeRecordedRenders(renders *windowsClaudeRecordedRenders, opts connector.SetupOpts) {
+	path, err := windowsClaudeManagedPolicyPath()
+	if err != nil {
+		return
+	}
+	if kept, keptErr := windowsManagedPolicyLinkKept(filepath.Dir(path)); keptErr != nil || kept {
+		return
+	}
+	policy, err := snapshotWindowsManagedPolicy(path)
+	if err != nil || !policy.existed {
+		return
+	}
+	state, err := snapshotWindowsManagedState(filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile))
+	if err != nil || !state.existed {
+		return
+	}
+	record, err := validateExistingWindowsManagedPolicyOwnership(policy, state)
+	if err != nil {
+		return
+	}
+	moved := !sameWindowsEnterprisePath(record.HookExecutable, opts.HookExecutable) &&
+		sameWindowsManagedHookImage(record.HookExecutable, opts.HookExecutable)
+	_, _, _ = matchWindowsClaudeRecordedPolicy(renders, record, policy.data, moved, opts)
+}
+
+// windowsClaudeKeepDecidedBeforeLock reads the published drop-in without the
+// transaction lock and returns keep, answering from that read for the same
+// bytes. keep renders the recorded forms and checks the hook executables,
+// so its answer can change with them between the read and the lock; that is
+// no weaker than asking under the lock, which does not cover the hook images
+// either, and the body staging publishes is rendered and checked outside it
+// anyway. Bytes that changed since the read are asked again. Nothing is kept
+// on this read alone: the caller asks only about a drop-in it has
+// authenticated under the lock.
+// A read that fails, a drop-in that is absent, or one behind a link kept at
+// the folder (nothing behind it is read, GAP-0758) leaves keep as it is.
+func windowsClaudeKeepDecidedBeforeLock(keep func(published []byte) bool) func(published []byte) bool {
+	path, err := windowsClaudeManagedPolicyPath()
+	if err != nil {
+		return keep
+	}
+	if kept, keptErr := windowsManagedPolicyLinkKept(filepath.Dir(path)); keptErr != nil || kept {
+		return keep
+	}
+	policy, err := snapshotWindowsManagedPolicy(path)
+	if err != nil || !policy.existed {
+		return keep
+	}
+	read := policy.data
+	decided := keep(read)
+	return func(published []byte) bool {
+		if bytes.Equal(published, read) {
+			return decided
+		}
+		return keep(published)
+	}
+}
+
 // installWindowsClaudeManagedPolicyUnlocked publishes *bodyRef, or keeps the
 // published body when keep accepts it, and leaves the body it wrote in
-// *bodyRef.
+// *bodyRef. renders holds the recorded-form renderings made before the lock.
 func installWindowsClaudeManagedPolicyUnlocked(
 	bodyRef *[]byte,
 	keep func(published []byte) bool,
 	opts connector.SetupOpts,
 	targetSID *windows.SID,
+	renders *windowsClaudeRecordedRenders,
 ) (string, func() error, error) {
 	body := *bodyRef
-	if err := windowsClaudeHigherPolicyCheck(); err != nil {
+	if err := windowsClaudeHigherPolicyCheck(opts); err != nil {
 		return "", nil, err
 	}
 	path, err := windowsClaudeManagedPolicyPath()
@@ -1757,52 +1993,21 @@ func installWindowsClaudeManagedPolicyUnlocked(
 			existingState.GatewayServiceName != os.Getenv(connector.WindowsGatewayServiceNameEnv) {
 			return "", nil, errors.New("enterprise hooks: existing Claude machine policy belongs to another protected deployment")
 		}
-		upgrade := false
-	searchPolicy:
-		for _, contract := range windowsClaudeRecordedPolicyContracts() {
-			for _, lock := range []bool{true, false} {
-				current, renderErr := renderWindowsClaudeRecordedPolicy(existingState, contract, lock)
-				if renderErr != nil {
-					return "", nil, renderErr
-				}
-				// Any recorded form (the current one, the direct command, the
-				// 1.0.9 guard texts) is this deployment's drop-in, rewritten
-				// below in the form this process writes (rel-1-0-10
-				// GAP-1495; while the launch folders are retired that is the
-				// 1.0.9 form, GAP-1540).
-				recognized := bytes.Equal(policySnapshot.data, current)
-				for _, form := range windowsClaudeRecordedForms {
-					if recognized {
-						break
-					}
-					earlier, renderErr := renderWindowsClaudeRecordedPolicy(existingState, contract, lock, form)
-					if renderErr != nil {
-						return "", nil, renderErr
-					}
-					recognized = bytes.Equal(policySnapshot.data, earlier)
-				}
-				if !recognized {
-					continue
-				}
-				if moved {
-					// The same contract and lock, for the current image.
-					next := existingState
-					next.HookExecutable = filepath.Clean(opts.HookExecutable)
-					if current, renderErr = renderWindowsClaudeRecordedPolicy(next, contract, lock); renderErr != nil {
-						return "", nil, renderErr
-					}
-				} else if bytes.Equal(policySnapshot.data, current) {
-					return path, nil, nil
-				}
-				body = current
-				*bodyRef = body
-				upgrade = true
-				break searchPolicy
-			}
+		upgraded, unchanged, err := matchWindowsClaudeRecordedPolicy(
+			renders,
+			existingState,
+			policySnapshot.data,
+			moved,
+			opts,
+		)
+		if err != nil {
+			return "", nil, err
 		}
-		if !upgrade {
-			return "", nil, errors.New("enterprise hooks: existing Claude machine policy has an unrecognized registered command")
+		if unchanged {
+			return path, nil, nil
 		}
+		body = upgraded
+		*bodyRef = body
 	}
 	// The transaction (withWindowsClaudeManagedPolicyTransaction) has
 	// already created managed-settings.d and ClaudeCode, and recorded the
@@ -2261,7 +2466,8 @@ func readTrustedWindowsManagedPolicyFile(path string) ([]byte, bool, error) {
 		data, readErr = readTrustedWindowsManagedPolicyFileOnce(path, &seen)
 		return readErr
 	}
-	err := safefile.RetryTransientRead(read)
+	// An absent managed policy file is an answer: one confirming look.
+	err := safefile.RetryOptionalRead(read)
 	if seen && safefile.IsTransientReadError(err) {
 		err = safefile.RetryPublishedRead(read)
 	}
@@ -2278,6 +2484,9 @@ func readTrustedWindowsManagedPolicyFile(path string) ([]byte, bool, error) {
 func readTrustedWindowsManagedPolicyFileOnce(path string, seen *bool) ([]byte, error) {
 	info, err := pathidentity.LstatPinned(path)
 	if err != nil {
+		if *seen {
+			err = safefile.NameVanished(err)
+		}
 		return nil, fmt.Errorf("enterprise hooks: inspect Claude Code managed policy %s: %w", path, err)
 	}
 	*seen = true
@@ -2295,7 +2504,7 @@ func readTrustedWindowsManagedPolicyFileOnce(path string, seen *bool) ([]byte, e
 	}
 	file, err := winpath.OpenReadShared(path)
 	if err != nil {
-		return nil, fmt.Errorf("enterprise hooks: open Claude Code managed policy %s: %w", path, err)
+		return nil, fmt.Errorf("enterprise hooks: open Claude Code managed policy %s: %w", path, safefile.NameVanished(err))
 	}
 	defer file.Close()
 	openedInfo, err := file.Stat()
@@ -2317,7 +2526,7 @@ func readTrustedWindowsManagedPolicyFileOnce(path string, seen *bool) ([]byte, e
 	}
 	current, err := os.Lstat(path)
 	if err != nil {
-		return nil, fmt.Errorf("enterprise hooks: re-inspect Claude Code managed policy %s: %w", path, err)
+		return nil, fmt.Errorf("enterprise hooks: re-inspect Claude Code managed policy %s: %w", path, safefile.NameVanished(err))
 	}
 	if !current.Mode().IsRegular() {
 		return nil, fmt.Errorf("enterprise hooks: Claude Code managed policy changed type during read: %s", path)
@@ -2759,9 +2968,12 @@ func writeWindowsManagedFile(path string, data []byte, userReadable bool) error 
 
 func windowsManagedFileMatchesExisting(path string, data []byte) (bool, error) {
 	var seen, matched bool
-	err := safefile.RetryTransientRead(func() error {
+	err := safefile.RetryOptionalRead(func() error {
 		info, err := os.Lstat(path)
 		if err != nil {
+			if seen {
+				return safefile.NameVanished(err)
+			}
 			return err
 		}
 		seen = true
@@ -2773,7 +2985,7 @@ func windowsManagedFileMatchesExisting(path string, data []byte) (bool, error) {
 		}
 		current, err := winpath.ReadFileShared(path)
 		if err != nil {
-			return fmt.Errorf("enterprise hooks: read existing managed policy %s: %w", path, err)
+			return fmt.Errorf("enterprise hooks: read existing managed policy %s: %w", path, safefile.NameVanished(err))
 		}
 		if !bytes.Equal(current, data) {
 			return nil

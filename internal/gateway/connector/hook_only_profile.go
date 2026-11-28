@@ -163,6 +163,36 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 	return HookRespondOutput{FieldName: "hook_output", Output: output}
 }
 
+// HookContextOutput is the hook_output of an allowed call of connectorName
+// on event whose only content is additional as the agent's context, built
+// by the connector's own answer above, with ok when that event's answer has
+// a context field: Cursor sessionStart and postToolUse (additional_context),
+// Copilot sessionStart, postToolUse and postToolUseFailure
+// (additionalContext), Devin UserPromptSubmit, SessionStart and PostToolUse
+// (hookSpecificOutput.additionalContext), Antigravity PreInvocation and
+// PostInvocation (an injectSteps ephemeralMessage) and Hermes pre_llm_call
+// (context). The output is nil or empty when additional is "". OpenCode,
+// Kiro and Amp have no hook_output context field (Amp's plugin reads the
+// answer's additional_context).
+func HookContextOutput(connectorName, event, additional string) (map[string]interface{}, bool) {
+	switch ev := canonicalHookEvent(event); {
+	case connectorName == "cursor" && (ev == "sessionstart" || ev == "posttooluse"):
+		return CursorHookOutput(event, "allow", "", additional), true
+	case connectorName == "copilot" && (ev == "sessionstart" || ev == "posttooluse" || ev == "posttoolusefailure"):
+		return copilotHookOutputForProfile(event, "allow", "", "", additional), true
+	case connectorName == "devin" && (ev == "userpromptsubmit" || ev == "sessionstart" || ev == "posttooluse"):
+		return devinHookOutput(event, "allow", "", additional), true
+	case connectorName == "antigravity" && (ev == "preinvocation" || ev == "postinvocation"):
+		return antigravityHookOutputForProfile(event, "allow", "", "", additional), true
+	case connectorName == "hermes" && ev == "prellmcall":
+		if additional == "" {
+			return nil, true
+		}
+		return map[string]interface{}{"context": additional}, true
+	}
+	return nil, false
+}
+
 // CursorHookOutput renders the exact event-native stdout object documented by
 // Cursor. It is shared by the profile path and the legacy gateway fallback so
 // neither path can reintroduce generic fields that an event does not accept.
@@ -299,8 +329,9 @@ func copilotHookOutputForProfile(event, action, rawAction, reason, additional st
 			return map[string]interface{}{"additionalContext": additional}
 		}
 	case "userprompttransformed":
-		// This event is mutation-only. DefenseClaw observes and audits the
-		// transformed prompt but never rewrites model-facing content.
+		// This event is mutation-only. The connector profile never rewrites
+		// model-facing content; the gateway replaces a prompt that an
+		// action-mode block stops (copilotBlockedPromptOutput, GAP-1730).
 		return map[string]interface{}{}
 	}
 	return nil

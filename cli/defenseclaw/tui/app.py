@@ -192,7 +192,9 @@ from defenseclaw.tui.services.setup_state import credential_reload_summary, vali
 from defenseclaw.tui.services.substrate_state import substrate_needs_terminal
 from defenseclaw.tui.services.table_fit import fit_table
 from defenseclaw.tui.services.tui_state import TUIState, TUIStateStore
+from defenseclaw.tui.services.vault_state import VaultPanelModel, vault_help_rows
 from defenseclaw.tui.theme import DEFAULT_TOKENS, TEXTUAL_CSS, severity_color, state_color
+from defenseclaw.tui.vault_panel import VaultPanelMixin
 from defenseclaw.tui.widgets.action_menu import ActionMenuScreen, MenuAction
 from defenseclaw.tui.widgets.data_table import MeasuredDataTable
 from defenseclaw.tui.widgets.fit_columns import FitColumn, FitColumnsTable
@@ -584,7 +586,8 @@ PANELS = (
 # Panels whose tab shows only where they apply (_panel_hidden): Routing
 # while routing is on or routing.admin is set. Kept out of PANELS so the
 # tab strip of every other install is unchanged.
-OPTIONAL_PANELS = (("routing", "M", "Routing"),)
+# Vault where sandboxes run (Linux and macOS).
+OPTIONAL_PANELS = (("routing", "M", "Routing"), ("vault", "K", "Vault"))
 ALL_PANELS = PANELS + OPTIONAL_PANELS
 
 # Letter panel keys work only in the case the tab strip and ? help show
@@ -725,7 +728,7 @@ class _PanelMain(Vertical):
             self.app.call_after_refresh(recheck)
 
 
-class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App[None]):
+class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, VaultPanelMixin, App[None]):
     """Textual TUI foundation.
 
     This first slice intentionally implements shell, routing, command
@@ -798,6 +801,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
     Screen.-short #body,
     Screen.-short .panel-controls {
         margin-bottom: 0;
+    }
+
+    /* The Inventory bars give rows to the table at 80x24 (GAP-2051): no
+       scrollbar row under the tabs (the "more" mark on the border says the
+       bar scrolls) and no box around the filter chips. */
+    Screen.-short #inventory-controls {
+        scrollbar-size-horizontal: 0;
+    }
+
+    Screen.-short #inventory-filter-controls {
+        border: none;
     }
 
     #body {
@@ -1351,6 +1365,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
         sandbox_model: SandboxesPanelModel | None = None,
         policy_model: PoliciesPanelModel | None = None,
         routing_model: RoutingPanelModel | None = None,
+        vault_model: VaultPanelModel | None = None,
         setup_model: SetupPanelModel | None = None,
         first_run_model: FirstRunPanelModel | None = None,
         first_run: bool = False,
@@ -1454,6 +1469,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
         self._sandbox_init(sandbox_model)
         self._policy_init(policy_model)
         self._routing_init(routing_model)
+        self._vault_init(vault_model)
         self.setup_model = setup_model or SetupPanelModel(config)
         self._catalog_load_seq: dict[str, int] = {}
         self.catalog_models: dict[str, CatalogListModel[Any]] = {
@@ -2682,6 +2698,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
 
         if panel == "routing":
             return not self._routing_tab_wanted()
+        if panel == "vault":
+            return not self._vault_tab_wanted()
         return False
 
     def _visible_panels(self) -> list[str]:
@@ -2720,6 +2738,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
             return getattr(self.activity_model, "count", 0)
         if panel == "sandboxes":
             return self.sandbox_model.total_count()
+        if panel == "vault":
+            return self.vault_model.total_count()
         if panel == "logs":
             lines = getattr(self.logs_model, "lines", {}) or {}
             if snapshot is not None:
@@ -3001,6 +3021,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
                 self._schedule_policy_load(sandbox=True)
         if panel == "routing":
             self._schedule_routing_load()
+        if panel == "vault":
+            self._schedule_vault_load()
         if (
             panel == "runtime"
             and not self._runtime_model_injected
@@ -4456,6 +4478,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
             self._sync_sandbox_controls()
         elif self.active_panel == "routing":
             self.routing_model.cursor = event.cursor_row
+        elif self.active_panel == "vault":
+            self.vault_model.cursor = event.cursor_row
         elif self.active_panel == "policies":
             self.policy_model.cursor = event.cursor_row
             if self.policy_model.cursor != event.cursor_row:
@@ -5197,6 +5221,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
             "routing": [
                 *routing_help_rows(self.routing_model.managed),
             ],
+            "vault": [
+                *vault_help_rows(),
+            ],
             "policies": [
                 *((keys, what) for keys, what, _views in policy_keymap_rows(self.policy_model.sandbox_supported)),
                 ("A", "Activity panel (a is the alert level on Posture and Policies)"),
@@ -5316,8 +5343,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
             self.inventory_model.set_size(
                 int(getattr(self.size, "width", 0) or 0), int(getattr(self.size, "height", 0) or 0)
             )
-            self._table_columns = self.inventory_model.data_table_columns()
-            self._table_rows = self.inventory_model.data_table_rows()
+            # Every sub-tab fits the terminal width with an ellipsis, so a long
+            # Source value never makes the table scroll sideways and draw a
+            # scrollbar of block glyphs (GAP-2051). The detail card has the value.
+            self._table_columns, self._table_rows = self._fit_to_screen(
+                self.inventory_model.data_table_columns(), self.inventory_model.data_table_rows()
+            )
             empty = self.inventory_model.empty_state()
             suffix = f"\n\n{empty}" if empty else ""
             self.body_text = self._inventory_body_text() + suffix
@@ -5366,6 +5397,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
             self._table_columns = self.routing_model.data_table_columns(compact)
             self._table_rows = self.routing_model.data_table_rows(compact)
             self.body_text = self._routing_body_text()
+            return self.body_text
+        if self.active_panel == "vault":
+            compact = self.size.width < 100
+            self._table_columns = self.vault_model.data_table_columns(compact)
+            self._table_rows = self.vault_model.data_table_rows(compact)
+            self.body_text = self._vault_body_text()
             return self.body_text
         if self.active_panel == "policies":
             self._table_columns, self._table_rows = self.policy_model.table(self._policy_table_width())
@@ -10714,22 +10751,19 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
     def _inventory_detail_short(self) -> bool:
         """An open Inventory detail on a short terminal (up to 30 rows).
 
-        At 80x24 the sub-tab line, the filter chips and the multi-connector
-        strip left the detail card one row, its top border, and PgDn showed
-        nothing (B-32). While a detail is open those two give their rows to
-        it; the sub-tab bar stays, and Esc brings them back.
+        At 80x24 the filter chips and the multi-connector strip left the
+        detail card one row, its top border, and PgDn showed nothing (B-32).
+        While a detail is open those two give their rows to it; the sub-tab
+        bar stays, and Esc brings them back.
         """
 
         height = int(getattr(self.size, "height", 0) or 0)
         return bool(self.inventory_model.detail_open) and 0 < height <= 30
 
     def _inventory_body_text(self) -> str:
-        tabs = "" if self._inventory_detail_short() else "  ".join(
-            f"[{TOKENS.accent_violet} bold]{tab.display_label}[/]"
-            if tab.active
-            else f"[{TOKENS.text_secondary}]{tab.display_label}[/]"
-            for tab in self.inventory_model.subtab_info()
-        )
+        # The sub-tabs are the button bar right below, so they are not repeated
+        # here: the text copy took two rows at 80x24 and left the table 3 to 6
+        # rows (GAP-2051). The per-tab counts are in the Summary table.
         scope = self.inventory_model.scope_state()
         scanned = [chip.category for chip in scope.chips if chip.active]
         scan_scope = (
@@ -10754,7 +10788,6 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
         return (
             f"[bold #22D3EE]Inventory[/]  [{TOKENS.text_muted}]r scans:[/] {scan_scope}{filter_text}\n"
             f"{connector_chip}"
-            f"{tabs}"
         ).rstrip("\n")
 
     def _logs_body_text(self) -> str:
@@ -11130,6 +11163,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
             return self.sandbox_model.view
         if active_panel == "routing":
             return self.routing_model.view + ("-managed" if self.routing_model.managed else "")
+        if active_panel == "vault":
+            return "vault-rows" if self.vault_model.entries else "vault"
         if active_panel == "policies":
             return self.policy_model.view
         if self.active_panel == "setup":
@@ -12034,6 +12069,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
             return self.sandbox_model.cursor
         if self.active_panel == "routing":
             return self.routing_model.cursor
+        if self.active_panel == "vault":
+            return self.vault_model.cursor
         if self.active_panel == "policies":
             return self.policy_model.cursor
         if self.active_panel == "runtime":
@@ -12097,6 +12134,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
             return self._apply_sandbox_action(self.sandbox_model.handle_key(key))
         if self.active_panel == "routing":
             return self._apply_routing_action(self.routing_model.handle_key(_vim_key(key)))
+        if self.active_panel == "vault":
+            return self._apply_vault_action(self.vault_model.handle_key(_vim_key(key)))
         if self.active_panel == "policies":
             if key in {"pagedown", "page_down", "pageup", "page_up"} and self._panel_aside_below is not None:
                 # The detail under the table shows four lines at 80x24;
@@ -12281,7 +12320,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
 
         if self.active_panel != "overview" or self.help_open or len(self.screen_stack) > 1:
             return False
-        key = key.lower()
+        # Named keys only: a capital letter is a panel shortcut (K Vault),
+        # never the vim move of its lowercase form.
+        if len(key) > 1:
+            key = key.lower()
         scroll_line_keys = {"down", "j"}
         scroll_up_keys = {"up", "k"}
         page_down_keys = {"pagedown", "page_down", "ctrl+f"}
@@ -13831,6 +13873,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
             await self._load_setup_credentials()
         elif command in {"sandbox", "registry"}:
             self._refresh_cached_config()
+            if command == "sandbox" and args[1:2] == ("vault",):
+                self._vault_command_done()
         elif command == "doctor":
             self._load_doctor_cache()
         elif command == "routing":
@@ -16778,7 +16822,8 @@ def _panel_key(event: events.Key) -> str:
         # bindings: folding them to ``d``/``y`` let Alerts turn Shift+D into
         # "dismiss alert" and Overview into a foreground doctor preview.
         # ``P`` is the Policies shortcut; Runtime keeps ``p`` for its planes.
-        if event.character in {"A", "C", "D", "E", "G", "J", "M", "N", "P", "R", "S", "T", "V", "X", "Y"}:
+        # ``K`` is the Vault shortcut; ``k`` stays the vim move.
+        if event.character in {"A", "C", "D", "E", "G", "J", "K", "M", "N", "P", "R", "S", "T", "V", "X", "Y"}:
             return event.character
         return event.character.lower()
     return event.key

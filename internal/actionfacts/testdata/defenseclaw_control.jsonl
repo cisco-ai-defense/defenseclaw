@@ -518,6 +518,8 @@
 {"id": "sub18b-42", "dialect": "", "command": "defenseclaw substrate template scan r/a@sha256:00", "want": ""}
 {"id": "sub18b-43", "dialect": "", "command": "defenseclaw substrate", "want": ""}
 {"id": "sub18b-44", "dialect": "", "command": "defenseclaw substrate secrets", "want": ""}
+{"id": "sub18b-47", "dialect": "", "command": "defenseclaw substrate port web-3f2a 3000", "want": "substrate"}
+{"id": "sub18b-48", "dialect": "", "command": "defenseclaw substrate port web-3f2a 3000:8000 5173 --json", "want": "substrate"}
 {"id": "sub18b-45", "dialect": "", "command": "defenseclaw substrate run --help", "want": ""}
 {"id": "sub18b-46", "dialect": "", "command": "defenseclaw-gateway substrate-bundle test", "want": ""}
 {"id": "g596c-b18", "dialect": "", "command": "cat > /tmp/w1.sh <<'EOF'\ndefenseclaw-gateway stop\nEOF\n\"/dcx-put\" /tmp/w1.sh /tmp/w1.sh", "want": ""}
@@ -536,3 +538,16 @@
 {"id": "sub19-01", "dialect": "", "command": "defenseclaw config set substrate.chain_egress_action alert", "want": "config"}
 {"id": "sub19-02", "dialect": "", "command": "defenseclaw config set substrate.require_attested_templates false", "want": "config"}
 {"id": "sub19-03", "dialect": "", "command": "defenseclaw config get substrate.chain_egress_action", "want": ""}
+{"id": "sub20-adm-01", "dialect": "", "command": "defenseclaw substrate admin revoke --user bob@example.com", "want": "substrate"}
+{"id": "sub20-adm-02", "dialect": "", "command": "defenseclaw substrate admin revoke --user bob@example.com --reason \"left the team\" --json", "want": "substrate"}
+{"id": "sub20-adm-03", "dialect": "", "command": "defenseclaw substrate admin revoke --lift --user bob@example.com", "want": "substrate"}
+{"id": "sub20-adm-04", "dialect": "", "command": "defenseclaw substrate admin revoke --list", "want": "substrate"}
+{"id": "sub20-adm-05", "dialect": "", "command": "defenseclaw substrate admin", "want": "substrate"}
+{"id": "sub20-adm-06", "dialect": "", "command": "defenseclaw substrate status", "want": ""}
+{"id": "g1978-u01", "dialect": "", "command": "defenseclaw sandbox vault confirm --yes GITHUB_TOKEN", "want": "unproven"}
+{"id": "g1978-u02", "dialect": "", "command": "defenseclaw sandbox vault confirm GITHUB_TOKEN", "want": "unproven"}
+{"id": "g1978-v01", "dialect": "", "command": "defenseclaw sandbox vault list", "want": ""}
+{"id": "g1978-v02", "dialect": "", "command": "defenseclaw sandbox vault show GITHUB_TOKEN", "want": ""}
+{"id": "g1978-v03", "dialect": "", "command": "defenseclaw sandbox vault replace --value-stdin DEMO_API_TOKEN", "want": ""}
+{"id": "g1978-v04", "dialect": "", "command": "defenseclaw sandbox vault bind DEMO_API_TOKEN --host api.example.com", "want": ""}
+{"id": "g1978-v05", "dialect": "", "command": "defenseclaw sandbox vault rename DEMO_API_TOKEN PAY_TOKEN", "want": ""}

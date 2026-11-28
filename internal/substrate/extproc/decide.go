@@ -20,12 +20,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 )
 
 // Categories the callout adds to the egress Decider's (egress.Category).
@@ -43,6 +45,14 @@ const (
 	CategoryBodyUninspected = "body_uninspectable"
 	CategoryCalloutError    = "callout_error"
 	CategoryInternalHost    = "defenseclaw_internal"
+	// CategoryPushRedirect is a git push of an actor that holds a push
+	// grant to a repository other than the approved one, and
+	// CategoryPushUnchecked one whose grant check got no answer (GAP-1073).
+	CategoryPushRedirect  = "push_redirect"
+	CategoryPushUnchecked = "push_unchecked"
+	// CategoryRateLimited is a request over the actor's rate (GAP-0635):
+	// 429 with Retry-After.
+	CategoryRateLimited = "rate_limited"
 )
 
 // Decision sources the callout adds to egress.Source.
@@ -133,6 +143,8 @@ type Verdict struct {
 	Findings      []string
 	// Retryable refusals (the callout could not decide) answer 503.
 	Retryable bool
+	// TooMany refusals (the actor's rate, GAP-0635) answer 429.
+	TooMany bool
 	// formRules marks a POST whose body may name another method (_method)
 	// where a deny or ask rule covers its host and path (GAP-0046):
 	// DecideBody decides it again on every method the body names.
@@ -158,7 +170,10 @@ type Options struct {
 	ChainChecker ChainChecker
 	Judge        ToolJudge
 	Events       EventSink
-	Now          func() time.Time
+	// PushGrants checks git pushes against the open pull --push-branch
+	// grants on the leader (GAP-1073); nil: no grants are enforced.
+	PushGrants PushGrantChecker
+	Now        func() time.Time
 }
 
 // Engine decides requests. It is safe for concurrent use.
@@ -171,6 +186,7 @@ type Engine struct {
 	checker    ChainChecker
 	judge      ToolJudge
 	events     EventSink
+	pushGrants PushGrantChecker
 	red        *Redactor
 	secrets    *secretValues
 	dcHosts    *hostMatcher
@@ -181,7 +197,9 @@ type Engine struct {
 	bindings   []binding
 	body       *bodyMode
 	chainLimit chainLimiter
-	now        func() time.Time
+	// rate holds every actor to rate_limits.per_actor_rps (GAP-0635).
+	rate *ratelimit.Limiter
+	now  func() time.Time
 }
 
 // NewEngine builds an Engine and starts its chain worker; Close stops it.
@@ -194,7 +212,7 @@ func NewEngine(o Options) (*Engine, error) {
 		return nil, err
 	}
 	e := &Engine{cfg: cfg, policies: o.Policies, asks: o.Asks, checker: o.ChainChecker, judge: o.Judge,
-		events: o.Events, now: o.Now, mcpNames: map[string]string{}}
+		events: o.Events, pushGrants: o.PushGrants, now: o.Now, mcpNames: map[string]string{}}
 	if e.now == nil {
 		e.now = time.Now
 	}
@@ -225,10 +243,57 @@ func NewEngine(o Options) (*Engine, error) {
 			e.mcpNames[nh] = strings.TrimSpace(name)
 		}
 	}
-	e.bindings = compileBindings(cfg.Secrets)
+	e.bindings = compileBindings(cfg.Secrets, cfg.NoSwapHosts)
 	e.body = newBodyMode(cfg.BodyInspection)
 	e.chain = newChainQueue(o.ChainSink, cfg.Chain.QueueSize)
+	// Only the actor budget limits: the atespace budget and the in-flight
+	// cap are the gateway's (an allowed request's stream has no end the
+	// headers stage sees, so the charge is released at once).
+	e.rate = ratelimit.New(ratelimit.Config{PerActorRPS: cfg.RateLimits.PerActorRPS,
+		PerAtespaceRPS: 1 << 29, PerActorInFlight: math.MaxInt32, Now: e.now})
 	return e, nil
+}
+
+// ShareRates makes the actor budgets the cluster's: the callout replicas
+// count their requests through the leader, as the gateway's do
+// (GAP-0566). A nil send keeps the budget per replica.
+func (e *Engine) ShareRates(send ratelimit.ShareFunc) {
+	if send != nil {
+		e.rate.ShareThrough(send)
+	}
+}
+
+// rateKeyPrefix keeps the callout's keys apart from the gateway's in the
+// leader's one share table.
+const rateKeyPrefix = "egress/"
+
+// overRate charges one request to its actor (GAP-0635) and returns the
+// refusal when the actor is over its rate. Requests the callout refuses
+// before any policy (no identity, no host, a DefenseClaw-internal host) and
+// requests to the actor listener (the gateway limits those itself) are not
+// charged. The actor is its atespace and name: the UID is not known yet,
+// and a flood is refused before it costs a registration lookup.
+func (e *Engine) overRate(req *Request) (Verdict, bool) {
+	if req.IdentityErr != nil || req.Host == "" {
+		return Verdict{}, false
+	}
+	if _, ok := e.internal.match(req.Host); ok {
+		return Verdict{}, false
+	}
+	if _, ok := e.dcHosts.match(req.Host); ok {
+		return Verdict{}, false
+	}
+	space := rateKeyPrefix + req.Actor.Atespace
+	release, err := e.rate.Acquire(space, space+"/"+req.Actor.Name)
+	if err == nil {
+		release()
+		return Verdict{}, false
+	}
+	v := deny(Verdict{}, CategoryRateLimited, string(egress.SourceGuard), "rate_limits.per_actor_rps",
+		fmt.Sprintf("This actor is sending more than %g requests a second through the egress gateway.", e.cfg.RateLimits.PerActorRPS))
+	v.TooMany = true
+	v.Findings = []string{"rate_limited:actor"}
+	return v, true
 }
 
 // Close stops the chain worker after it drains.
@@ -298,6 +363,9 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 		}
 	}()
 	begin := e.now()
+	if limited, over := e.overRate(req); over {
+		return limited
+	}
 	var p pass
 	v = e.decideHeaders(ctx, req, &p)
 	switch {
@@ -435,6 +503,7 @@ func (e *Engine) decideHeaders(ctx context.Context, req *Request, p *pass) (v Ve
 		}
 	}
 	req.Actor.UID, req.Actor.Profile, req.Actor.Unattended = rec.UID, rec.Profile, rec.Unattended
+	req.Actor.Person, req.Actor.Principal = rec.Person, rec.Principal
 	pol, err := e.policies.PolicyFor(ctx, req.Actor)
 	if err != nil || pol == nil {
 		return e.failure(v, CategoryCalloutError, "DefenseClaw could not load this actor's policy.")
@@ -445,6 +514,12 @@ func (e *Engine) decideHeaders(ctx context.Context, req *Request, p *pass) (v Ve
 	if !d.Allowed {
 		v = deny(v, string(d.Category), string(d.Source), d.Rule, d.Reason)
 		v.Feed, v.FeedVersion, v.AdminRule = d.Feed, d.FeedVersion, egress.AdminRule(d.Category)
+		return v
+	}
+	// A git push while the actor holds a push grant goes only to the
+	// approved repository (GAP-1073); with no grant nothing changes.
+	var refused bool
+	if v, refused = e.pushGrantStage(ctx, v, req); refused {
 		return v
 	}
 
@@ -892,6 +967,18 @@ func (e *Engine) ask(ctx context.Context, v Verdict, req *Request, pol *Policy, 
 // the egress filter's buffer and then by the cap in DecideBody. A stated
 // length over the cap, and event-stream, gRPC and multipart bodies (never
 // buffered, D9), can't be inspected.
+//
+// A stated length over the cap is refused (closed) on its headers only
+// where the egress filter is known to send bodies: body_inspection on, or
+// auto once a body has reached the callout, and with body_inspection off,
+// as before. Under auto with no body seen yet the filter may be stock
+// Agent Substrate v1.0.0, which forwards every body unread and only the
+// smaller ones with an alert (GAP-0516): such a request asks for its body
+// like one without a length. A filter that sends bodies then buffers it
+// up to its own limit (over it, a local 413) and DecideBody refuses it
+// over the cap; a stock filter forwards it with body_not_received, as it
+// does every body. A managed closed callout still refuses an MCP request
+// until a body has come (GAP-0146).
 func (e *Engine) wantBody(req *Request) (bool, string) {
 	_, mcp := e.mcpHosts.match(req.Host)
 	_, listed := e.bodyHosts.match(req.Host)
@@ -905,7 +992,7 @@ func (e *Engine) wantBody(req *Request) (bool, string) {
 		strings.HasPrefix(ct, "multipart/") {
 		return false, whyStreaming
 	}
-	if req.ContentLength > e.cfg.BodyMaxBytes {
+	if req.ContentLength > e.cfg.BodyMaxBytes && (e.cfg.BodyInspection != BodyAuto || e.body.confirmed()) {
 		return false, whyOverCap
 	}
 	if !e.body.want() {

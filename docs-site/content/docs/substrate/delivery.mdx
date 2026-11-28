@@ -50,7 +50,7 @@ cosign verify ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10 ...
 
 Commit the chart reference and `defenseclaw-values.yaml` to the repo Argo CD or Flux watches. Changes go through review like any other cluster change. DefenseClaw needs nothing beyond what the chart installs. Run `defenseclaw substrate setup` once, and again after a Substrate upgrade.
 
-`setup` writes the `SubstrateInstall` file but has no GitOps mode yet (no `--overlay-only` or `--no-chart`): apply the callout overlay from that file with `ate-setup deploy`, and let Argo CD or Flux own the chart. The overlay is Substrate's object, so it survives `helm uninstall` and every sync of the chart.
+**Preview.** Run `defenseclaw substrate setup --overlay-only` (also `--no-chart`) to write the `SubstrateInstall` file for the repo. It makes the same checks as plain `setup`, never runs Helm, and prints the chart values the overlay assumes (`callout.port`, and `config.substrate.identity.issuer` with `--issuer`) so the values file in your repo can match. Commit the file and apply it with `ate-setup deploy`; Argo CD or Flux owns the chart. The overlay is Substrate's object, so it survives `helm uninstall` and every sync of the chart. `--overlay-only --remove` takes the overlay back out the same way.
 
 With Argo CD, install Argo CD into the `argocd` namespace: the ClusterRoleBindings of the upstream `install.yaml` name that namespace, so an Argo CD installed anywhere else has no cluster rights until you change the namespace of their subjects.
 
@@ -92,7 +92,7 @@ On laptops, tamper protection keeps users from removing DefenseClaw. In a cluste
 
 ## Uninstall
 
-`helm uninstall` first removes every egress policy DefenseClaw wrote, so agents fall back to deny-all, and the credential provider grant. It fails while any remain, and prints the snapshot purge steps. Then run `defenseclaw substrate setup --remove` to take the callout out of the overlay. **Nothing is left open.** The store volume is kept unless you delete it. Delete the agents, or give them allow lists of your own. On a cluster where people sign in with Kubernetes credentials, the uninstall also removes the gateway's `system:auth-delegator` ClusterRoleBinding and names it in its log.
+`helm uninstall` first removes every egress policy DefenseClaw wrote, so agents fall back to deny-all, and the credential provider grant. It fails while any remain. Only once every policy is gone does it delete the Jobs and pods that earlier failed hooks left (a failed hook keeps its Job). Then it prints the purge steps, which name what stays on purpose: the snapshots, the store volume, the hook-made Secrets, and the access-policy grants of DefenseClaw's ServiceAccounts. Only a global owner can remove those grants, with `kubectl ate get access-policy --global -o yaml > global.yaml`, deleting the members the step names, then `kubectl ate update access-policy --global -f global.yaml`, and the same with `-a ATESPACE` for each writable atespace. Then run `defenseclaw substrate setup --remove` to take the callout out of the overlay. **Nothing is left open.** The store volume is kept unless you delete it. Delete the agents, or give them allow lists of your own. On a cluster where people sign in with Kubernetes credentials, the uninstall also removes the gateway's `system:auth-delegator` ClusterRoleBinding and names it in its log.
 
 ## Fleet management
 

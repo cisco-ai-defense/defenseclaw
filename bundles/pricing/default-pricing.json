@@ -1,6 +1,18 @@
 {
-  "_comment": "Reviewed default price table that init, setup tokenomics and upgrade write into config.yaml as observability.pricing. It is only a seed: the gateway never reads this file and compiles no price into a binary; it prices from the table in config.yaml. USD per million tokens, public list prices. A model with no row has no cost (unknown_model: omit), never a guessed one. Edit the table in config.yaml; bump version when you change it.",
-  "version": "2026-11-12.1",
+  "_comment": "Reviewed default price table that init, setup tokenomics and upgrade write into config.yaml as observability.pricing. It is only a seed: the gateway never reads this file and compiles no price into a binary; it prices from the table in config.yaml. USD per million tokens, public list prices from the vendors' official pricing pages (_sources names the page and the date each row was checked). A model with no row has no cost (unknown_model: omit), never a guessed one. Edit the table in config.yaml; bump version when you change it.",
+  "_sources": [
+    {"row": "anthropic/claude-haiku-4-5*", "source": "https://platform.claude.com/docs/en/about-claude/pricing", "checked": "2026-11-21", "note": "Claude API list price; cache write is the 5-minute write"},
+    {"row": "bedrock/claude-haiku-4-5*", "source": "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrockFoundationModels/current/index.json", "checked": "2026-11-21", "note": "AWS Price List (Amazon Bedrock Foundation Models offer, publicationDate 2026-11-20T08:34:14Z), us-east-1 on-demand Global endpoint rows; a regional (us./eu./apac.) endpoint is billed 10 percent more"},
+    {"row": "anthropic/claude-sonnet-4-5*", "source": "https://platform.claude.com/docs/en/about-claude/pricing", "checked": "2026-11-21", "note": "Claude API list price; cache write is the 5-minute write"},
+    {"row": "bedrock/claude-sonnet-4-5*", "source": "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrockFoundationModels/current/index.json", "checked": "2026-11-21", "note": "AWS Price List (Amazon Bedrock Foundation Models offer, publicationDate 2026-11-20T08:34:14Z), us-east-1 on-demand Global endpoint rows; a regional (us./eu./apac.) endpoint is billed 10 percent more"},
+    {"row": "anthropic/claude-opus-4-5*", "source": "https://platform.claude.com/docs/en/about-claude/pricing", "checked": "2026-11-21", "note": "Claude API list price; cache write is the 5-minute write"},
+    {"row": "bedrock/claude-opus-4-5*", "source": "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrockFoundationModels/current/index.json", "checked": "2026-11-21", "note": "AWS Price List (Amazon Bedrock Foundation Models offer, publicationDate 2026-11-20T08:34:14Z), us-east-1 on-demand Global endpoint rows; a regional (us./eu./apac.) endpoint is billed 10 percent more"},
+    {"row": "openai/gpt-5", "source": "https://developers.openai.com/api/docs/pricing", "checked": "2026-11-21", "note": "Standard tier; OpenAI lists no cache write price"},
+    {"row": "openai/gpt-5-20*", "source": "https://developers.openai.com/api/docs/pricing", "checked": "2026-11-21", "note": "dated gpt-5 snapshots (gpt-5-2025-08-07) are billed as gpt-5; the pattern does not match gpt-5.2, gpt-5-mini, gpt-5-nano or gpt-5-pro"},
+    {"row": "openai/gpt-5.2", "source": "https://developers.openai.com/api/docs/pricing", "checked": "2026-11-21", "note": "Standard tier"},
+    {"row": "openai/gpt-5.2-20*", "source": "https://developers.openai.com/api/docs/pricing", "checked": "2026-11-21", "note": "dated gpt-5.2 snapshots; gpt-5.2-pro (21.00/168.00) has no row, so it has no cost rather than the gpt-5.2 price"}
+  ],
+  "version": "2026-11-21.1",
   "unknown_model": "omit",
   "models": [
     {"provider": "anthropic", "model": "claude-haiku-4-5*", "input_per_mtok": 1.0, "output_per_mtok": 5.0, "cache_read_per_mtok": 0.1, "cache_write_per_mtok": 1.25},
@@ -10,6 +22,8 @@
     {"provider": "anthropic", "model": "claude-opus-4-5*", "input_per_mtok": 5.0, "output_per_mtok": 25.0, "cache_read_per_mtok": 0.5, "cache_write_per_mtok": 6.25},
     {"provider": "bedrock", "model": "claude-opus-4-5*", "input_per_mtok": 5.0, "output_per_mtok": 25.0, "cache_read_per_mtok": 0.5, "cache_write_per_mtok": 6.25},
     {"provider": "openai", "model": "gpt-5", "input_per_mtok": 1.25, "output_per_mtok": 10.0, "cache_read_per_mtok": 0.125},
-    {"provider": "openai", "model": "gpt-5-2*", "input_per_mtok": 1.25, "output_per_mtok": 10.0, "cache_read_per_mtok": 0.125}
+    {"provider": "openai", "model": "gpt-5-20*", "input_per_mtok": 1.25, "output_per_mtok": 10.0, "cache_read_per_mtok": 0.125},
+    {"provider": "openai", "model": "gpt-5.2", "input_per_mtok": 1.75, "output_per_mtok": 14.0, "cache_read_per_mtok": 0.175},
+    {"provider": "openai", "model": "gpt-5.2-20*", "input_per_mtok": 1.75, "output_per_mtok": 14.0, "cache_read_per_mtok": 0.175}
   ]
 }

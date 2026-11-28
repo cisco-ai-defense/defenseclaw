@@ -308,6 +308,7 @@ func installWindowsCodexManagedResult(
 		HookContractID:             lockEntry.ContractID,
 		HookContractLockUpdatedAt:  lockUpdatedAt,
 		HookContractEntryUpdatedAt: entryUpdatedAt,
+		RouteOnly:                  windowsRouteOnlyInstalledProof(target.conn, target.sid, target.home, target.dataDir, opts.RouteOnly),
 	}, nil
 }
 

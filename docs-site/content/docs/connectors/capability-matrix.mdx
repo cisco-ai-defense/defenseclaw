@@ -34,7 +34,7 @@ Antigravity asks and blocks only on `PreToolUse`. `PreInvocation` and `PostInvoc
 </Callout>
 
 <Callout title="A prompt rule blocks only where the agent can block a prompt">
-Claude Code, Codex, Cursor and Devin can. Kiro blocks a prompt only in Kiro IDE. Copilot CLI, Hermes, OpenCode, Amp and Antigravity have no such hook, so a matching prompt reaches the model. Tool-call rules still block there.
+Claude Code, Codex, Cursor and Devin can. Kiro blocks a prompt only in Kiro IDE. Copilot CLI 1.0.76 and later replaces a prompt blocked in action mode with DefenseClaw's notice (`userPromptTransformed`), so the model never receives it. Hermes, OpenCode, Amp and Antigravity have no such hook, so a matching prompt reaches the model. Tool-call rules still block there.
 </Callout>
 
 <Accordions>

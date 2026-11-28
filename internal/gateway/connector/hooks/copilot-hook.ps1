@@ -4,8 +4,9 @@
 # trusted to inherit redirected stdin/stdout. This adapter preserves the bytes
 # in memory and waits inside Copilot's 30-second hook budget. When the
 # launcher is missing, fails or times out, a closed fail mode denies a tool
-# call with Copilot's native answer (Copilot ignores a failed hook process);
-# only an open one lets it run.
+# call with Copilot's native answer (Copilot ignores a failed hook process)
+# and replaces a userPromptTransformed prompt with DefenseClaw's notice, the
+# only way to stop a prompt (GAP-2137); only an open one lets either run.
 {{if not .Managed}}# During an install or upgrade a per-user adapter whose launcher fails returns
 # a native denial in every fail mode; the native hook answers every other call.
 {{end}}{{if .SecureClientDelivery}}[CmdletBinding()]
@@ -228,11 +229,16 @@ catch {
             'permissionRequest' {
                 [Console]::Out.WriteLine('{"behavior":"deny","message":"' + $message + '"}')
             }
+            'userPromptTransformed' {
+                # The replacement is the only way to stop a Copilot CLI
+                # prompt (GAP-2137).
+                [Console]::Out.WriteLine('{"modifiedTransformedPrompt":"DefenseClaw blocked the current user message. Do not answer it or call tools for it. Reply only: DefenseClaw blocked this prompt: ' + $message + '"}')
+            }
         }
     }
     else {
 {{end}}{{if eq .FailMode "open"}}    [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed open: ' + $_.Exception.Message)
-{{else}}    [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed closed: ' + $_.Exception.Message); if (-not $responseWritten) { if ($Event -ceq 'preToolUse') { [Console]::Out.Write('{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}') } elseif ($Event -ceq 'permissionRequest') { [Console]::Out.Write('{"behavior":"deny","message":"DefenseClaw hook failed closed"}') } }
+{{else}}    [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed closed: ' + $_.Exception.Message); if (-not $responseWritten) { if ($Event -ceq 'preToolUse') { [Console]::Out.Write('{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}') } elseif ($Event -ceq 'permissionRequest') { [Console]::Out.Write('{"behavior":"deny","message":"DefenseClaw hook failed closed"}') } elseif ($Event -ceq 'userPromptTransformed') { [Console]::Out.Write('{"modifiedTransformedPrompt":"DefenseClaw blocked the current user message. Do not answer it or call tools for it. Reply only: DefenseClaw blocked this prompt: its DefenseClaw hook failed closed."}') } }
 {{end}}{{if not .Managed}}    }
 {{end}}}
 finally {

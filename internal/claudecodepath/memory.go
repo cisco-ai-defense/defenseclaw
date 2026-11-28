@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
@@ -162,7 +163,7 @@ func resolveProjectRoot(workspace string) (string, string) {
 	}
 	const prefix = "gitdir:"
 	text := strings.TrimSpace(string(markerBody))
-	if !strings.HasPrefix(strings.ToLower(text), prefix) {
+	if !strings.HasPrefix(asciifold.Lower(text), prefix) {
 		return "", fmt.Sprintf("Git project marker %s has an unsupported format", marker)
 	}
 	gitDir := strings.TrimSpace(text[len(prefix):])

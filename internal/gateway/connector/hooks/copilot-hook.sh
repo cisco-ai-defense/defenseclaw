@@ -25,8 +25,48 @@ copilot_deny() {
   case "$_DC_COPILOT_EVENT" in
     preToolUse) printf '{"permissionDecision":"deny","permissionDecisionReason":"%s"}\n' "$1" ;;
     permissionRequest) printf '{"behavior":"deny","message":"%s"}\n' "$1" ;;
+    userPromptTransformed) copilot_prompt_closed "${1/DefenseClaw blocked this tool call/DefenseClaw blocked this prompt}" ;;
     "") printf '{"permissionDecision":"deny","permissionDecisionReason":"%s","behavior":"deny","message":"%s"}\n' "$1" "$1" ;;
   esac
+}
+{{end}}{{if not .SecureClient}}# copilot_native_answer_agrees reports whether a block or confirmation of a
+# Copilot tool boundary carries Copilot's native deny or ask in OUTPUT (any
+# other answer agrees). A verdict without it is refused in every fail mode,
+# as the native hook refuses it (failNativeDecision): fail mode open is for
+# an outage, never for a verdict (GAP-2130).
+copilot_native_answer_agrees() {
+  local agrees=true
+  case "${COPILOT_HOOK_EVENT:-}:${ACTION:-}" in
+    preToolUse:block) agrees=$(echo "$OUTPUT" | _dc_jq -r '.permissionDecision == "deny"' 2>/dev/null) || agrees=false ;;
+    preToolUse:confirm) agrees=$(echo "$OUTPUT" | _dc_jq -r '.permissionDecision == "ask"' 2>/dev/null) || agrees=false ;;
+    permissionRequest:block) agrees=$(echo "$OUTPUT" | _dc_jq -r '.behavior == "deny"' 2>/dev/null) || agrees=false ;;
+    permissionRequest:confirm) agrees=$(echo "$OUTPUT" | _dc_jq -r '.behavior == "ask"' 2>/dev/null) || agrees=false ;;
+  esac
+  [ "$agrees" = "true" ]
+}
+# copilot_prompt_closed answers a Copilot CLI prompt (userPromptTransformed)
+# whose check failed closed with DefenseClaw's notice in place of the prompt
+# and exits 0: Copilot ignores a failed hook, and the replacement is the only
+# way to stop a prompt, as Claude Code, Codex, Cursor and Kiro block a prompt
+# on a closed failure (GAP-2131). Any other event returns.
+copilot_prompt_closed() {
+  [ "${COPILOT_HOOK_EVENT:-${_DC_COPILOT_EVENT:-}}" = "userPromptTransformed" ] || return 0
+  printf '{"modifiedTransformedPrompt":"%s"}\n' "DefenseClaw blocked the current user message. Do not answer it or call tools for it. Reply only: ${1:-DefenseClaw blocked this prompt (fail mode closed).}"
+  exit 0
+}
+# copilot_prompt_unreplaced answers a gateway block of a Copilot CLI prompt
+# (userPromptTransformed) that carries no replacement with DefenseClaw's
+# generic replacement, in every fail mode: the replacement is the block of a
+# prompt (GAP-1730), and an error or no output would send the prompt to the
+# model (GAP-1752). Any other answer returns.
+copilot_prompt_unreplaced() {
+  [ "${COPILOT_HOOK_EVENT:-${_DC_COPILOT_EVENT:-}}" = "userPromptTransformed" ] || return 0
+  local unreplaced
+  unreplaced=$(echo "$RESULT" | _dc_jq -r '(.hook_output | if type == "object" then .modifiedTransformedPrompt else null end) as $p | .action == "block" and (($p | type) != "string" or ($p | length) == 0)' 2>/dev/null) || unreplaced=false
+  [ "$unreplaced" = "true" ] || return 0
+  printf 'defenseclaw: copilot hook error: %s\n' "missing native deny in gateway response" >&2
+  printf '{"modifiedTransformedPrompt":"%s"}\n' "DefenseClaw blocked the current user message. Do not answer it or call tools for it. Reply only: DefenseClaw blocked this prompt under the configured security policy."
+  exit 0
 }
 {{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}copilot_managed_failure() {
   local reason="DefenseClaw hook failed closed"
@@ -478,7 +518,8 @@ fail_unreachable() {
 {{end}}  defenseclaw_allow_failed_stop_event copilot copilot-hook "$COPILOT_HOOK_EVENT" "" "$1" transport
   defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE" fail_closed
   echo "defenseclaw: sandbox ingress unreachable, blocking copilot tool (sandbox hooks fail closed): $1" >&2
-  exit 2
+{{if not .SecureClient}}  copilot_prompt_closed "DefenseClaw blocked this prompt: DefenseClaw is not answering in this sandbox (sandbox hooks fail closed)."
+{{end}}  exit 2
 }
 
 fail_response() {
@@ -486,7 +527,8 @@ fail_response() {
 {{end}}  defenseclaw_allow_failed_stop_event copilot copilot-hook "$COPILOT_HOOK_EVENT" "" "$1" response
   defenseclaw_log_hook_failure copilot copilot-hook "$1" response "$FAIL_MODE" fail_closed
   echo "defenseclaw: copilot hook error, blocking copilot tool (sandbox hooks fail closed): $1" >&2
-  exit 2
+{{if not .SecureClient}}  copilot_prompt_closed "DefenseClaw blocked this prompt: its check could not complete (sandbox hooks fail closed)."
+{{end}}  exit 2
 }
 {{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_log_hook_failure copilot copilot-hook "missing gateway token" transport "$FAIL_MODE" "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")"
@@ -656,7 +698,11 @@ case "$ACTION" in
   allow|block|confirm|alert) ;;
   *) fail_response "invalid or missing action in gateway response" ;;
 esac
-if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+{{if not .SecureClient}}copilot_prompt_unreplaced
+# A bare block keeps its reason and Copilot's exit-2 deny below (GAP-2130).
+{ [ "$ACTION" = "block" ] && { [ -z "$OUTPUT" ] || [ "$OUTPUT" = "null" ]; }; } ||
+  copilot_native_answer_agrees || fail_response "native output contradicts gateway action"
+{{end}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
   exit 0
 fi
@@ -669,12 +715,12 @@ if [ "$ACTION" = "block" ]; then
   exit 2
 fi
 exit 0
-{{else}}{{if and .Managed (not .SecureClient)}}{{if .SecureClient}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || fail_response "invalid action in gateway response"
-{{else}}_dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || fail_response "invalid action in gateway response"
-{{end}}case "$ACTION" in
+{{else}}{{if and .Managed (not .SecureClient)}}_dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || fail_response "invalid action in gateway response"
+case "$ACTION" in
   allow|block|confirm|alert) ;;
   *) fail_response "invalid or missing action in gateway response" ;;
 esac
+copilot_prompt_unreplaced
 if { [ -z "$OUTPUT" ] || [ "$OUTPUT" = "null" ]; } && { [ "$ACTION" = "block" ] || [ "$ACTION" = "confirm" ]; }; then
   fail_response "missing native output in gateway response"
 fi
@@ -682,6 +728,9 @@ if [ "$ACTION" = "block" ]; then
   case "$COPILOT_HOOK_EVENT" in
     preToolUse) NATIVE_DENY=$(echo "$OUTPUT" | _dc_jq -r '.permissionDecision == "deny"' 2>/dev/null) || fail_response "invalid native output in gateway response" ;;
     permissionRequest) NATIVE_DENY=$(echo "$OUTPUT" | _dc_jq -r '.behavior == "deny"' 2>/dev/null) || fail_response "invalid native output in gateway response" ;;
+    # The replaced prompt is the block of a prompt (GAP-1730), checked by
+    # copilot_prompt_unreplaced above (GAP-1752).
+    userPromptTransformed) NATIVE_DENY=true ;;
     *) fail_response "unsupported native block in gateway response" ;;
   esac
   [ "$NATIVE_DENY" = "true" ] || fail_response "missing native deny in gateway response"
@@ -694,32 +743,23 @@ if [ "$ACTION" = "confirm" ]; then
   esac
   [ "$NATIVE_ASK" = "true" ] || fail_response "missing native confirmation in gateway response"
 fi
-{{else if not .Managed}}# Fail mode open skips these checks, except while an install that started
-# during the call holds the data directory.
-defenseclaw_close_during_install
-if [ "$FAIL_MODE" != "open" ]; then
-  # Every verdict names its action, and on a tool boundary a block carries
-  # Copilot's native deny and a confirmation its native ask, as the Windows
-  # hook checks: anything else is no verdict, and would let the call run.
-{{if .SecureClient}}  ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || fail_response "invalid action in gateway response"
-{{else}}  _dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || fail_response "invalid action in gateway response"
-{{end}}  case "$ACTION" in
-    allow|block|confirm|alert) ;;
-    *) fail_response "invalid or missing action in gateway response" ;;
+{{else if not .Managed}}# Every verdict names its action, and on a tool boundary a block carries
+# Copilot's native deny and a confirmation its native ask, as the native hook
+# checks: anything else is no verdict, and would let the call run. A per-user
+# script bakes fail mode closed for every failure that is not an outage
+# (renderHookScripts), so these checks always run, as does the prompt check
+# (GAP-1752); only an outage reads the runtime outage mode.
+copilot_prompt_unreplaced
+_dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || fail_response "invalid action in gateway response"
+case "$ACTION" in
+  allow|block|confirm|alert) ;;
+  *) fail_response "invalid or missing action in gateway response" ;;
+esac
+if ! copilot_native_answer_agrees; then
+  case "$ACTION" in
+    block) fail_response "missing native deny in gateway response" ;;
+    *) fail_response "missing native confirmation in gateway response" ;;
   esac
-  NATIVE_ANSWER=true
-  case "$COPILOT_HOOK_EVENT:$ACTION" in
-    preToolUse:block) NATIVE_ANSWER=$(echo "$OUTPUT" | _dc_jq -r '.permissionDecision == "deny"' 2>/dev/null) || NATIVE_ANSWER=false ;;
-    preToolUse:confirm) NATIVE_ANSWER=$(echo "$OUTPUT" | _dc_jq -r '.permissionDecision == "ask"' 2>/dev/null) || NATIVE_ANSWER=false ;;
-    permissionRequest:block) NATIVE_ANSWER=$(echo "$OUTPUT" | _dc_jq -r '.behavior == "deny"' 2>/dev/null) || NATIVE_ANSWER=false ;;
-    permissionRequest:confirm) NATIVE_ANSWER=$(echo "$OUTPUT" | _dc_jq -r '.behavior == "ask"' 2>/dev/null) || NATIVE_ANSWER=false ;;
-  esac
-  if [ "$NATIVE_ANSWER" != "true" ]; then
-    case "$ACTION" in
-      block) fail_response "missing native deny in gateway response" ;;
-      *) fail_response "missing native confirmation in gateway response" ;;
-    esac
-  fi
 fi
 {{end}}{{if .SecureClient}}UNPARSED_WARNING=$(echo "$RESULT" | _dc_jq -r 'if (.action == "allow" or .action == "alert") and ((.rule_ids // []) | index("HOOK-TOOL-CALL-UNPARSED")) then .reason // empty else empty end' 2>/dev/null) || UNPARSED_WARNING=""
 {{else}}_dc_jq_into UNPARSED_WARNING line "$RESULT" -r 'if (.action == "allow" or .action == "alert") and ((.rule_ids // []) | index("HOOK-TOOL-CALL-UNPARSED")) then .reason // empty else empty end' 2>/dev/null || UNPARSED_WARNING=""

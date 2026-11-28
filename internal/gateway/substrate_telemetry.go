@@ -18,7 +18,11 @@ package gateway
 
 import (
 	"context"
+	"path"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -76,12 +80,16 @@ func substrateHookAuditExtra(ctx context.Context) map[string]string {
 		// The actor the gateway verified names itself: atespace, name and
 		// UID are the token's claims it already checked (no new input). The
 		// person and run mode need the registration.
-		return map[string]string{
+		extra := map[string]string{
 			"sandbox_runtime":     "substrate",
 			"substrate_atespace":  actor.Atespace,
 			"substrate_actor":     actor.Name,
 			"substrate_actor_uid": actor.UID,
 		}
+		if firstHookAfterResume(ctx) {
+			extra["substrate_first_hook_after_resume"] = "true"
+		}
+		return extra
 	}
 	extra := map[string]string{
 		"sandbox_runtime":       "substrate",
@@ -98,8 +106,18 @@ func substrateHookAuditExtra(ctx context.Context) map[string]string {
 			extra[k] = v
 		}
 	}
+	if a := reg.Person.Assurance(); a != "" {
+		extra["substrate_person_assurance"] = a
+	}
 	if reg.Attributed {
 		extra["substrate_person"], extra["substrate_person_kind"] = "", "atespace"
+	}
+	if firstHookAfterResume(ctx) {
+		// The actor's first hook call after a resume (GAP-0486).
+		extra["substrate_first_hook_after_resume"] = "true"
+	}
+	for k, v := range substrateFactsAuditExtra(ctx) {
+		extra[k] = v
 	}
 	return extra
 }
@@ -112,4 +130,72 @@ func substrateDriver(class string) observability.Optional[string] {
 		return observability.Present(class)
 	}
 	return observability.Absent[string]()
+}
+
+// maxSubstrateFactsAuditPaths bounds the resolved paths one hook row lists.
+const maxSubstrateFactsAuditPaths = 8
+
+// substrateFactsAuditExtra says what the kit claimed about the actor's file
+// system on a hook post (substrate-1 GAP-0475): substrate_facts=none for a
+// post with no facts, else substrate_facts=claimed with the source (the
+// kit, code that runs as the agent's user), the proofs it made and each
+// path argument it resolved through a link, as spelling->target. The
+// gateway checks none of it; a claim only ever adds a finding (GAP-0471).
+func substrateFactsAuditExtra(ctx context.Context) map[string]string {
+	env, ok := substrateEnvelopeFrom(ctx)
+	if !ok {
+		return nil
+	}
+	facts := env.Facts
+	if facts == nil || (len(facts.Paths) == 0 && len(facts.Files) == 0 && len(facts.Skills) == 0 &&
+		len(facts.Proofs) == 0 && !facts.Truncated) {
+		return map[string]string{"substrate_facts": "none"}
+	}
+	extra := map[string]string{
+		"substrate_facts": "claimed", "substrate_facts_assurance": "claimed", "substrate_facts_source": "kit",
+		"substrate_facts_paths": strconv.Itoa(len(facts.Paths)),
+	}
+	if len(facts.Proofs) > 0 {
+		extra["substrate_facts_proofs"] = auditFactToken(strings.Join(facts.Proofs, ","))
+	}
+	var resolved []string
+	for _, fact := range facts.Paths {
+		if fact.Resolved == "" || path.Clean(fact.Resolved) == path.Clean(fact.Abs) {
+			continue
+		}
+		if len(resolved) == maxSubstrateFactsAuditPaths {
+			resolved = append(resolved, "...")
+			break
+		}
+		resolved = append(resolved, auditFactToken(fact.Path)+"->"+auditFactToken(fact.Resolved))
+	}
+	if len(resolved) > 0 {
+		extra["substrate_facts_resolved_path"] = strings.Join(resolved, ",")
+	}
+	if facts.Truncated {
+		extra["substrate_facts_truncated"] = "true"
+	}
+	return extra
+}
+
+// auditFactToken is a kit-claimed value made safe for a key=value audit
+// field: no spaces, separators, control or format runes (C0, C1, bidi
+// controls, zero-width marks), line or paragraph separators or invalid
+// UTF-8, at most 256 bytes cut on a rune boundary (substrate-1 GAP-0549).
+func auditFactToken(value string) string {
+	value = strings.Map(func(r rune) rune {
+		if r <= ' ' || r == 0x7f || r == ',' || r == '=' || r == '"' || r == '\\' || r == utf8.RuneError ||
+			unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
+			return '_'
+		}
+		return r
+	}, value)
+	if len(value) > 256 {
+		cut := 256
+		for cut > 0 && !utf8.RuneStart(value[cut]) {
+			cut--
+		}
+		value = value[:cut]
+	}
+	return value
 }

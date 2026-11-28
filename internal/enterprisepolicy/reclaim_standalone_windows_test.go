@@ -23,6 +23,7 @@ import (
 // file (created before the first install) and Secure Client keep the
 // takeover.
 func TestWindowsReclaimNeverTakesOverAFolderHoldingDefenseClawFilesOnStandalone(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	for _, tc := range []struct {
 		name       string
 		marker     bool

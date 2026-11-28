@@ -15,16 +15,38 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
-	"sort"
-
-	jsonschema "github.com/santhosh-tekuri/jsonschema/v5"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
-// openClawPluginConfigSchema reads the same manifest installed into OpenClaw.
-// The manifest, rather than a second list of accepted keys, owns this contract.
-func openClawPluginConfigSchema() (map[string]interface{}, *jsonschema.Schema, error) {
+// openClawPluginConfigMigrator checks the plugin config value against the
+// manifest's config schema (openclawschema.Migrate). It is registered by the
+// packages that run connector Setup, the gateway and the CLI, so that the
+// JSON Schema library, which compiles its meta-schemas at package init, is
+// not linked into the hook binary: the hook links this package for its
+// hook runtime and never runs Setup. A binary that runs Setup without it
+// refuses an openclaw.json that carries a plugin config instead of writing
+// one it did not check.
+var openClawPluginConfigMigrator func(document map[string]interface{}, current interface{}) (kept interface{}, migrated bool, removed []string, err error)
+
+// SetOpenClawPluginConfigMigrator registers the plugin config check. Call it
+// from package init. A nil check or a second registration panics, as the
+// config registries do (RegisterV8SchemaCheck), so a program never runs with
+// a check other than the one it linked (GAP-1862).
+func SetOpenClawPluginConfigMigrator(migrate func(document map[string]interface{}, current interface{}) (kept interface{}, migrated bool, removed []string, err error)) {
+	if migrate == nil {
+		panic("connector: SetOpenClawPluginConfigMigrator with a nil check")
+	}
+	if openClawPluginConfigMigrator != nil {
+		panic("connector: the OpenClaw plugin config check is registered twice")
+	}
+	openClawPluginConfigMigrator = migrate
+}
+
+// openClawPluginConfigSchema reads the config schema of the same manifest
+// installed into OpenClaw. The manifest, rather than a second list of
+// accepted keys, owns this contract.
+func openClawPluginConfigSchema() (map[string]interface{}, error) {
 	manifestPath := path.Join(openClawPluginRoot, "openclaw.plugin.json")
 	data, err := openClawExtensionFS.ReadFile(manifestPath)
 	if err != nil {
@@ -38,81 +60,16 @@ func openClawPluginConfigSchema() (map[string]interface{}, *jsonschema.Schema, e
 		}
 	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("read bundled OpenClaw plugin manifest: %w", err)
+		return nil, fmt.Errorf("read bundled OpenClaw plugin manifest: %w", err)
 	}
 	var manifest struct {
 		ID           string                 `json:"id"`
 		ConfigSchema map[string]interface{} `json:"configSchema"`
 	}
 	if err := json.Unmarshal(data, &manifest); err != nil || manifest.ID != "defenseclaw" || manifest.ConfigSchema == nil {
-		return nil, nil, fmt.Errorf("bundled OpenClaw plugin manifest has no DefenseClaw config schema")
+		return nil, fmt.Errorf("bundled OpenClaw plugin manifest has no DefenseClaw config schema")
 	}
-	schema, err := compileOpenClawPluginSchema(manifest.ConfigSchema)
-	if err != nil {
-		return nil, nil, err
-	}
-	return manifest.ConfigSchema, schema, nil
-}
-
-func compileOpenClawPluginSchema(document map[string]interface{}) (*jsonschema.Schema, error) {
-	data, err := json.Marshal(document)
-	if err != nil {
-		return nil, fmt.Errorf("encode OpenClaw plugin config schema: %w", err)
-	}
-	schema, err := jsonschema.CompileString("https://defenseclaw.invalid/openclaw-plugin-config.json", string(data))
-	if err != nil {
-		return nil, fmt.Errorf("compile OpenClaw plugin config schema: %w", err)
-	}
-	return schema, nil
-}
-
-// keepOpenClawSchemaValue retains each accepted value and removes a rejected
-// property at the smallest object boundary. The full schema validates the
-// resulting config before it is written; unsupported schema shapes fail setup.
-func keepOpenClawSchemaValue(value interface{}, document map[string]interface{}, location string, removed *[]string) (interface{}, bool, error) {
-	schema, err := compileOpenClawPluginSchema(document)
-	if err != nil {
-		return nil, false, err
-	}
-	if schema.Validate(value) == nil {
-		return value, true, nil
-	}
-	object, ok := value.(map[string]interface{})
-	if !ok {
-		*removed = append(*removed, location)
-		return nil, false, nil
-	}
-	properties, _ := document["properties"].(map[string]interface{})
-	keys := make([]string, 0, len(object))
-	for key := range object {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		child, known := properties[key].(map[string]interface{})
-		childLocation := location + "." + key
-		if !known {
-			if document["additionalProperties"] == false {
-				delete(object, key)
-				*removed = append(*removed, childLocation)
-			}
-			continue
-		}
-		kept, valid, err := keepOpenClawSchemaValue(object[key], child, childLocation, removed)
-		if err != nil {
-			return nil, false, err
-		}
-		if valid {
-			object[key] = kept
-		} else {
-			delete(object, key)
-		}
-	}
-	if schema.Validate(object) == nil {
-		return object, true, nil
-	}
-	*removed = append(*removed, location)
-	return nil, false, nil
+	return manifest.ConfigSchema, nil
 }
 
 func saveOpenClawPluginConfigBackup(configPath string, original []byte) (string, error) {
@@ -158,23 +115,16 @@ func reconcileOpenClawPluginConfig(entry map[string]interface{}, configPath stri
 	if !exists {
 		return nil
 	}
-	document, schema, err := openClawPluginConfigSchema()
+	document, err := openClawPluginConfigSchema()
 	if err != nil {
 		return err
 	}
-	if schema.Validate(current) == nil {
-		return nil
+	if openClawPluginConfigMigrator == nil {
+		return errors.New("OpenClaw plugin config check is not linked into this binary")
 	}
-	var removed []string
-	kept, valid, err := keepOpenClawSchemaValue(current, document, "plugins.entries.defenseclaw.config", &removed)
-	if err != nil {
+	kept, migrated, removed, err := openClawPluginConfigMigrator(document, current)
+	if err != nil || !migrated {
 		return err
-	}
-	if !valid {
-		kept = map[string]interface{}{}
-	}
-	if err := schema.Validate(kept); err != nil {
-		return fmt.Errorf("OpenClaw plugin config cannot be migrated to the bundled schema: %w", err)
 	}
 	backupPath, err := saveOpenClawPluginConfigBackup(configPath, original)
 	if err != nil {

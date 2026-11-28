@@ -2044,6 +2044,12 @@ func recoverStaleWindowsSetupRelaxedDataDir(dataDir string, target *windows.SID)
 	if !windowsManagedRuntimeDirSetupRelaxed(dataDir, target) {
 		return false
 	}
+	// The setup shape is also the DACL a per-user install puts on its
+	// folder: that folder is never re-stamped, here or by the generation GC
+	// (GAP-1733).
+	if windowsPerUserInstallLeftover(dataDir) != "" {
+		return false
+	}
 	deadline := time.Now().Add(windowsManagedRuntimeSetupRelaxWait)
 	for windowsManagedRuntimeDirSetupRelaxed(dataDir, target) && time.Now().Before(deadline) {
 		time.Sleep(windowsManagedRuntimeSetupRelaxPoll)
@@ -2081,7 +2087,7 @@ var windowsSetupRelaxByLiveGuardian = func(path string, target *windows.SID) boo
 
 // windowsManagedRuntimeRootsSetupRelaxed reports whether <data dir> or its
 // hooks child is a plain directory owned by target whose DACL is exactly the
-// guardian's setup shape (windowsSetupRelaxedDirectorySDDL).
+// guardian's setup shape (managed.WindowsSetupRelaxedDirectorySDDL).
 func windowsManagedRuntimeRootsSetupRelaxed(dataDir string, target *windows.SID) bool {
 	for _, path := range []string{dataDir, filepath.Join(dataDir, "hooks")} {
 		if windowsManagedRuntimeDirSetupRelaxed(path, target) {
@@ -2135,7 +2141,7 @@ func windowsManagedRuntimeDirSetupRelaxed(path string, target *windows.SID) bool
 	if err != nil || owner == nil || !owner.Equals(target) {
 		return false
 	}
-	relaxed, err := windowsSetupRelaxedDirectoryDACL(sd)
+	relaxed, err := managed.IsWindowsSetupRelaxedDirectoryDACL(sd)
 	return err == nil && relaxed
 }
 

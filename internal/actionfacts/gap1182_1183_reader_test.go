@@ -1,12 +1,12 @@
 package actionfacts
 
 import (
+	"runtime"
 	"slices"
 	"testing"
 )
 
 func TestGAP1182WrapperChildShellBodyReadings(t *testing.T) {
-	skipPOSIXPathsOnWindows(t)
 	for _, prefix := range []string{
 		"chroot / ", "chroot --userspec=1000:1000 / ",
 		"nsenter -t 1 ", "nsenter --target=1 ",
@@ -23,7 +23,6 @@ func TestGAP1182WrapperChildShellBodyReadings(t *testing.T) {
 }
 
 func TestGAP1183TopLevelHereDocBodyReadings(t *testing.T) {
-	skipPOSIXPathsOnWindows(t)
 	// want: "body", the body is read here as the script of the consumer;
 	// "unknown", the unknown tier; "strict", the strict tiers only (a data
 	// program after a PATH change, rel-1-0-10:GAP-1481); "none", this reader adds nothing because
@@ -70,7 +69,6 @@ func TestGAP1183TopLevelHereDocBodyReadings(t *testing.T) {
 }
 
 func TestGAP1183OrdinaryHereDocDataKeepsReleaseReading(t *testing.T) {
-	skipPOSIXPathsOnWindows(t)
 	for _, command := range []string{
 		"python3 - <<'EOF'\nprint('hello')\nEOF",
 		"cat <<'EOF' | python3 -\nprint('hello')\nEOF",
@@ -96,7 +94,6 @@ func TestGAP1183OrdinaryHereDocDataKeepsReleaseReading(t *testing.T) {
 // (the FU9 owner A/B rows where a recovered panic became a parse-failure
 // alert).
 func TestGAP1183EmptyHereDocBodyReadsNothing(t *testing.T) {
-	skipPOSIXPathsOnWindows(t)
 	for _, command := range []string{
 		"python3 - <<EOF\nEOF",
 		"cd /work && python3 - <<EOF\nEOF",
@@ -117,25 +114,36 @@ func TestGAP1183EmptyHereDocBodyReadsNothing(t *testing.T) {
 	}
 }
 
+// The chroot root and nsenter --wd folders are POSIX paths, read with the
+// rules of the cd walk on every gateway host, Windows included
+// (rel-1-0-10:GAP-1881: chroot / joined "/" under the current folder there).
 func TestGAP1241NestedWrapperChildFolder(t *testing.T) {
-	skipPOSIXPathsOnWindows(t)
 	for _, row := range []struct {
 		name, command, cwd string
 		unknown            bool
 	}{
 		{"chroot root", "chroot / sh -c ': >> home/u/.defenseclaw/config.yaml'", "/", false},
 		{"chroot named root", "chroot /srv/root sh -c ': >> home/u/.defenseclaw/config.yaml'", "/srv/root", false},
+		{"chroot relative root", "chroot srv sh -c ': >> .defenseclaw/config.yaml'", "/home/u/srv", false},
 		{"chroot skip chdir", "chroot --skip-chdir / sh -c ': >> .defenseclaw/config.yaml'", "/home/u", false},
 		{"nsenter wd", "nsenter --target=1 --wd=/ sh -c ': >> home/u/.defenseclaw/config.yaml'", "/", false},
+		{"nsenter relative parent", "nsenter --target=1 --wd=.. sh -c ': >> u/.defenseclaw/config.yaml'", "/home", false},
 		{"nsenter target wd", "nsenter --target=1 --wd sh -c ': >> .defenseclaw/config.yaml'", "", true},
 		{"nsenter target root", "nsenter --target=1 --root sh -c ': >> .defenseclaw/config.yaml'", "", true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
+			if row.name == "nsenter relative parent" && runtime.GOOS == "windows" {
+				// A relative --wd keeps its native meaning on a Windows
+				// host, where the gateway cannot place it: the child folder
+				// is unknown (staticNSEnterWorkDir, rel-1-0-10:GAP-1881).
+				row.cwd, row.unknown = "", true
+			}
 			input := Input{Tool: "Bash", Command: row.command, CWD: "/home/u", ActiveHome: "/home/u", DialectHint: DialectPOSIX}
 			got := SimpleCommands(input, Analyze(input))
 			if !slices.ContainsFunc(got, func(s SimpleCommand) bool {
 				return s.Text == ": >> home/u/.defenseclaw/config.yaml" && s.CWD == row.cwd && s.UnresolvedFolder == row.unknown ||
-					s.Text == ": >> .defenseclaw/config.yaml" && s.CWD == row.cwd && s.UnresolvedFolder == row.unknown
+					s.Text == ": >> .defenseclaw/config.yaml" && s.CWD == row.cwd && s.UnresolvedFolder == row.unknown ||
+					s.Text == ": >> u/.defenseclaw/config.yaml" && s.CWD == row.cwd && s.UnresolvedFolder == row.unknown
 			}) {
 				t.Errorf("child folder want %q unknown=%v: %+v", row.cwd, row.unknown, got)
 			}

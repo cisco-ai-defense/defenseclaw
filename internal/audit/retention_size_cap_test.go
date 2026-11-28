@@ -68,8 +68,7 @@ func countAuditRows(t *testing.T, store *Store, where string, args ...any) int {
 
 // #1384: max_store_mb is off by default. Set, a run over the cap deletes the
 // oldest history, through the same batches as day retention, until the used
-// pages are under the cap, never the newest hour; under the cap it deletes
-// nothing more.
+// pages are under the cap; under the cap it deletes nothing more.
 func TestRetentionSizeCapDeletesOldestHistoryUntilUnderTheCap(t *testing.T) {
 	store, judge := newRetentionStores(t)
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
@@ -108,7 +107,7 @@ func TestRetentionSizeCapDeletesOldestHistoryUntilUnderTheCap(t *testing.T) {
 	// The cutoff is an estimate: a run left over the cap asks for a
 	// follow-up run (Backlog), which gets the store under it.
 	deleted := result.RowsDeleted[RetentionAuditEvents]
-	for runs := 1; result.Backlog && usedStoreBytes(t, store) > capMiB<<20; runs++ {
+	for runs := 1; result.Backlog && usedStoreBytes(t, store) > retentionSizeCapStart(capMiB<<20); runs++ {
 		if runs > 5 {
 			t.Fatalf("store still uses %d bytes after %d capped runs, cap %d", usedStoreBytes(t, store), runs, capMiB<<20)
 		}
@@ -121,7 +120,7 @@ func TestRetentionSizeCapDeletesOldestHistoryUntilUnderTheCap(t *testing.T) {
 		t.Fatalf("store uses %d bytes after the capped runs, cap %d", used, capMiB<<20)
 	}
 	if kept := countAuditRows(t, store, `id LIKE ?`, "recent-%"); kept != 20 {
-		t.Fatalf("newest-hour rows kept %d, want all 20", kept)
+		t.Fatalf("newest rows kept %d, want all 20 (oldest first)", kept)
 	}
 	var oldestKept string
 	if err := store.db.QueryRow(`SELECT MIN(id) FROM audit_events WHERE id LIKE ?`, "old-%").Scan(&oldestKept); err != nil {
@@ -144,14 +143,14 @@ func TestRetentionSizeCapDeletesOldestHistoryUntilUnderTheCap(t *testing.T) {
 	}
 }
 
-// A completed cap pass may preserve more than the cap when all remaining
-// history is within the protected newest hour. The result must report the
-// measured used pages rather than treating a successful SQL run as success
-// against the size target.
+// A completed cap pass may leave more than the cap when no row is older than
+// the cutoff it computed (here every row shares one instant). The result must
+// report the measured used pages rather than treating a successful SQL run as
+// success against the size target.
 func TestRetentionSizeCapReportsWhenThePassStopsAboveTheCap(t *testing.T) {
 	store, judge := newRetentionStores(t)
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
-	seedSizedAuditRowsWithSpacing(t, store, "recent", 2000, now, time.Millisecond)
+	seedSizedAuditRowsWithSpacing(t, store, "recent", 2000, now, 0)
 	reaper := newRetentionReaperAt(t, store, judge, 7, now, RetentionOptions{}, retentionHooks{yield: noRetentionYield})
 	if err := reaper.UpdateMaxStoreMB(1); err != nil {
 		t.Fatal(err)
@@ -165,7 +164,7 @@ func TestRetentionSizeCapReportsWhenThePassStopsAboveTheCap(t *testing.T) {
 		t.Fatalf("cap shortfall = %+v; used=%d", result, usedStoreBytes(t, store))
 	}
 	if result.RowsDeleted[RetentionAuditEvents] != 0 {
-		t.Fatalf("protected recent audit rows deleted: %d", result.RowsDeleted[RetentionAuditEvents])
+		t.Fatalf("rows at the cutoff instant deleted: %d", result.RowsDeleted[RetentionAuditEvents])
 	}
 }
 
@@ -218,30 +217,78 @@ func TestRetentionSizeCapNamesActiveCorrelationState(t *testing.T) {
 	}
 }
 
-// A size cap with retention_days 0 still runs, and never deletes the newest
-// hour even when only that is over the cap.
-func TestRetentionSizeCapWithoutDaysKeepsTheNewestHour(t *testing.T) {
+// A size cap with retention_days 0 still runs, and the cap wins over the
+// newest hour (substrate-1:GAP-0570): when that hour alone is over the cap,
+// its oldest rows go, down to seven tenths of the cap.
+func TestRetentionSizeCapWithoutDaysDeletesInsideTheNewestHour(t *testing.T) {
 	store, judge := newRetentionStores(t)
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
-	seedSizedAuditRows(t, store, "recent", 50, now)
 	reaper := newRetentionReaperAt(t, store, judge, 0, now, RetentionOptions{}, retentionHooks{yield: noRetentionYield})
 	if err := reaper.UpdateMaxStoreMB(1); err != nil {
 		t.Fatal(err)
 	}
-	seedSizedAuditRows(t, store, "old", 3000, now.Add(-2*time.Hour))
+	seedSizedAuditRowsWithSpacing(t, store, "hour", 3000, now, time.Second)
+	if used := usedStoreBytes(t, store); used <= 1<<20 {
+		t.Fatalf("seeded store uses %d bytes, want over the 1 MiB cap", used)
+	}
 	result, err := reaper.Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Disabled || !result.SizeCapped {
-		t.Fatalf("days 0 with a cap: disabled %t, capped %t", result.Disabled, result.SizeCapped)
+	if result.Disabled || !result.SizeCapped || result.RowsDeleted[RetentionAuditEvents] == 0 {
+		t.Fatalf("days 0 with a cap: disabled %t, capped %t, deleted %d", result.Disabled, result.SizeCapped,
+			result.RowsDeleted[RetentionAuditEvents])
 	}
-	if kept := countAuditRows(t, store, `id LIKE ?`, "recent-%"); kept != 50 {
-		t.Fatalf("newest-hour rows kept %d, want all 50", kept)
+	for runs := 1; result.Backlog && usedStoreBytes(t, store) > 1<<20; runs++ {
+		if runs > 5 {
+			t.Fatalf("store still uses %d bytes after %d capped runs", usedStoreBytes(t, store), runs)
+		}
+		if result, err = reaper.Run(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if used := usedStoreBytes(t, store); used > 1<<20 || result.CapNotReached {
+		t.Fatalf("store uses %d bytes after the capped runs (shortfall %t), cap 1 MiB", used, result.CapNotReached)
+	}
+	if kept := countAuditRows(t, store, `id = ?`, "hour-02999"); kept != 1 {
+		t.Fatal("the newest row was deleted; the cap deletes oldest first")
 	}
 	for _, bad := range []int64{-1, RetentionMaxStoreMB + 1} {
 		if err := reaper.UpdateMaxStoreMB(bad); err == nil {
 			t.Fatalf("max_store_mb %d accepted", bad)
 		}
+	}
+}
+
+// substrate-1:GAP-0538 (b): the controller's size check reads page counts
+// only; it says a pass is due once the used pages pass nine tenths of the
+// cap, the size at which a pass starts deleting.
+func TestRetentionStoreOverCapStartReadsTheUsedPages(t *testing.T) {
+	store, judge := newRetentionStores(t)
+	now := time.Date(2026, 11, 17, 21, 0, 0, 0, time.UTC)
+	reaper := newRetentionReaperAt(t, store, judge, 7, now, RetentionOptions{}, retentionHooks{yield: noRetentionYield})
+	if over, err := reaper.StoreOverCapStart(t.Context()); err != nil || over {
+		t.Fatalf("no cap: over %t, err %v", over, err)
+	}
+	seedSizedAuditRows(t, store, "load", 3000, now)
+	used := usedStoreBytes(t, store)
+	for _, c := range []struct {
+		capBytes int64
+		want     bool
+	}{
+		{capBytes: used * 2, want: false},
+		{capBytes: used, want: true},
+		{capBytes: used * 100 / 89, want: false},
+		{capBytes: used * 100 / 91, want: true},
+	} {
+		reaper.maxStoreBytes.Store(c.capBytes)
+		over, err := reaper.StoreOverCapStart(t.Context())
+		if err != nil || over != c.want {
+			t.Fatalf("used %d, cap %d: over %t (err %v), want %t", used, c.capBytes, over, err, c.want)
+		}
+	}
+	// The check deleted nothing.
+	if kept := countAuditRows(t, store, `id LIKE ?`, "load-%"); kept != 3000 {
+		t.Fatalf("the size check changed the store: %d rows", kept)
 	}
 }

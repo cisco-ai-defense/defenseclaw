@@ -10,8 +10,9 @@ import "github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 func init() {
 	// The guardian's read-only second verify of a signed-out account's
 	// Copilot row accepts the Local hook files of releases up to 1.0.6
-	// (GAP-0980).
-	enterprisehooks.SetWindowsCopilotVSCodeUserPriorRender(func(home string) error {
-		return windowsCopilotVSCodeUserAccepting(home, true, false, true)
+	// (GAP-0980) and those rendered for the earlier launch image the
+	// account's protected records name (GAP-1898).
+	enterprisehooks.SetWindowsCopilotVSCodeUserPriorRender(func(home, recorded string) error {
+		return windowsCopilotVSCodeUserAccepting(home, true, false, true, recorded)
 	})
 }

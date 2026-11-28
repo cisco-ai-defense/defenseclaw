@@ -168,3 +168,92 @@ func TestEvictOldestBifrostTenantLockedShutsDownOnlyRealClients(t *testing.T) {
 // observable contracts that matter; reproducing the deleted TOCTOU
 // race would require a SDK mock infrastructure disproportionate to
 // the value.
+
+// closeBifrostTenantsAfter shuts down, when t ends, the tenant clients t added
+// to the process-wide cache. Each holds schemas.DefaultConcurrency (1000)
+// request workers until it is evicted, and a test's upstream (a new
+// httptest URL, so a new tenant) is gone once the test ends: in a whole
+// internal/gateway run the 13 tests that call this left 57 clients, 57,000 of
+// the 57,116 goroutines alive when later tests started, and the heap they
+// measured (rel-1-0-10:GAP-1659, GAP-1558). Only for tests that do not run in
+// parallel: no other test adds a client while they run.
+func closeBifrostTenantsAfter(t *testing.T) {
+	t.Helper()
+	bifrostTenantsMu.Lock()
+	before := make(map[tenantKey]bool, len(bifrostTenants))
+	for k := range bifrostTenants {
+		before[k] = true
+	}
+	bifrostTenantsMu.Unlock()
+	t.Cleanup(func() {
+		var added []*bifrost.Bifrost
+		bifrostTenantsMu.Lock()
+		for k, e := range bifrostTenants {
+			if !before[k] {
+				delete(bifrostTenants, k)
+				if e != nil && e.client != nil {
+					added = append(added, e.client)
+				}
+			}
+		}
+		bifrostTenantsMu.Unlock()
+		for _, c := range added {
+			c.Shutdown()
+		}
+	})
+}
+
+// GAP-1760: a tenant client nobody asks for any more (a rotated key, a changed
+// base_url) was shut down only when 256 newer tenants pushed it out, and held
+// 1000 idle request workers until then. A new tenant now releases the clients
+// that have been idle for bifrostTenantIdleTTL; a fresh one stays.
+func TestNewBifrostTenantReleasesIdleClients(t *testing.T) {
+	closeBifrostTenantsAfter(t)
+	shutdowns := make(chan *bifrost.Bifrost, 4)
+	originalShutdown := shutdownEvictedBifrostClient
+	shutdownEvictedBifrostClient = func(c *bifrost.Bifrost) { shutdowns <- c }
+	t.Cleanup(func() { shutdownEvictedBifrostClient = originalShutdown })
+
+	idle := &bifrost.Bifrost{}
+	fresh := &bifrost.Bifrost{}
+	idleKey := tenantKey{provider: "openai", keyID: "idle-old-key"}
+	freshKey := tenantKey{provider: "openai", keyID: "fresh-key"}
+	bifrostTenantsMu.Lock()
+	bifrostTenants[idleKey] = &bifrostTenantEntry{client: idle, lastUsed: time.Now().Add(-2 * time.Hour)}
+	bifrostTenants[freshKey] = &bifrostTenantEntry{client: fresh, lastUsed: time.Now().Add(-time.Minute)}
+	bifrostTenantsMu.Unlock()
+	t.Cleanup(func() {
+		bifrostTenantsMu.Lock()
+		delete(bifrostTenants, idleKey)
+		delete(bifrostTenants, freshKey)
+		bifrostTenantsMu.Unlock()
+	})
+
+	// A request for a tenant that is not cached (a rotated key).
+	_, release, err := getBifrostClient(schemas.OpenAI, "sk-rotated-key", "http://127.0.0.1:1", "gpt-x", tlsOverrides{}, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("getBifrostClient: %v", err)
+	}
+	release()
+
+	select {
+	case got := <-shutdowns:
+		if got != idle {
+			t.Fatalf("Shutdown called with %p, want the idle client %p", got, idle)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the idle tenant client was not shut down when a new tenant was added")
+	}
+	select {
+	case got := <-shutdowns:
+		t.Fatalf("Shutdown called again with %p; the fresh client must stay", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+	bifrostTenantsMu.RLock()
+	_, idleStill := bifrostTenants[idleKey]
+	_, freshStill := bifrostTenants[freshKey]
+	bifrostTenantsMu.RUnlock()
+	if idleStill || !freshStill {
+		t.Fatalf("cache after the sweep: idle kept=%v (want false), fresh kept=%v (want true)", idleStill, freshStill)
+	}
+}

@@ -32,6 +32,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
@@ -895,7 +896,7 @@ func mcpAnalyzerWarnings(stderr string) []string {
 	var out []string
 	for _, line := range strings.Split(ansiRe.ReplaceAllString(stderr, ""), "\n") {
 		line = strings.TrimSpace(line)
-		lower := strings.ToLower(line)
+		lower := asciifold.Lower(line)
 		if !strings.HasPrefix(lower, "warning: llm") || !strings.Contains(lower, "skipped") {
 			continue
 		}

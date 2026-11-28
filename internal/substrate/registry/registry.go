@@ -35,6 +35,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -48,12 +49,29 @@ import (
 // workload. Attributed registrations (actors DefenseClaw did not create)
 // have none and name their atespace instead.
 type Person struct {
-	Kind      string   `json:"kind"`
-	Issuer    string   `json:"issuer"`
-	Subject   string   `json:"subject"`
-	Principal string   `json:"principal,omitempty"`
-	Groups    []string `json:"groups,omitempty"`
+	Kind      string `json:"kind"`
+	Issuer    string `json:"issuer"`
+	Subject   string `json:"subject"`
+	Principal string `json:"principal,omitempty"`
+	// EmailUnverified: the sign-in carried an email its issuer marked
+	// unverified, so it was not used as the principal (GAP-0640). Shown as
+	// lower assurance.
+	EmailUnverified bool     `json:"email_unverified,omitempty"`
+	Groups          []string `json:"groups,omitempty"`
 }
+
+// Assurance names the person's sign-in assurance when it is lower than a
+// verified one ("email_unverified"), "" otherwise.
+func (p Person) Assurance() string {
+	if p.EmailUnverified {
+		return AssuranceEmailUnverified
+	}
+	return ""
+}
+
+// AssuranceEmailUnverified is the assurance mark of a sign-in whose email
+// the issuer did not verify.
+const AssuranceEmailUnverified = "email_unverified"
 
 // ID is the owner key (issuer#subject), "" for no person.
 func (p Person) ID() string {
@@ -82,6 +100,10 @@ type Registration struct {
 	Template       string `json:"template,omitempty"`
 	TemplateDigest string `json:"template_digest,omitempty"`
 	KitVersion     string `json:"kit_version,omitempty"`
+	// RelayStreams are the relay features the template's signed kit names,
+	// comma-joined ("tls": dial the relay with TLS, B3.5). Empty for kits
+	// built before 1.0.11.
+	RelayStreams   string `json:"relay_streams,omitempty"`
 	Connector      string `json:"connector"`
 	HarnessVersion string `json:"harness_version,omitempty"`
 	HookContract   string `json:"hook_contract,omitempty"`
@@ -121,6 +143,19 @@ type PolicyConflict struct {
 	// Reverts is how many foreign changes it reverted in the conflict
 	// window before it marked the conflict.
 	Reverts int `json:"reverts"`
+}
+
+// olderLeaderForm is r without the fields a leader older than 1.0.11 does
+// not decode (its RegistrationWrite refuses unknown fields), and whether r
+// set any. Person.EmailUnverified (GAP-0640) is the only one; such a leader
+// keeps the record without the lower-assurance mark, as 1.0.10 did. Kept
+// while a rolling upgrade from a 1.0.10 leader is supported (GAP-0943).
+func (r Registration) olderLeaderForm() (Registration, bool) {
+	if !r.Person.EmailUnverified {
+		return r, false
+	}
+	r.Person.EmailUnverified = false
+	return r, true
 }
 
 // Version is the record version.
@@ -201,6 +236,11 @@ type Lookup struct {
 	UID        string `json:"uid,omitempty"`
 	Profile    string `json:"profile,omitempty"`
 	Unattended bool   `json:"unattended,omitempty"`
+	// Person is the bound person's ID (issuer#subject) and Principal their
+	// principal, for records that name who used the actor (GAP-0513);
+	// empty for an actor with no bound person.
+	Person    string `json:"person,omitempty"`
+	Principal string `json:"principal,omitempty"`
 }
 
 // LookupName finds the newest registration of atespace/name. An actor name
@@ -229,7 +269,11 @@ func LookupName(ctx context.Context, s Store, atespace, name string) (Lookup, er
 	if best == nil {
 		return Lookup{}, nil
 	}
-	return Lookup{Found: true, Deleted: best.Deleted, UID: best.UID, Profile: best.Profile, Unattended: best.Unattended}, nil
+	l := Lookup{Found: true, Deleted: best.Deleted, UID: best.UID, Profile: best.Profile, Unattended: best.Unattended}
+	if !best.Attributed && best.Person.Subject != "" {
+		l.Person, l.Principal = best.Person.ID(), best.Person.Principal
+	}
+	return l, nil
 }
 
 // Current reports whether uid is atespace/name's live incarnation: the
@@ -270,6 +314,33 @@ type FileStore struct {
 	// name), so LookupName reads one entry: the leader answers one for
 	// every egress chain check (GAP-0234).
 	newest map[string]string
+	// certs is the live relay certificate per registration key
+	// (relaycert.go, GAP-0861).
+	certs map[string]RelayCert
+	// born is the keys this process registered for the first time. The leader
+	// alone opens the store and its term lasts as long as the process, so this
+	// is "registered in my term" without comparing clocks of two nodes
+	// (GAP-1148). It stops growing at maxBornKeys: the chain start grace that
+	// reads it lasts seconds, and a key it lacks only keeps the grace.
+	born map[string]struct{}
+}
+
+// maxBornKeys bounds the set of registrations RegisteredThisTerm knows.
+const maxBornKeys = 65536
+
+// RegisteredThisTerm reports whether this process, the leader, wrote the
+// first registration of atespace/uid itself, as opposed to loading it from
+// disk at start. It is the leader's own state, not a timestamp another node
+// wrote (GAP-1148).
+func (s *FileStore) RegisteredThisTerm(atespace, uid string) bool {
+	key, err := sandboxreg.SubstrateKey(atespace, uid)
+	if err != nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.born[key]
+	return ok
 }
 
 // OpenFileStore loads every registration under dir.
@@ -277,7 +348,7 @@ func OpenFileStore(dir string) (*FileStore, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("registry: %w", err)
 	}
-	s := &FileStore{dir: dir, mem: map[string]Registration{}, newest: map[string]string{}}
+	s := &FileStore{dir: dir, mem: map[string]Registration{}, newest: map[string]string{}, certs: map[string]RelayCert{}, born: map[string]struct{}{}}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("registry: %w", err)
@@ -299,6 +370,9 @@ func OpenFileStore(dir string) (*FileStore, error) {
 		}
 		s.mem[r.Key] = r
 		s.indexLocked(r)
+	}
+	if err := s.loadRelayCerts(); err != nil {
+		return nil, err
 	}
 	return s, nil
 }
@@ -348,6 +422,23 @@ func (s *FileStore) Get(_ context.Context, atespace, uid string) (Registration, 
 // controller could not attest its template when it first attributed it.
 // Such a record may take its attested kit (connector, harness version, hook
 // contract, kit version, template digest) once (GAP-0351).
+// JoinStreams is the registry form of a kit's relay streams: sorted,
+// deduplicated and comma-joined, so records compare as strings.
+func JoinStreams(s []string) string {
+	out := slices.Clone(s)
+	slices.Sort(out)
+	return strings.Join(slices.Compact(out), ",")
+}
+
+// RelayServesTLS reports whether the actor's signed kit serves TLS.
+func (r Registration) RelayServesTLS() bool { return r.RelayServes("tls") }
+
+// RelayServes reports whether the actor's signed kit names a relay stream
+// (kit.StreamTLS, kit.StreamPort, kit.StreamMCP).
+func (r Registration) RelayServes(stream string) bool {
+	return stream != "" && slices.Contains(strings.Split(r.RelayStreams, ","), stream)
+}
+
 func KitFillable(r Registration) bool {
 	return r.Attributed && !r.Deleted && r.ParentUID == "" && r.Connector == "" && r.HarnessVersion == "" &&
 		r.HookContract == "" && r.KitVersion == "" && r.TemplateDigest == ""
@@ -363,7 +454,8 @@ func (s *FileStore) Put(_ context.Context, r Registration) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if old, ok := s.mem[r.Key]; ok {
+	old, existed := s.mem[r.Key]
+	if existed {
 		kitFill := KitFillable(old) && r.Connector != ""
 		if old.Person.ID() != r.Person.ID() || old.Name != r.Name || (old.Connector != r.Connector && !kitFill) ||
 			old.Attributed != r.Attributed || old.Unattended != r.Unattended || old.BatchID != r.BatchID {
@@ -383,24 +475,14 @@ func (s *FileStore) Put(_ context.Context, r Registration) error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(s.dir, fileName(r.Key))
-	tmp, err := os.CreateTemp(s.dir, ".reg-*")
-	if err != nil {
-		return fmt.Errorf("registry: %w", err)
-	}
-	_, werr := tmp.Write(b)
-	serr := tmp.Sync()
-	cerr := tmp.Close()
-	if werr != nil || serr != nil || cerr != nil {
-		_ = os.Remove(tmp.Name())
-		return fmt.Errorf("registry: write: %v", errors.Join(werr, serr, cerr))
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		_ = os.Remove(tmp.Name())
-		return fmt.Errorf("registry: %w", err)
+	if err := writeFileAtomic(s.dir, fileName(r.Key), b); err != nil {
+		return err
 	}
 	s.mem[r.Key] = r
 	s.indexLocked(r)
+	if !existed && len(s.born) < maxBornKeys {
+		s.born[r.Key] = struct{}{}
+	}
 	return nil
 }
 

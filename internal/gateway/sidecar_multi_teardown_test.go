@@ -25,10 +25,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// teardownRemovedConnectors is teardownRemovedConnectorsReport without the
+// teardownRemovedConnectors is teardownRemovedConnectorsWhy without the
 // dropped names.
 func teardownRemovedConnectors(registry *connector.Registry, previous, current []string, opts connector.SetupOpts, ctx context.Context) []string {
-	failed, _ := teardownRemovedConnectorsReport(registry, previous, current, opts, "", ctx)
+	failed, _, _ := teardownRemovedConnectorsWhy(registry, previous, current, opts, "", ctx)
 	return failed
 }
 

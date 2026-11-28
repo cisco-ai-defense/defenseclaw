@@ -73,10 +73,13 @@ func fakeKubectl(t *testing.T, fail error) {
 			return []byte(`{"metadata":{"name":"defenseclaw-system","labels":{"ate.dev/api-access":"true"}}}`), nil
 		case strings.HasPrefix(joined, "get deployments,statefulsets -n defenseclaw-system"):
 			return []byte(`{"items":[
-			 {"metadata":{"name":"defenseclaw-gateway"},"spec":{"replicas":2},"status":{"readyReplicas":2}},
+			 {"metadata":{"name":"defenseclaw-gateway"},"spec":{"replicas":2,"template":{"spec":{"volumes":[{"name":"relay-ca","secret":{"secretName":"e1-relay-ca"}}]}}},"status":{"readyReplicas":2}},
 			 {"metadata":{"name":"defenseclaw-gateway-leader"},"spec":{"replicas":1},"status":{"readyReplicas":1}},
 			 {"metadata":{"name":"defenseclaw-controller"},"spec":{"replicas":1},"status":{"readyReplicas":1}},
 			 {"metadata":{"name":"defenseclaw-callout"},"spec":{"replicas":2},"status":{"readyReplicas":2}}]}`), nil
+		// The relay CA Secret the gateway mounts (B3.5): its name only.
+		case joined == "get secret e1-relay-ca -n defenseclaw-system -o name --ignore-not-found":
+			return []byte("secret/e1-relay-ca\n"), nil
 		case strings.HasPrefix(joined, "get leases.coordination.k8s.io"):
 			return []byte(`{"items":[{"metadata":{"name":"defenseclaw-gateway-leader"},"spec":{"holderIdentity":"pod-1"}}]}`), nil
 		case strings.HasPrefix(joined, "get configmaps -n defenseclaw-system"):
@@ -93,6 +96,8 @@ func fakeKubectl(t *testing.T, fail error) {
 		// the Service proxy (GAP-0262): healthy, so no sign_in_server member.
 		case joined == "get --raw /api/v1/namespaces/defenseclaw-system/services/https:defenseclaw-admin:443/proxy/api/v1/substrate/info":
 			return []byte(`{"sign_in":"oidc","issuer":"https://kc.cluster-a.example.test/realms/dc","attach":true}`), nil
+		case joined == "get pods -n defenseclaw-system -l app.kubernetes.io/component=gateway -o json":
+			return []byte(`{"items":[{"spec":{"containers":[{"name":"gateway","image":"g:1"},{"name":"skill-scanner","image":"ghcr.io/x/defenseclaw-scanner:1.0.11"}]},"status":{"containerStatuses":[{"name":"gateway","ready":true},{"name":"skill-scanner","ready":true}]}}]}`), nil
 		case strings.HasPrefix(joined, "get deployments -n ate-system"):
 			return []byte(`{"items":[{"metadata":{"name":"ate-api-server"},"spec":{"template":{"spec":{"containers":[{"name":"api","image":"ghcr.io/agent-substrate/substrate:v1.0.0"}]}}}}]}`), nil
 		}
@@ -120,9 +125,10 @@ func TestSubstrateVerifyReadsTheClusterAndPasses(t *testing.T) {
 		status[c.ID] = c.Status
 	}
 	// Every check passes on a healthy cluster: none is left unread
-	// (GAP-0200, GAP-0209).
+	// (GAP-0200, GAP-0209). The fake cluster has substrate.bundles off, so
+	// bundle_state skips (TestVerifyReportsTheBundleState reads bundles).
 	for _, c := range doc.Checks {
-		if c.Status != fleet.Pass {
+		if c.Status != fleet.Pass && (c.ID != fleet.CheckBundles || c.Status != fleet.Skip) {
 			t.Errorf("check %s = %s %q, want pass", c.ID, c.Status, c.Message)
 		}
 	}

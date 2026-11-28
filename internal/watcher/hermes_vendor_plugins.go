@@ -507,6 +507,10 @@ func (s *hermesDeclaredSet) declares(info fs.FileInfo) bool {
 	return s.every || slices.ContainsFunc(s.files, func(d fs.FileInfo) bool { return os.SameFile(info, d) })
 }
 
+// hermesWalkDir walks a plugin folder for skippedTreeHash; a test replaces it
+// to give an entry a stale listing size (GAP-1890).
+var hermesWalkDir = filepath.WalkDir
+
 // skippedTreeHash describes what SnapshotTarget leaves out of a plugin, as
 // one hash (empty when there is nothing): every link, and every file in a
 // folder the snapshot skips (.git, node_modules, __pycache__, .venv, venv)
@@ -539,7 +543,7 @@ func skippedTreeHash(root string, load hermesManifestLoader) string {
 		info, err := os.Lstat(file)
 		return err != nil || declared.declares(info)
 	}
-	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+	_ = hermesWalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		rel, relErr := filepath.Rel(root, path)
 		if relErr != nil || rel == "." {
 			return nil
@@ -562,7 +566,13 @@ func skippedTreeHash(root string, load hermesManifestLoader) string {
 			// A special entry is part of the full-tree plugin snapshot.
 			entries = append(entries, "special:"+name+":"+entry.Type().String())
 		default:
-			info, err := entry.Info()
+			// The file's own record, not entry.Info(): on Windows that is the
+			// parent folder's listing, which NTFS brings up to date lazily (a
+			// file keeps its old size there while a handle is still open), so
+			// a file shrunk below hermesScannerReadBytes could keep the size
+			// that skips its hash (GAP-1890). Elsewhere entry.Info() is this
+			// same lstat.
+			info, err := os.Lstat(path)
 			if err != nil {
 				entries = append(entries, "unreadable:"+name)
 				return nil

@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"errors"
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,6 +13,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
 )
 
 // Grade is the strength of one path finding. Readers combine grades with Max:
@@ -91,7 +94,7 @@ func (m *TargetMemo) parentProtectedReach(parent, home string, names reachNames,
 		unread = unread || ShareUnanswered(err)
 		return link, err
 	}
-	resolved, _, _, ok := walkWritePathMemoWithReaders("", parent, 0, false, false, nil, lstat, readlink, procLinks.unproved, true)
+	resolved, _, _, ok := walkWritePathWithReaders("", parent, 0, false, false, lstat, readlink, procLinks.unproved, true)
 	answer := reachParentAnswer{resolved: resolved}
 	switch {
 	case reached || ok && names.hasCandidate(resolved):
@@ -306,10 +309,10 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 			}
 			read := &protectedRead{done: make(chan struct{})}
 			protectedReady[path] = read
-			go func() {
+			fixturefs.Go(func() {
 				read.info, read.err = PathStat(path)
 				close(read.done)
-			}()
+			})
 		}
 		for _, path := range names.files {
 			start(path)
@@ -330,10 +333,10 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 	var entryReady chan answer
 	if share {
 		entryReady = make(chan answer, 1)
-		go func() { info, err := PathLstat(target); entryReady <- answer{info, err} }()
+		fixturefs.Go(func() { info, err := PathLstat(target); entryReady <- answer{info, err} })
 	}
-	go func() { info, err := PathStat(target); fileReady <- answer{info, err} }()
-	go func() { info, err := PathStat(parent); parentReady <- answer{info, err} }()
+	fixturefs.Go(func() { info, err := PathStat(target); fileReady <- answer{info, err} })
+	fixturefs.Go(func() { info, err := PathStat(parent); parentReady <- answer{info, err} })
 	file, directory, entry := <-fileReady, <-parentReady, answer{entryInfo, entryErr}
 	if share {
 		entry = <-entryReady
@@ -348,11 +351,11 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 	if file.err == nil {
 		for _, path := range names.files {
 			wg.Add(1)
-			go func(path string) {
+			fixturefs.Go(func() {
 				defer wg.Done()
 				info, err := readProtected(path)
 				matches <- identityMatch{matched: err == nil && os.SameFile(file.info, info), unknown: ShareUnanswered(err), file: true}
-			}(path)
+			})
 		}
 	}
 	if directory.err == nil {
@@ -361,19 +364,19 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 				continue
 			}
 			wg.Add(1)
-			go func(path string) {
+			fixturefs.Go(func() {
 				defer wg.Done()
 				info, err := readProtected(filepath.Dir(path))
 				matches <- identityMatch{matched: err == nil && os.SameFile(directory.info, info), unknown: ShareUnanswered(err)}
-			}(path)
+			})
 		}
 		for _, path := range names.trees {
 			wg.Add(1)
-			go func(path string) {
+			fixturefs.Go(func() {
 				defer wg.Done()
 				info, err := readProtected(path)
 				matches <- identityMatch{matched: err == nil && os.SameFile(directory.info, info), unknown: ShareUnanswered(err)}
-			}(path)
+			})
 		}
 	}
 	wg.Wait()
@@ -412,7 +415,7 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 		}
 		return link, err
 	}
-	resolved, _, _, ok := walkWritePathMemoWithReaders("", target, 0, false, false, nil, lstat, readlink, procLinks.unproved, false)
+	resolved, _, _, ok := walkWritePathWithReaders("", target, 0, false, false, lstat, readlink, procLinks.unproved, false)
 	if reached || ok && names.has(resolved) {
 		return GradeNamed
 	}
@@ -472,7 +475,7 @@ func (m *TargetMemo) dotDotReach(raw, clean, home string, sshOnly bool) Grade {
 		}
 		return processRelative
 	}
-	physical, _, _, ok := walkWritePathMemoWithReaders("", raw, 0, false, false, nil, PathLstat, procLinks.readlink, unproved, false)
+	physical, _, _, ok := walkWritePathWithReaders("", raw, 0, false, false, PathLstat, procLinks.readlink, unproved, false)
 	if processRelative {
 		return GradePossible
 	}
@@ -724,6 +727,189 @@ func (g *procLinkGuard) unproved(path string, below bool) bool {
 		return !fixedPIDLinkProved(link)
 	}
 	return !fixedPIDLeafProved(link)
+}
+
+// processLinkHead recognizes a process-dependent link at the end of a
+// lexically placed prefix. No suffix after that link may be cleaned: dot-dot
+// is interpreted from the link target by the kernel, not from its text.
+func processLinkHead(parts []string) bool {
+	if len(parts) == 2 && parts[0] == "dev" {
+		return parts[1] == "stdin" || parts[1] == "stdout" || parts[1] == "stderr"
+	}
+	if len(parts) == 3 && parts[0] == "dev" && parts[1] == "fd" {
+		return allDigits(parts[2])
+	}
+	if len(parts) < 3 || parts[0] != "proc" {
+		return false
+	}
+	process := allDigits(parts[1]) || parts[1] == "self" || parts[1] == "thread-self"
+	if !process {
+		return false
+	}
+	if len(parts) == 3 {
+		return parts[2] == "root" || parts[2] == "cwd" || parts[2] == "exe"
+	}
+	if len(parts) == 4 {
+		return (parts[2] == "fd" || parts[2] == "map_files") && allDigits(parts[3])
+	}
+	if len(parts) >= 5 && parts[2] == "task" && allDigits(parts[3]) {
+		if len(parts) == 5 {
+			return parts[4] == "root" || parts[4] == "cwd" || parts[4] == "exe"
+		}
+		return len(parts) == 6 && (parts[4] == "fd" || parts[4] == "map_files") && allDigits(parts[5])
+	}
+	return false
+}
+
+// processLinkPrefix cleans only components before the first process link.
+// Empty and dot components before /proc/<pid>/root must not hide the link,
+// while root/.. must remain raw because it stays at the linked root.
+func processLinkPrefix(path string) string {
+	path = filepath.ToSlash(path)
+	if !strings.HasPrefix(path, "/") {
+		return path
+	}
+	input := strings.Split(path, "/")
+	parts := make([]string, 0, len(input))
+	for i := 1; i < len(input); i++ {
+		switch input[i] {
+		case "", ".":
+			continue
+		case "..":
+			if len(parts) > 0 {
+				parts = parts[:len(parts)-1]
+			}
+		default:
+			parts = append(parts, input[i])
+		}
+		if processLinkHead(parts) {
+			prefix := "/" + strings.Join(parts, "/")
+			if i+1 < len(input) {
+				return prefix + "/" + strings.Join(input[i+1:], "/")
+			}
+			return prefix
+		}
+	}
+	return path
+}
+
+// entryWalkPath is the path whose folder an entry-only proof (touch -h, the
+// replace verbs) walks on this host. A word through the command's own
+// working-directory link names the entry below the folder the command runs
+// in (actionfacts.ProcessCWDLinkSpelling). Any other process link names a
+// folder of a process the host cannot walk for the agent: the walk would
+// follow the gateway's own process link, so ok is false and the proof does
+// not hold (rel-1-0-10:GAP-2265).
+func entryWalkPath(path, cwd string) (string, bool) {
+	if placed, ok := actionfacts.ProcessCWDLinkSpelling(path, cwd); ok {
+		return placed, true
+	}
+	return path, !throughProcessLink(path)
+}
+
+// processLinkWrites keeps the write operands whose placed path passes
+// through a process-dependent link (processLinkHead): the writes that only
+// the process-link proof reads (GAP-2227, GAP-2237, GAP-2275). A call placed
+// in a folder below such a link keeps every operand, as a host that cleans
+// a relative dot-dot it cannot probe may have dropped the link from it. An
+// operand that steps out of a link, or passes a link the command makes to a
+// process link (madeLinks.linkBeforeStep), is kept too: its place is known
+// only once those links are resolved (rel-1-0-10:GAP-2287).
+func processLinkWrites(names []string, cwd string, made madeLinks) []string {
+	if throughProcessLink(cwd) {
+		return names
+	}
+	kept := names[:0]
+	for _, name := range names {
+		if throughProcessLink(name) || made.linkBeforeStep(name) {
+			kept = append(kept, name)
+		}
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	return kept
+}
+
+// throughProcessLink reports an absolute path with a process link among its
+// lexically placed prefixes, as processLinkPrefix walks it.
+func throughProcessLink(path string) bool {
+	path = filepath.ToSlash(path)
+	if !strings.HasPrefix(path, "/") {
+		return false
+	}
+	parts := make([]string, 0, 8)
+	for _, part := range strings.Split(path, "/")[1:] {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(parts) > 0 {
+				parts = parts[:len(parts)-1]
+			}
+		default:
+			parts = append(parts, part)
+		}
+		if processLinkHead(parts) {
+			return true
+		}
+	}
+	return false
+}
+
+// ProcessLinkWriteUnproved reports a write below a process link whose target
+// the hook cannot prove. Opener-relative descriptors and task links are
+// always unproved. A numbered PID link keeps its existing fixedPIDLink proof.
+// A write to the descriptor itself is ordinary: only a path continuing below
+// it could name a key file in an unknown directory (GAP-2227, GAP-2237).
+func ProcessLinkWriteUnproved(path string, guest bool) bool {
+	path = processLinkPrefix(path)
+	if openerRelativeLinkBelow(path) {
+		return true
+	}
+	link, ok := fixedPIDLink(path)
+	if !ok || filepath.ToSlash(path) == link {
+		return false
+	}
+	return guest || !fixedPIDLinkProved(link)
+}
+
+func openerRelativeLinkBelow(path string) bool {
+	path = filepath.ToSlash(path)
+	for _, alias := range []string{"/dev/stdin", "/dev/stdout", "/dev/stderr"} {
+		if rest, ok := strings.CutPrefix(path, alias+"/"); ok && rest != "" {
+			return true
+		}
+	}
+	if strings.HasPrefix(path, "/dev/fd/") {
+		rest := strings.TrimPrefix(path, "/dev/fd/")
+		n, below, ok := strings.Cut(rest, "/")
+		return ok && below != "" && allDigits(n)
+	}
+	rest, found := strings.CutPrefix(path, "/proc/")
+	if !found {
+		return false
+	}
+	parts := strings.Split(rest, "/")
+	if len(parts) < 3 || parts[0] != "self" && parts[0] != "thread-self" {
+		return false
+	}
+	entry := 1
+	if parts[1] == "task" {
+		if len(parts) < 5 || !allDigits(parts[2]) {
+			return false
+		}
+		entry = 3
+	}
+	switch parts[entry] {
+	case "root":
+		return entry > 1 && len(parts) > entry+1 && parts[entry+1] != ""
+	case "cwd", "exe":
+		return len(parts) > entry+1 && parts[entry+1] != ""
+	case "fd", "map_files":
+		return len(parts) > entry+2 && allDigits(parts[entry+1]) && parts[entry+2] != ""
+	}
+	return false
 }
 
 func unprovedProcessLink(path string, below bool) bool {

@@ -216,37 +216,45 @@ func hookAPIValidatePluginFilePermissions(_ string, _ os.FileInfo) error { retur
 // hookAPIValidateDirectoryFor is hookAPIValidateDirectory that also trusts
 // trustedOwnerSID (see hookAPIValidateOwnerFor).
 func hookAPIValidateDirectoryFor(path, trustedOwnerSID string) error {
-	extra := hookAPIParseTrustedOwnerSID(trustedOwnerSID)
-	if extra == nil {
-		return hookAPIValidateDirectory(path)
-	}
-	if !filepath.IsAbs(path) {
-		return fmt.Errorf("hook API token directory must be absolute: %q", path)
-	}
-	clean := filepath.Clean(path)
-	protectChildren := true
+	return hookAPIValidateDirectoryTrusting(path, hookAPIParseTrustedOwnerSID(trustedOwnerSID))
+}
+
+// hookAPIDirectoryElement is one element of the directory walk with the rules
+// it is judged by.
+type hookAPIDirectoryElement struct {
+	path            string
+	protectChildren bool
+	advisory        bool
+	mode            hookAPIDriftMode
+}
+
+// hookAPIDirectoryChain is the walk of hookAPIValidateDirectory[For]: the named
+// directory first, then every ancestor to the volume root. The named directory
+// keeps its rules and protects its children. On an ancestor, an untrusted
+// grant is reported, not fatal, inside the tree another installer owns and
+// re-ACLs (AIFW-34262: AVC and the Cisco Secure Client tree the managed data
+// and hooks directories live under; with a per-user target account the
+// platform installer tree), and permission drift on one the user owns (the
+// profile root, where helpdesk and Domain Admins grants are routine) is
+// accepted and logged. Structural failures stay fatal everywhere. The plugin
+// custody refusal judges the same list, so its repair is for the walk's rules.
+func hookAPIDirectoryChain(clean string, extra *windows.SID) []hookAPIDirectoryElement {
+	var chain []hookAPIDirectoryElement
 	for cur := clean; ; cur = filepath.Dir(cur) {
-		// AIFW-34262: AVC owns and re-ACLs the Cisco Secure Client tree that the
-		// managed data and hooks directories live under, so an untrusted grant on
-		// one of those ancestors is reported, not fatal. The named directory,
-		// ancestors outside that tree, and structural failures stay fatal.
-		advisory := cur != clean && managed.PlatformInstallerOwnedPath(cur)
-		// Same drift rule as hookAPIValidateDirectory: an ancestor the target
-		// user owns accepts and logs permission drift; the named directory
-		// keeps its rules.
-		mode := hookAPIDriftStrict
+		element := hookAPIDirectoryElement{path: cur, protectChildren: cur == clean, mode: hookAPIDriftStrict}
 		if cur != clean {
-			mode = hookAPIDriftUserOwned
+			element.mode = hookAPIDriftUserOwned
+			if extra != nil {
+				element.advisory = managed.PlatformInstallerOwnedPath(cur)
+			} else {
+				element.advisory = managed.AdvisoryAncestorPath(cur)
+			}
 		}
-		if err := hookAPIValidateWindowsPathElementModeTrusting(cur, true, protectChildren, advisory, mode, extra); err != nil {
-			return err
-		}
-		protectChildren = false
+		chain = append(chain, element)
 		if cur == filepath.Dir(cur) {
-			break
+			return chain
 		}
 	}
-	return nil
 }
 
 // hookAPIParseTrustedOwnerSID accepts only a well-formed user or group SID;
@@ -295,30 +303,20 @@ func validateHookAPITokenBoundFileCustodyPlatform(file *os.File) error {
 const hookAPITrustLabel = "hook API token path"
 
 func hookAPIValidateDirectory(path string) error {
+	return hookAPIValidateDirectoryTrusting(path, nil)
+}
+
+// hookAPIValidateDirectoryTrusting walks hookAPIDirectoryChain, trusting
+// extra as an owner too when it is set.
+func hookAPIValidateDirectoryTrusting(path string, extra *windows.SID) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("hook API token directory must be absolute: %q", path)
 	}
-	clean := filepath.Clean(path)
-	protectChildren := true
-	for cur := clean; ; cur = filepath.Dir(cur) {
-		// AIFW-34262: AVC owns and re-ACLs the Cisco Secure Client tree that the
-		// managed data and hooks directories live under, so an untrusted grant on
-		// one of those ancestors is reported, not fatal. The named directory,
-		// ancestors outside that tree, and structural failures stay fatal.
-		advisory := cur != clean && managed.AdvisoryAncestorPath(cur)
-		// An ancestor the user owns (the profile root) accepts and logs
-		// permission drift; helpdesk and Domain Admins grants there are
-		// routine. The named directory keeps its rules.
-		mode := hookAPIDriftStrict
-		if cur != clean {
-			mode = hookAPIDriftUserOwned
-		}
-		if err := hookAPIValidateWindowsPathElementMode(cur, true, protectChildren, advisory, mode); err != nil {
+	for _, element := range hookAPIDirectoryChain(filepath.Clean(path), extra) {
+		if err := hookAPIValidateWindowsPathElementModeTrusting(
+			element.path, true, element.protectChildren, element.advisory, element.mode, extra,
+		); err != nil {
 			return err
-		}
-		protectChildren = false
-		if cur == filepath.Dir(cur) {
-			break
 		}
 	}
 	return nil
@@ -414,6 +412,19 @@ func hookAPIValidateWindowsPathElementMode(
 func hookAPIValidateWindowsPathElementModeTrusting(
 	path string, wantDir, protectChildren, advisory bool, mode hookAPIDriftMode, extra *windows.SID,
 ) error {
+	return hookAPIJudgeWindowsPathElement(path, wantDir, protectChildren, advisory, mode, extra, nil)
+}
+
+// hookAPIJudgeWindowsPathElement is the element check. When refused is set,
+// every permission verdict the element's rules refuse is handed to it and the
+// check goes on past it, so one pass sees all of them (the plugin custody
+// refusal names every account at every folder, GAP-1889); only a structural
+// failure is then returned. With refused nil the first refused verdict is
+// returned, as the walk has always done.
+func hookAPIJudgeWindowsPathElement(
+	path string, wantDir, protectChildren, advisory bool, mode hookAPIDriftMode, extra *windows.SID,
+	refused func(verdict error),
+) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err
@@ -427,13 +438,13 @@ func hookAPIValidateWindowsPathElementModeTrusting(
 		return fmt.Errorf("inspect Windows attributes for %s: %w", path, err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return fmt.Errorf("symlinks, junctions, and reparse points are not allowed: %s", path)
+		return &hookAPIStructureError{path: path, text: "symlinks, junctions, and reparse points are not allowed: " + path}
 	}
 	if wantDir && !info.IsDir() {
-		return fmt.Errorf("expected directory: %s", path)
+		return &hookAPIStructureError{path: path, text: "expected directory: " + path}
 	}
 	if !wantDir && !info.Mode().IsRegular() {
-		return fmt.Errorf("expected regular file: %s", path)
+		return &hookAPIStructureError{path: path, text: "expected regular file: " + path}
 	}
 	extendedPath, err := winpath.Extended(path)
 	if err != nil {
@@ -455,10 +466,17 @@ func hookAPIValidateWindowsPathElementModeTrusting(
 		return fmt.Errorf("inspect Windows owner for %s: %w", path, err)
 	}
 	relax := hookAPIDriftRelaxer(path, owner, advisory, mode, extra)
+	if refused != nil {
+		judge := relax
+		relax = func(verdict error) error {
+			if judge(verdict) != nil {
+				refused(verdict)
+			}
+			return nil
+		}
+	}
 	if !hookAPIWindowsTrustedPrincipalOrExtra(owner, extra) {
-		if err := relax(fmt.Errorf(
-			"owner %s is not trusted for hook API token path %s", hookAPIWindowsSIDString(owner), path,
-		)); err != nil {
+		if err := relax(&hookAPIUntrustedOwnerError{sid: hookAPIWindowsSIDString(owner), path: path}); err != nil {
 			return err
 		}
 	}
@@ -467,9 +485,11 @@ func hookAPIValidateWindowsPathElementModeTrusting(
 		return fmt.Errorf("inspect Windows DACL for %s: %w", path, err)
 	}
 	if dacl == nil {
-		return relax(fmt.Errorf(
-			"null Windows DACL is not trusted: %s", path,
-		))
+		// No DACL grants every account every right, DELETE and WRITE_DAC
+		// included: the widest grant there is, judged like an explicit
+		// Everyone full-control entry (a replace verdict), so owner-based drift
+		// acceptance never covers it (GAP-1900).
+		return relax(hookAPIReplaceVerdict{error: &hookAPINullDACLError{path: path}})
 	}
 	return hookAPIRejectUntrustedWindowsWriteACEsWith(path, dacl, wantDir, protectChildren, extra, relax)
 }
@@ -519,9 +539,61 @@ func hookAPIDriftRelaxer(
 
 // hookAPIReplaceVerdict marks an untrusted, non-administrator grant that can
 // rename, delete or re-ACL an element (DELETE, DELETE_CHILD, WRITE_DAC,
-// WRITE_OWNER, GENERIC_ALL). Such a principal can swap the token directory
-// for a tree it controls, so owner-based drift acceptance never covers it.
+// WRITE_OWNER, GENERIC_ALL), or a null DACL, which grants all of them to every
+// account. Such a principal can swap the token directory for a tree it
+// controls, so owner-based drift acceptance never covers it.
 type hookAPIReplaceVerdict struct{ error }
+
+// hookAPIUntrustedWriteError is the refusal of a write-like allow entry of an
+// untrusted account on path. Its text is the one the enterprise principal
+// parsers read (hookcli windows_enterprise_principals_windows.go); the plugin
+// custody refusal reads the account, the path, whether the entry is inherited
+// and the rule it was judged by (protectChildren) from it (GAP-1887, GAP-1889).
+type hookAPIUntrustedWriteError struct {
+	sid             string
+	mask            uint32
+	path            string
+	inherited       bool
+	protectChildren bool
+}
+
+func (e *hookAPIUntrustedWriteError) Error() string {
+	return fmt.Sprintf("untrusted Windows principal %s has write-like access mask 0x%x on %s", e.sid, e.mask, e.path)
+}
+
+// The other refusals of one path element, typed so the plugin custody refusal
+// can tell what a person must do about each (GAP-1888); their text is the
+// walk's text of rel.
+
+// hookAPIStructureError is a reparse point or an element of the wrong type:
+// no permission change clears it.
+type hookAPIStructureError struct{ path, text string }
+
+func (e *hookAPIStructureError) Error() string { return e.text }
+
+// hookAPIUntrustedOwnerError is an element owned by an untrusted account.
+type hookAPIUntrustedOwnerError struct{ sid, path string }
+
+func (e *hookAPIUntrustedOwnerError) Error() string {
+	return fmt.Sprintf("owner %s is not trusted for hook API token path %s", e.sid, e.path)
+}
+
+// hookAPINullDACLError is an element with no DACL, which every account may
+// write, rename and re-ACL; the walk hands it on as a hookAPIReplaceVerdict.
+type hookAPINullDACLError struct{ path string }
+
+func (e *hookAPINullDACLError) Error() string { return "null Windows DACL is not trusted: " + e.path }
+
+// hookAPIUnsupportedACEError is a write-capable allow entry whose account the
+// walk cannot read.
+type hookAPIUnsupportedACEError struct {
+	aceType byte
+	path    string
+}
+
+func (e *hookAPIUnsupportedACEError) Error() string {
+	return fmt.Sprintf("unsupported Windows allow ACE type 0x%x on %s", e.aceType, e.path)
+}
 
 func (v hookAPIReplaceVerdict) Unwrap() error { return v.error }
 
@@ -581,9 +653,7 @@ func hookAPIRejectUntrustedWindowsWriteACEsWith(
 			// limitation, not a permission verdict about an AVC-owned ancestor,
 			// so the advisory downgrade must not apply — otherwise an attacker
 			// who can write a callback ACE on an ancestor gets a free pass.
-			return fmt.Errorf(
-				"unsupported Windows allow ACE type 0x%x on %s", ace.Header.AceType, path,
-			)
+			return &hookAPIUnsupportedACEError{aceType: ace.Header.AceType, path: path}
 		case windows.ACCESS_ALLOWED_ACE_TYPE:
 		default:
 			continue
@@ -606,10 +676,11 @@ func hookAPIRejectUntrustedWindowsWriteACEsWith(
 			continue
 		}
 		if !hookAPIWindowsTrustedPrincipalOrExtra(sid, extra) {
-			verdict := fmt.Errorf(
-				"untrusted Windows principal %s has write-like access mask 0x%x on %s",
-				hookAPIWindowsSIDString(sid), uint32(ace.Mask), path,
-			)
+			var verdict error = &hookAPIUntrustedWriteError{
+				sid: hookAPIWindowsSIDString(sid), mask: uint32(ace.Mask), path: path,
+				inherited:       ace.Header.AceFlags&windows.INHERITED_ACE != 0,
+				protectChildren: protectChildren,
+			}
 			if hookAPIWindowsReplaceAccess(ace.Mask) && !managed.WindowsAdminEquivalentPrincipal(sid) {
 				verdict = hookAPIReplaceVerdict{error: verdict}
 			}

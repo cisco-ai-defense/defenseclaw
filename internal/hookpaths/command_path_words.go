@@ -44,7 +44,10 @@ type CommandPathWord struct {
 	// the call do not (f() { cp /tmp/x keylink; }; f; cd /tmp). A word that
 	// its own call reads in another folder or root (env -C, tar -C, chroot,
 	// ssh) is unplaced too.
-	Unplaced   bool
+	Unplaced bool
+	// Dirs are the folders the shell reads the word in
+	// (PlacedCommandPathWords; CommandPathWords leaves it empty).
+	Dirs       []string
 	start, end int  // the byte offsets of Text in the command
 	quote      byte // 0 at the top level; ' or " inside a quoted body
 }
@@ -58,6 +61,18 @@ type commandPathScan struct {
 	loops     [][2]int
 	functions []commandPathFunction
 	calls     []commandPathCall
+	bodies    []commandPathBody
+	// funcIndex indexes the function bodies (functionBodies).
+	funcIndex *commandPathBodies
+	// ddOutputs reads the value of a dd of= operand as a path word
+	// (PlacedCommandPathWords). CommandPathWords keeps rel words.
+	ddOutputs bool
+}
+
+// commandPathBody is a static eval or -c body the scan read.
+type commandPathBody struct {
+	start int
+	text  string
 }
 
 // commandPathFunction is a function definition: its name and the byte range
@@ -82,6 +97,12 @@ type commandPathChange struct {
 	end   int
 	all   bool
 	paths []string
+	// cd is set for a static cd, pushd or popd call, named by its program
+	// word: the change the statement reader places (PlacedCommandPathWords).
+	// body is the index in commandPathScan.bodies of the eval or -c body
+	// the call is in, -1 for the command's own text.
+	cd   bool
+	body int
 }
 
 // maxCommandPathBodyDepth is how deep CommandPathWords reads eval and -c
@@ -95,8 +116,17 @@ const maxCommandPathBodyDepth = 4
 // command is read: a caller that walks the words in the file system bounds
 // its work by the distinct words (LocalCommandWordPlaces).
 func CommandPathWords(command, home string) []CommandPathWord {
-	var scan commandPathScan
-	commandPathWordsIn(command, 0, 0, 0, home, &scan)
+	words, scan := scanCommandPathWords(command, home, false)
+	scan.markUnplaced(words, nil)
+	return words
+}
+
+// scanCommandPathWords reads the path words of command in order and the
+// statements that change where later words lie, with Unplaced set only for
+// the words their own call reads elsewhere.
+func scanCommandPathWords(command, home string, ddOutputs bool) ([]CommandPathWord, *commandPathScan) {
+	scan := &commandPathScan{ddOutputs: ddOutputs}
+	commandPathWordsIn(command, 0, 0, 0, -1, home, scan)
 	words := scan.words
 	slices.SortFunc(words, func(a, b CommandPathWord) int { return a.start - b.start })
 	for index := range scan.changes {
@@ -110,6 +140,12 @@ func CommandPathWords(command, home string) []CommandPathWord {
 			}
 		}
 	}
+	return words, scan
+}
+
+// markUnplaced sets Unplaced on each word an earlier change moves, leaving
+// out the changes skip (when not nil) reports for the word.
+func (scan *commandPathScan) markUnplaced(words []CommandPathWord, skip func(*CommandPathWord, commandPathChange) bool) {
 	firstCalls := scan.functionFirstCalls()
 	for index := range words {
 		word := &words[index]
@@ -129,7 +165,7 @@ func CommandPathWords(command, home string) []CommandPathWord {
 			if word.Unplaced {
 				break
 			}
-			if change.end > word.start && (change.end <= body[1] || change.end > calledAt) {
+			if change.end > word.start && (change.end <= body[1] || change.end > calledAt) || skip != nil && skip(word, change) {
 				continue
 			}
 			if change.all {
@@ -144,12 +180,204 @@ func CommandPathWords(command, home string) []CommandPathWord {
 			}
 		}
 	}
+}
+
+// PlacedCommandPathWords is CommandPathWords with the folders the shell
+// reads each word in (Dirs), cwd being the folder the command starts in: cwd
+// for a word no earlier statement moves, and for a word that only static cd,
+// pushd and popd statements move, the folders the laptop's statement reader
+// (TopLevelStatements) gives the statement it is in, read in turn in each
+// static eval or -c body that holds the word from the folders the body's own
+// statement runs in: cd sub && echo x >> dc-link writes sub/dc-link, cd a ||
+// cd b; cat lk reads a/lk or b/lk, and eval "cd sub && echo x >> dc-link"
+// writes sub/dc-link (substrate-1 GAP-0623). Only the cds of the command's
+// own text and of the bodies that hold the word are placed: the cd of a body
+// still moves every word after the body (eval "cd sub"; cat lk). Any other
+// unplaced word (a cd the reader does not place, source, a dynamic call, mv
+// or ln onto its path, a word of a function body, a word of a cd statement)
+// keeps Unplaced and no Dirs. The value of a dd of= operand is a path word
+// here (dd of=dc-link writes through the link). The reader's own bound caps
+// the folders of one statement; a word is read in at most maxPlacedWordDirs
+// folders and the bodies are read at most maxPlacedBodyReads times, past
+// which the word keeps Unplaced.
+func PlacedCommandPathWords(command, cwd, home string) []CommandPathWord {
+	words, scan := scanCommandPathWords(command, home, true)
+	var loose []CommandPathWord
+	if slices.ContainsFunc(scan.changes, func(change commandPathChange) bool { return change.cd }) {
+		loose = slices.Clone(words)
+		scan.markUnplaced(loose, func(word *CommandPathWord, change commandPathChange) bool {
+			return change.cd && (change.body < 0 || scan.bodyHolds(change.body, word))
+		})
+	}
+	scan.markUnplaced(words, nil)
+	reader := commandPlacementReader{scan: scan, command: command, home: home,
+		cached: make(map[commandPlacementKey]commandPlacement)}
+	for index := range words {
+		word := &words[index]
+		if !word.Unplaced {
+			word.Dirs = []string{cwd}
+			continue
+		}
+		if loose == nil || loose[index].Unplaced || scan.functionAt(word.start) >= 0 {
+			continue
+		}
+		if dirs, ok := reader.place(cwd, word); ok {
+			word.Dirs, word.Unplaced = dirs, false
+		}
+	}
 	return words
 }
 
+// maxPlacedWordDirs bounds the folders PlacedCommandPathWords reads one word
+// in, and maxPlacedBodyReads the statement reads of the eval and -c bodies of
+// one command (each linear in its body).
+const (
+	maxPlacedWordDirs  = 64
+	maxPlacedBodyReads = 256
+)
+
+// bodyHolds reports that word lies in the text of body.
+func (scan *commandPathScan) bodyHolds(body int, word *CommandPathWord) bool {
+	start := scan.bodies[body].start
+	return start <= word.start && word.end <= start+len(scan.bodies[body].text)
+}
+
+// commandPlacementKey is one statement read: a body (-1 the command) from
+// the folder it starts in.
+type commandPlacementKey struct {
+	body int
+	dir  string
+}
+
+// commandPlacement is the statement reader's answer for one read.
+type commandPlacement struct {
+	statements []*syntax.Stmt
+	dirs       []string
+	known      bool
+}
+
+// commandPlacementReader places the cd-moved words of one command, reading
+// each body from each folder once.
+type commandPlacementReader struct {
+	scan          *commandPathScan
+	command, home string
+	cached        map[commandPlacementKey]commandPlacement
+	bodyReads     int
+}
+
+// read is the statement reader's answer for body (-1 the command) started
+// in dir; known is false past maxPlacedBodyReads.
+func (reader *commandPlacementReader) read(body int, dir string) commandPlacement {
+	key := commandPlacementKey{body: body, dir: dir}
+	if placement, ok := reader.cached[key]; ok {
+		return placement
+	}
+	var placement commandPlacement
+	text := reader.command
+	if body >= 0 {
+		text = reader.scan.bodies[body].text
+		reader.bodyReads++
+	}
+	if body < 0 || reader.bodyReads <= maxPlacedBodyReads {
+		if file, parsed := parseShell(text); parsed {
+			placement.statements, placement.dirs, placement.known = topLevelStatementDirectories(file, dir, reader.home)
+		}
+	}
+	reader.cached[key] = placement
+	return placement
+}
+
+// place is the folders word is read in, from cwd through the command's text
+// and each body that holds it, outermost first. A text with no cd of its own
+// runs where its statement does. ok is false when a reader does not know a
+// text that has a cd, gives the word no statement or gives it more than
+// maxPlacedWordDirs folders.
+func (reader *commandPlacementReader) place(cwd string, word *CommandPathWord) ([]string, bool) {
+	scan := reader.scan
+	levels := []int{-1}
+	for body := range scan.bodies {
+		if scan.bodyHolds(body, word) {
+			levels = append(levels, body)
+		}
+	}
+	slices.SortStableFunc(levels[1:], func(a, b int) int { return scan.bodies[a].start - scan.bodies[b].start })
+	dirs := []string{cwd}
+	for _, body := range levels {
+		if !slices.ContainsFunc(scan.changes, func(change commandPathChange) bool { return change.cd && change.body == body }) {
+			continue
+		}
+		base := 0
+		if body >= 0 {
+			base = scan.bodies[body].start
+		}
+		var next []string
+		for _, dir := range dirs {
+			placement := reader.read(body, dir)
+			if !placement.known {
+				return nil, false
+			}
+			for at, stmt := range placement.statements {
+				if base+int(stmt.Pos().Offset()) <= word.start && word.end <= base+int(stmt.End().Offset()) &&
+					!slices.Contains(next, placement.dirs[at]) {
+					next = append(next, placement.dirs[at])
+				}
+			}
+		}
+		if len(next) == 0 || len(next) > maxPlacedWordDirs {
+			return nil, false
+		}
+		dirs = next
+	}
+	return dirs, true
+}
+
+// CommandWordAt is one place of a command word: its Text and the path it
+// spells in the folder the shell reads it in (CommandWordAbs).
+type CommandWordAt struct {
+	Text, Abs string
+}
+
+// CommandWordAbs is the path word spells read in dir: its Value when that
+// is absolute, else dir joined with it, cleaned.
+func CommandWordAbs(word CommandPathWord, dir string) string {
+	if strings.HasPrefix(word.Value, "/") {
+		return path.Clean(word.Value)
+	}
+	return path.Clean(strings.TrimRight(dir, "/") + "/" + word.Value)
+}
+
 // functionAt is the index of the innermost function whose body holds byte
-// at, or -1.
+// at, or -1: of the bodies that hold it, the one that starts last, and of
+// those the first defined. The bodies are indexed once (functionBodies);
+// every word and call asks, and reading every body for each made a script
+// of 550 small functions cost the actor's hook milliseconds (substrate-1
+// GAP-1153).
 func (scan *commandPathScan) functionAt(at int) int {
+	bodies := scan.functionBodies()
+	if !bodies.nested {
+		return scan.functionAtEach(at)
+	}
+	// The last body that starts at or before at; a body that holds at is
+	// that one or one that holds it.
+	position, _ := slices.BinarySearch(bodies.starts, at+1)
+	position--
+	for position >= 0 && at >= scan.functions[bodies.order[position]].body[1] {
+		position = bodies.parent[position]
+	}
+	if position < 0 {
+		return -1
+	}
+	found := bodies.order[position]
+	start := scan.functions[found].body[0]
+	for holder := bodies.parent[position]; holder >= 0 && scan.functions[bodies.order[holder]].body[0] == start; holder = bodies.parent[holder] {
+		found = min(found, bodies.order[holder])
+	}
+	return found
+}
+
+// functionAtEach is functionAt read from every body, for bodies that
+// overlap without one holding the other.
+func (scan *commandPathScan) functionAtEach(at int) int {
 	found := -1
 	for index, function := range scan.functions {
 		if function.body[0] <= at && at < function.body[1] &&
@@ -160,15 +388,120 @@ func (scan *commandPathScan) functionAt(at int) int {
 	return found
 }
 
+// commandPathBodies indexes the function bodies of a scan for functionAt.
+type commandPathBodies struct {
+	// count is how many functions the index holds.
+	count int
+	// order lists the functions by body start, then longest body first,
+	// then first defined; starts holds their starts and parent, for each,
+	// the position in order of the body that holds it (-1 for none).
+	order, starts, parent []int
+	// nested is set when every two bodies lie apart or one holds the other.
+	nested bool
+}
+
+// functionBodies is the index of the scan's function bodies, made again
+// when a function was added since.
+func (scan *commandPathScan) functionBodies() *commandPathBodies {
+	if scan.funcIndex != nil && scan.funcIndex.count == len(scan.functions) {
+		return scan.funcIndex
+	}
+	bodies := &commandPathBodies{count: len(scan.functions), nested: true}
+	bodies.order = make([]int, len(scan.functions))
+	for index := range bodies.order {
+		bodies.order[index] = index
+	}
+	slices.SortFunc(bodies.order, func(a, b int) int {
+		x, y := scan.functions[a].body, scan.functions[b].body
+		switch {
+		case x[0] != y[0]:
+			return x[0] - y[0]
+		case x[1] != y[1]:
+			return y[1] - x[1]
+		}
+		return a - b
+	})
+	bodies.starts = make([]int, len(bodies.order))
+	bodies.parent = make([]int, len(bodies.order))
+	var open []int
+	for position, function := range bodies.order {
+		body := scan.functions[function].body
+		bodies.starts[position] = body[0]
+		for len(open) > 0 && scan.functions[bodies.order[open[len(open)-1]]].body[1] <= body[0] {
+			open = open[:len(open)-1]
+		}
+		bodies.parent[position] = -1
+		if len(open) > 0 {
+			if body[1] > scan.functions[bodies.order[open[len(open)-1]]].body[1] {
+				bodies.nested = false
+				break
+			}
+			bodies.parent[position] = open[len(open)-1]
+		}
+		open = append(open, position)
+	}
+	scan.funcIndex = bodies
+	return bodies
+}
+
 // functionFirstCalls returns, for each function of the scan, the byte offset
 // of the first call after its body that runs it, or -1 when none is seen: a
 // call by its name, else (when there is none) a call this reading cannot
 // name. A call inside another function's body runs when that function is
 // first called; a function that reaches itself adds no call.
+//
+// A call outside every body counts at its own start, so the least such
+// start past a body is found in the sorted starts of the calls of that name.
+// A call inside a body is read through that function's first call, in the
+// order the calls were seen, as before: which function a read reaches while
+// another is being read decides what a cycle answers. Scanning every call
+// for every function made a script of 550 small functions and as many
+// dynamic calls cost the actor's hook 5 ms here (substrate-1 GAP-1153).
 func (scan *commandPathScan) functionFirstCalls() []int {
 	outer := make([]int, len(scan.calls))
 	for index, call := range scan.calls {
 		outer[index] = scan.functionAt(call.start)
+	}
+	// The calls of each name ("" for a call this reading cannot name): the
+	// sorted starts of those outside every body and, in the order seen, the
+	// indexes of those inside one.
+	type nameCalls struct {
+		top    []int
+		nested []int
+	}
+	byName := map[string]*nameCalls{}
+	for index, call := range scan.calls {
+		calls := byName[call.name]
+		if calls == nil {
+			calls = &nameCalls{}
+			byName[call.name] = calls
+		}
+		if outer[index] >= 0 {
+			calls.nested = append(calls.nested, index)
+		} else {
+			calls.top = append(calls.top, call.start)
+		}
+	}
+	for _, calls := range byName {
+		slices.Sort(calls.top)
+	}
+	// earliest is the least of two offsets, -1 for none.
+	earliest := func(a, b int) int {
+		if a < 0 || b >= 0 && b < a {
+			return b
+		}
+		return a
+	}
+	// topAfter is the least start of a call outside every body at or after
+	// end, -1 for none.
+	topAfter := func(calls *nameCalls, end int) int {
+		if calls == nil {
+			return -1
+		}
+		if at, _ := slices.BinarySearch(calls.top, end); at < len(calls.top) {
+			return calls.top[at]
+		}
+		return -1
 	}
 	first := make([]int, len(scan.functions))
 	const (
@@ -186,26 +519,36 @@ func (scan *commandPathScan) functionFirstCalls() []int {
 			return first[function]
 		}
 		state[function] = reading
-		named, unnamed := -1, -1
-		for index, call := range scan.calls {
-			if call.name != "" && call.name != scan.functions[function].name {
+		name, end := scan.functions[function].name, scan.functions[function].body[1]
+		unnamedCalls := byName[""]
+		var namedCalls *nameCalls
+		if name != "" {
+			namedCalls = byName[name]
+		}
+		named, unnamed := topAfter(namedCalls, end), topAfter(unnamedCalls, end)
+		// The calls inside a body, by name or unnamed, in the order seen.
+		var namedNested, unnamedNested []int
+		if namedCalls != nil {
+			namedNested = namedCalls.nested
+		}
+		if unnamedCalls != nil {
+			unnamedNested = unnamedCalls.nested
+		}
+		for len(namedNested) > 0 || len(unnamedNested) > 0 {
+			var index int
+			if len(unnamedNested) == 0 || len(namedNested) > 0 && namedNested[0] < unnamedNested[0] {
+				index, namedNested = namedNested[0], namedNested[1:]
+			} else {
+				index, unnamedNested = unnamedNested[0], unnamedNested[1:]
+			}
+			start := firstCall(outer[index])
+			if start < 0 || start < end {
 				continue
 			}
-			start := call.start
-			if outer[index] >= 0 {
-				if start = firstCall(outer[index]); start < 0 {
-					continue
-				}
-			}
-			if start < scan.functions[function].body[1] {
-				continue
-			}
-			if call.name == "" {
-				if unnamed < 0 || start < unnamed {
-					unnamed = start
-				}
-			} else if named < 0 || start < named {
-				named = start
+			if scan.calls[index].name == "" {
+				unnamed = earliest(unnamed, start)
+			} else {
+				named = earliest(named, start)
 			}
 		}
 		if named < 0 {
@@ -247,17 +590,26 @@ func commandPathParts(value string) []string {
 	return parts
 }
 
-func commandPathWordsIn(text string, base int, quote byte, depth int, home string, scan *commandPathScan) {
+func commandPathWordsIn(text string, base int, quote byte, depth, body int, home string, scan *commandPathScan) {
 	file, ok := shellparse.Parse(text)
 	if !ok {
 		return
 	}
-	add := func(word *syntax.Word, follows, program, unplaced bool) {
+	add := func(word *syntax.Word, follows, program, unplaced bool, prefix string) {
 		if word == nil {
 			return
 		}
 		value, static := StaticWord(word, home)
 		start, end := int(word.Pos().Offset()), int(word.End().Offset())
+		if prefix != "" && len(word.Parts) > 0 {
+			// A NAME=VALUE operand spelled with a literal NAME=: the value's
+			// bytes start after it.
+			if lit, ok := word.Parts[0].(*syntax.Lit); ok && strings.HasPrefix(lit.Value, prefix) &&
+				strings.HasPrefix(value, prefix) {
+				start += len(prefix)
+				value = value[len(prefix):]
+			}
+		}
 		if !static || value == "" || end > len(text) || start >= end {
 			return
 		}
@@ -299,7 +651,7 @@ func commandPathWordsIn(text string, base int, quote byte, depth int, home strin
 				switch redirect.Op {
 				case syntax.RdrOut, syntax.AppOut, syntax.RdrIn, syntax.RdrInOut, syntax.RdrClob,
 					syntax.RdrAll, syntax.AppAll:
-					add(redirect.Word, true, false, false)
+					add(redirect.Word, true, false, false, "")
 				}
 			}
 		case *syntax.CallExpr:
@@ -334,27 +686,47 @@ func commandPathWordsIn(text string, base int, quote byte, depth int, home strin
 			child = builtinChild(values, static, child)
 			follows := commandFollowsOperandLinks(program, node.Args, home)
 			replaced := commandReplacedOperand(program, node.Args, home)
+			written := commandWrittenThroughOperand(program, node.Args, home)
+			ddAt := -1
+			if program == "dd" || program == "gdd" {
+				ddAt = 0
+			}
 			if child > 0 && child < len(node.Args) {
 				childProgram := ""
 				if static[child] {
 					childProgram = programBase(values[child])
 				}
+				ddAt = -1
+				if childProgram == "dd" || childProgram == "gdd" {
+					ddAt = child
+				}
 				follows = commandFollowsOperandLinks(childProgram, node.Args[child:], home)
 				if replaced = commandReplacedOperand(childProgram, node.Args[child:], home); replaced > 0 {
 					replaced += child
 				}
+				if written = commandWrittenThroughOperand(childProgram, node.Args[child:], home); written > 0 {
+					written += child
+				}
 			}
 			change, elsewhere := commandCallPathChange(values, static, run, wrapped, node.Args, home)
 			for index, arg := range node.Args {
-				add(arg, index == 0 || follows && index != replaced, index == 0 || index == child, index >= elsewhere)
+				prefix := ""
+				if scan.ddOutputs && ddAt >= 0 && index > ddAt {
+					prefix = "of="
+				}
+				add(arg, index == 0 || index == written || follows && index != replaced, index == 0 || index == child,
+					index >= elsewhere, prefix)
 			}
 			if change.all || len(change.paths) != 0 {
 				change.end = base + int(node.End().Offset())
+				change.cd = len(values) > 0 && static[0] && slices.Contains(cdPrograms, programBase(values[0]))
+				change.body = body
 				scan.changes = append(scan.changes, change)
 			}
 			if depth < maxCommandPathBodyDepth {
-				for _, body := range staticCommandBodies(program, node.Args) {
-					commandPathWordsIn(body.text, base+body.offset, body.quote, depth+1, home, scan)
+				for _, inner := range staticCommandBodies(program, node.Args) {
+					scan.bodies = append(scan.bodies, commandPathBody{start: base + inner.offset, text: inner.text})
+					commandPathWordsIn(inner.text, base+inner.offset, inner.quote, depth+1, len(scan.bodies)-1, home, scan)
 				}
 			}
 		}
@@ -569,6 +941,59 @@ func commandFollowsOperandLinks(program string, args []*syntax.Word, home string
 	return true
 }
 
+// commandWrittenThroughOperand is the index in args (args[0] the program) of
+// the operand a program writes through its link in every mode, or -1. cp's
+// -a/-P/-d/-R/-r keep links among the sources, but the destination is opened
+// for writing through an existing link (GNU cp writes the file it reaches),
+// so a destination link to a protected file gets the plain form's verdict
+// (rel-1-0-10:GAP-1287). The destination is the -t/--target-directory value
+// when given, else the last operand. --remove-destination, -s and -l make a
+// new entry in place of the name and leave a link there alone.
+func commandWrittenThroughOperand(program string, args []*syntax.Word, home string) int {
+	switch program {
+	case "cp", "gcp":
+	default:
+		return -1
+	}
+	if commandHasFlag(args, home, 's', "--symbolic-link") || commandHasFlag(args, home, 'l', "--link") ||
+		commandHasFlag(args, home, 0, "--remove-destination") {
+		return -1
+	}
+	last := -1
+	for index := 1; index < len(args); index++ {
+		value, static := StaticWord(args[index], home)
+		switch {
+		case !static:
+			last = -1
+		case value == "--":
+			for index++; index < len(args); index++ {
+				last = index
+			}
+		case value == "-t" || value == "--target-directory":
+			if index+1 < len(args) {
+				return index + 1
+			}
+			return -1
+		case strings.HasPrefix(value, "--target-directory="):
+			return index
+		case len(value) > 1 && value[0] == '-' && value[1] != '-' && strings.IndexByte(value[1:], 't') >= 0:
+			// A bundle ending in t takes the next word (-at DIR); -tDIR
+			// carries it in the word.
+			if value[len(value)-1] == 't' {
+				if index+1 < len(args) {
+					return index + 1
+				}
+				return -1
+			}
+			return index
+		case strings.HasPrefix(value, "-") && value != "-":
+		default:
+			last = index
+		}
+	}
+	return last
+}
+
 // commandReplacedOperand is the index in args (args[0] the program) of the
 // operand a program replaces as a name and does not open through its link,
 // or -1. GNU install writes the destination file as a new file in
@@ -694,11 +1119,57 @@ func LinkResolvedCommand(command, home string, places map[string]CommandWordPlac
 	if len(places) == 0 {
 		return command, false
 	}
+	return respellCommandWords(command, CommandPathWords(command, home), func(word CommandPathWord) (CommandWordPlace, bool) {
+		place, found := places[word.Text]
+		return place, found && !word.Unplaced
+	})
+}
+
+// PlacedLinkResolvedCommand is LinkResolvedCommand for the words
+// PlacedCommandPathWords places from cwd, each occurrence by its own place:
+// a relative word read in its folder Dirs[min(reading, len(Dirs)-1)] takes
+// the place places gives it there (CommandWordAt), an absolute word (its
+// place is the same in every folder) the place byText gives its Text. One
+// call is one reading: more is set when a word has a place in a later
+// folder, so the caller judges one twin per reading (substrate-1 GAP-0623).
+func PlacedLinkResolvedCommand(command, cwd, home string, places map[CommandWordAt]CommandWordPlace,
+	byText map[string]CommandWordPlace, reading int) (resolved string, changed, more bool) {
+	if len(places) == 0 && len(byText) == 0 {
+		return command, false, false
+	}
+	words := PlacedCommandPathWords(command, cwd, home)
+	for _, word := range words {
+		if strings.HasPrefix(word.Value, "/") {
+			continue
+		}
+		for _, dir := range word.Dirs[min(reading+1, len(word.Dirs)):] {
+			if _, found := places[CommandWordAt{word.Text, CommandWordAbs(word, dir)}]; found {
+				more = true
+			}
+		}
+	}
+	resolved, changed = respellCommandWords(command, words, func(word CommandPathWord) (CommandWordPlace, bool) {
+		switch {
+		case len(word.Dirs) == 0:
+			return CommandWordPlace{}, false
+		case strings.HasPrefix(word.Value, "/"):
+			place, found := byText[word.Text]
+			return place, found
+		}
+		place, found := places[CommandWordAt{word.Text, CommandWordAbs(word, word.Dirs[min(reading, len(word.Dirs)-1)])}]
+		return place, found
+	})
+	return resolved, changed, more
+}
+
+// respellCommandWords spells each word of words that place gives an
+// absolute place as that place (LinkResolvedCommand).
+func respellCommandWords(command string, words []CommandPathWord, place func(CommandPathWord) (CommandWordPlace, bool)) (string, bool) {
 	var out strings.Builder
 	at, changed := 0, false
-	for _, word := range CommandPathWords(command, home) {
-		place, found := places[word.Text]
-		if !found || word.Unplaced || word.start < at {
+	for _, word := range words {
+		place, found := place(word)
+		if !found || word.start < at {
 			continue
 		}
 		target := place.Entry

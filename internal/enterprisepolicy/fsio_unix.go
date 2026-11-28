@@ -192,6 +192,9 @@ func openNoFollow(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 }
 
+// openNoFollowOnce is openNoFollow, which has no retries here.
+func openNoFollowOnce(path string) (*os.File, error) { return openNoFollow(path) }
+
 // ensurePolicyDir creates missing directories 0755 and administrator-owned.
 func ensurePolicyDir(opts Options, dir string) ([]string, error) {
 	var missing []string
@@ -320,6 +323,91 @@ func atomicWriteChecked(_ Options, path string, data []byte, public bool, check 
 		_ = handle.Close()
 	}
 	return nil
+}
+
+// replacedPolicyDirName is the root-only folder beside a shared vendor
+// policy file where a publish keeps the edited file it replaced, and
+// replacedPolicyKept is how many copies of each file it keeps (GAP-1967).
+const (
+	replacedPolicyDirName = "defenseclaw-replaced"
+	replacedPolicyKept    = 10
+)
+
+// saveReplacedPolicyFile keeps data, the file at path a publish is about to
+// replace, as <dir>/defenseclaw-replaced/<name>.<UTC time>, root-only
+// (folder 0700, file 0600), and removes all but the newest
+// replacedPolicyKept copies of that file. It returns the copy's path.
+func saveReplacedPolicyFile(opts Options, path string, data []byte) (string, error) {
+	name := filepath.Base(path)
+	dir := filepath.Join(filepath.Dir(platformPath(opts, path)), replacedPolicyDirName)
+	if err := ensurePrivateDir(dir); err != nil {
+		return "", err
+	}
+	if os.Geteuid() == 0 {
+		if err := os.Lchown(dir, 0, 0); err != nil {
+			return "", err
+		}
+	}
+	stamp := name + "." + opts.now().UTC().Format("20060102T150405Z")
+	// Copies made in the same second are numbered after the last one, so
+	// the names keep sorting oldest first after a prune.
+	first := 0
+	if entries, err := os.ReadDir(dir); err == nil {
+		for _, entry := range entries {
+			if entry.Name() == stamp {
+				first = max(first, 1)
+			} else if n, err := strconv.Atoi(strings.TrimPrefix(entry.Name(), stamp+".")); err == nil && strings.HasPrefix(entry.Name(), stamp+".") {
+				first = max(first, n+1)
+			}
+		}
+	}
+	for attempt := first; attempt < first+100; attempt++ {
+		saved := stamp
+		if attempt > 0 {
+			saved += fmt.Sprintf(".%03d", attempt)
+		}
+		file, err := os.OpenFile(filepath.Join(dir, saved), os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		_, err = file.Write(data)
+		if err == nil {
+			err = file.Sync()
+		}
+		if closeErr := file.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			_ = os.Remove(filepath.Join(dir, saved))
+			return "", err
+		}
+		pruneReplacedPolicyFiles(dir, name)
+		return filepath.Join(filepath.Dir(path), replacedPolicyDirName, saved), nil
+	}
+	return "", fmt.Errorf("%s: no free name for a copy %s", dir, stamp)
+}
+
+// pruneReplacedPolicyFiles removes all but the newest replacedPolicyKept
+// copies of name in dir; the names sort by the time in them.
+func pruneReplacedPolicyFiles(dir, name string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	var copies []string
+	for _, entry := range entries {
+		if entry.Type().IsRegular() && strings.HasPrefix(entry.Name(), name+".") {
+			copies = append(copies, entry.Name())
+		}
+	}
+	sort.Strings(copies)
+	for len(copies) > replacedPolicyKept {
+		_ = os.Remove(filepath.Join(dir, copies[0]))
+		copies = copies[1:]
+	}
 }
 
 // ensurePrivateDir creates the root-only ownership-record directory.

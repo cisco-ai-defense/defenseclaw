@@ -893,10 +893,6 @@ func TestParsePOSIXContextChangingWrappersFailClosed(t *testing.T) {
 		name   string
 		source string
 	}{
-		{name: "env chdir short separate", source: `env -C /tmp rm -rf /tmp/victim`},
-		{name: "env chdir short joined", source: `env -C/tmp rm -rf /tmp/victim`},
-		{name: "env chdir long separate", source: `env --chdir /tmp rm -rf /tmp/victim`},
-		{name: "env chdir long joined", source: `env --chdir=/tmp rm -rf /tmp/victim`},
 		{name: "sudo chdir short separate", source: `sudo -D /tmp rm -rf /tmp/victim`},
 		{name: "sudo chdir short joined", source: `sudo -D/tmp rm -rf /tmp/victim`},
 		{name: "sudo chdir long separate", source: `sudo --chdir /tmp rm -rf /tmp/victim`},

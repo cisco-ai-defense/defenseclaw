@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // The file routes of the relay (A6): non-interactive exec and tar transfer,
@@ -50,8 +52,18 @@ const (
 )
 
 const (
-	// DefaultFilesMaxBytes caps the content of one upload.
+	// DefaultFilesMaxBytes is the compatibility cap for a pre-launcher-settings gateway.
 	DefaultFilesMaxBytes int64 = 1 << 30
+	// MaxFilesBytes bounds the cap the gateway can pass to a relay.
+	MaxFilesBytes int64 = 64 << 30
+	// UploadMaxHeader carries the gateway's cap and the relay's applied cap.
+	UploadMaxHeader = "X-DefenseClaw-Upload-Max"
+	// OpHeader names an upload that is not the first copy of a run: OpPush
+	// (substrate push) or OpSync (a sync --watch batch). The gateway
+	// refuses it when the admin turned that path off (substrate.files).
+	OpHeader = "X-DefenseClaw-Op"
+	OpPush   = "push"
+	OpSync   = "sync"
 	// DefaultExecMaxOutput caps stdout plus stderr of one exec.
 	DefaultExecMaxOutput int64 = 1 << 30
 	// DefaultExecTimeout applies when a request sets none.
@@ -63,14 +75,12 @@ const (
 	// tarOverhead is what an upload body may carry beyond twice the content
 	// cap: block headers and padding.
 	tarOverhead = 1 << 20
-	// FilesMaxBytesEnv overrides DefaultFilesMaxBytes for the relay process
-	// (the upload cap, "max_bytes"). A later kit config field replaces it.
-	FilesMaxBytesEnv = "DEFENSECLAW_RELAY_FILES_MAX_BYTES"
 )
 
 // ExecRequest is the body of POST /dcrelay/1/exec.
 type ExecRequest struct {
-	// Argv is exec'd directly: there is no shell.
+	// Argv is exec'd directly: there is no shell. Argv[0] GitCommand is a
+	// git operation of the relay's own (gitpush.go), not a program.
 	Argv []string `json:"argv"`
 	// Workdir is absolute, or relative to the relay's working directory
 	// ("" is that directory).
@@ -168,9 +178,9 @@ func (s *Server) projectDir(p string) (string, error) {
 	}
 	// A folder that is a link to somewhere outside the working directory is
 	// not inside it (GAP-0163 residual): compare where both really are.
-	if real, err := filepath.EvalSymlinks(d); err != nil {
+	if real, err := winpath.EvalLinks(d); err != nil {
 		return "", errors.New("relay: no such folder in the actor")
-	} else if realRoot, err := filepath.EvalSymlinks(root); err != nil || (real != realRoot && !strings.HasPrefix(real, realRoot+string(filepath.Separator))) {
+	} else if realRoot, err := winpath.EvalLinks(root); err != nil || (real != realRoot && !strings.HasPrefix(real, realRoot+string(filepath.Separator))) {
 		return "", errors.New("relay: the agent starts only inside its working directory")
 	}
 	return d, nil
@@ -183,13 +193,13 @@ func (s *Server) resolvePath(p string) string {
 	return filepath.Join(relayWorkdir(s.opts.Config.Relay.Workdir), p)
 }
 
-func filesMaxBytes() int64 {
-	if v := os.Getenv(FilesMaxBytesEnv); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			return n
-		}
+func filesMaxBytes(header string) int64 {
+	n, err := strconv.ParseInt(header, 10, 64)
+	if err != nil || n <= 0 {
+		return DefaultFilesMaxBytes
 	}
-	return DefaultFilesMaxBytes
+	// Preserve lower limits already supported by workspace_max_bytes.
+	return min(n, MaxFilesBytes)
 }
 
 // execStream writes frames to one response, safely from the two copiers of
@@ -275,7 +285,8 @@ func (s *Server) fileExec(w http.ResponseWriter, r *http.Request) {
 
 // runExec runs req in dir and writes its frames to w, ending with the exit
 // frame (or nothing when the client went away), as the agent's user when
-// sep is set (GAP-0116).
+// sep is set (GAP-0116). A GitCommand request is the relay's own git
+// operation (runGitOp, GAP-0795).
 func runExec(ctx context.Context, req ExecRequest, dir string, w io.Writer, flush func(), sep *separation) {
 	timeout := time.Duration(req.TimeoutSeconds) * time.Second
 	if timeout == 0 {
@@ -290,6 +301,25 @@ func runExec(ctx context.Context, req ExecRequest, dir string, w io.Writer, flus
 	kctx, cancelK := context.WithCancel(tctx)
 	defer cancelK()
 	es := &execStream{w: w, flush: flush, left: limit, cancel: cancelK}
+
+	if req.Argv[0] == GitCommand {
+		code := runGitOp(kctx, req.Argv, dir, req.Env, sep, execWriter{es, ExecStdout}, execWriter{es, ExecStderr})
+		es.mu.Lock()
+		defer es.mu.Unlock()
+		if es.werr != nil || ctx.Err() != nil {
+			return
+		}
+		switch {
+		case es.over:
+			es.frame(ExecStderr, []byte(fmt.Sprintf("output limit of %d bytes reached", limit)))
+			code = ExitOutputLimit
+		case code != 0 && tctx.Err() == context.DeadlineExceeded:
+			es.frame(ExecStderr, []byte("timed out"))
+			code = ExitTimedOut
+		}
+		es.frame(ExecExit, []byte(strconv.Itoa(code)))
+		return
+	}
 
 	cmd := exec.CommandContext(kctx, req.Argv[0], req.Argv[1:]...)
 	cmd.Dir = dir
@@ -591,7 +621,8 @@ func (s *Server) filePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dir = s.resolvePath(dir)
-	limit := filesMaxBytes()
+	limit := filesMaxBytes(r.Header.Get(UploadMaxHeader))
+	w.Header().Set(UploadMaxHeader, strconv.FormatInt(limit, 10))
 	// Content is capped by ExtractTar; the body (headers and padding
 	// included) by a looser bound.
 	body := http.MaxBytesReader(w, r.Body, 2*limit+tarOverhead)
@@ -682,7 +713,7 @@ func (s *Server) fileGet(w http.ResponseWriter, r *http.Request) {
 // after a tar header. A mode changed between the check and the copy still
 // cuts the stream.
 func readable(p string) error {
-	top, err := filepath.EvalSymlinks(filepath.Clean(p))
+	top, err := winpath.EvalLinks(filepath.Clean(p))
 	if err != nil {
 		return err
 	}
@@ -711,7 +742,7 @@ func WriteTar(w io.Writer, p string) error {
 	if base == "." || base == string(filepath.Separator) {
 		return fmt.Errorf("cannot archive %q", p)
 	}
-	top, err := filepath.EvalSymlinks(p)
+	top, err := winpath.EvalLinks(p)
 	if err != nil {
 		return err
 	}

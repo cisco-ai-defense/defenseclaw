@@ -31,6 +31,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/keystore"
 )
 
 const (
@@ -49,13 +51,13 @@ const (
 	macNativeAccount = "launcher-key"
 
 	// OSStatus values of the Security framework.
-	secItemNotFound           = -25300
-	secDuplicateItem          = -25299
-	secAuthFailed             = -25293
-	secInteractionNotAllowed  = -25308
-	secUserCanceled           = -128
-	secNoSuchKeychain         = -25294
-	secDefaultKeychainMissing = -25307
+	secItemNotFound           = keystore.StatusItemNotFound
+	secDuplicateItem          = keystore.StatusDuplicateItem
+	secAuthFailed             = keystore.StatusAuthFailed
+	secInteractionNotAllowed  = keystore.StatusInteractionNotAllowed
+	secUserCanceled           = keystore.StatusUserCanceled
+	secNoSuchKeychain         = keystore.StatusNoSuchKeychain
+	secDefaultKeychainMissing = keystore.StatusDefaultKeychainMissing
 )
 
 // nativeKeychain is the Security framework calls the launcher needs: find

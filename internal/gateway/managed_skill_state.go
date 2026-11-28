@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 const endpointSkillInventorySource = "endpoint_skill_inventory"
@@ -112,8 +112,10 @@ func (cycle *managedInventoryPublishCycle) trackSkills(
 // removals are included. Deliver a bounded removal batch first. Until every
 // removal is accepted, leave the current rows unpublished and retain all other
 // prior state so a failed batch cannot turn new rows into unchanged ones.
-func prepareManagedSkillSnapshot(ctx context.Context, emitter sidecarRuntimeEmitter, components []endpointInventoryComponent, complete bool, publish endpointInventoryCycle) ([]endpointInventoryComponent, error) {
-	if !complete || managedInventorySnapshotEligible(endpointSkillInventorySource, config.ObservabilityV8ManagedSkillInventoryAction, components) {
+// action is the collection's action in this product (managed on a Secure
+// Client endpoint, the operator action elsewhere); limits are the same.
+func prepareManagedSkillSnapshot(ctx context.Context, emitter sidecarRuntimeEmitter, components []endpointInventoryComponent, complete bool, publish endpointInventoryCycle, action observability.ProducerKey) ([]endpointInventoryComponent, error) {
+	if !complete || managedInventorySnapshotEligible(endpointSkillInventorySource, action, components) {
 		return components, nil
 	}
 	current := make([]endpointInventoryComponent, 0, len(components))
@@ -125,12 +127,12 @@ func prepareManagedSkillSnapshot(ctx context.Context, emitter sidecarRuntimeEmit
 			current = append(current, row)
 		}
 	}
-	if len(removed) == 0 || !managedInventorySnapshotEligible(endpointSkillInventorySource, config.ObservabilityV8ManagedSkillInventoryAction, current) {
+	if len(removed) == 0 || !managedInventorySnapshotEligible(endpointSkillInventorySource, action, current) {
 		return components, nil
 	}
 	sort.Slice(removed, func(i, j int) bool { return removed[i].id < removed[j].id })
-	batch := removed[:min(len(removed), managedInventoryLimit(config.ObservabilityV8ManagedSkillInventoryAction))]
-	accepted, err := emitEndpointInventoryComponents(ctx, emitter, endpointSkillInventorySource, batch, config.ObservabilityV8ManagedSkillInventoryAction, publish)
+	batch := removed[:min(len(removed), managedInventoryLimit(action))]
+	accepted, err := emitEndpointInventoryComponents(ctx, emitter, endpointSkillInventorySource, batch, action, publish)
 	if publish.cycle != nil {
 		if publish.cycle.skillRemovals == nil {
 			publish.cycle.skillRemovals = map[string]managedSkillState{}

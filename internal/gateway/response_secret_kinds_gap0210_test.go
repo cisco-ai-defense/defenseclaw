@@ -34,10 +34,30 @@ func gap0210Turn(value, where string) string {
 }
 
 // gap0210PackContext pins the shipped pack profile on ctx, as a gateway
-// generation does for every request.
+// generation does for every request. A published generation binds the
+// connector rule packs registered for the process (registeredRules); the
+// pinned one binds none, so a connector scan uses the pinned pack and not a
+// pack an earlier connector setup in the test process registered
+// (rel-1-0-10:GAP-1305).
 func gap0210PackContext(t *testing.T, profile string) context.Context {
 	t.Helper()
-	return withPinnedGeneration(context.Background(), &Generation{activeRules: packGenerationForProfile(t, profile)})
+	return withPinnedGeneration(context.Background(), &Generation{
+		activeRules:     packGenerationForProfile(t, profile),
+		registeredRules: map[string]*compiledRulePackCategories{},
+	})
+}
+
+// TestGAP1305ResponseChecksIgnoreAnEarlierConnectorSetup: rel-1-0-10:GAP-1305
+// (FX13-RACE s4 shuffle seed 2). A claudecode connector setup earlier in the
+// process (TestSetupOneConnector_SuccessNoTeardown, a hook contract admission
+// or a mode-only reload test) registered the default pack for claudecode. The
+// hook prompt check of the strict pack then scanned with it: SSN HIGH on the
+// hook, CRITICAL in the completion. The GAP-0210 checks keep the pinned pack
+// whatever a connector registered before them.
+func TestGAP1305ResponseChecksIgnoreAnEarlierConnectorSetup(t *testing.T) {
+	resetConnectorRuleCategories(t)
+	publishConnectorRulePackOverrides("claudecode", packGenerationForProfile(t, "default"))
+	t.Run("secret kinds", TestGAP0210ModelResponseFindsEverySecretKind)
 }
 
 // gap0210Stream replays text as the proxy streams a completion (s7bench

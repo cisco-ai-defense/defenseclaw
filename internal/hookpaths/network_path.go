@@ -21,6 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // A Windows UNC path (\\server\share\..., //server/share/...) names a file
@@ -167,6 +168,11 @@ type hookCall struct {
 	// linksUnproven is set when the budget cut short the ask of a share the
 	// link walk of a skill folder check needed (SkillLinksUnproven).
 	linksUnproven bool
+	// stateUnanswered is set when a write target was not proved free of the
+	// DefenseClaw state because a local read it needed did not answer in
+	// time (StateCheckUnanswered). Atomic: the checks run on any goroutine of
+	// the call.
+	stateUnanswered atomic.Bool
 	// budgetCuts counts the share waits of the call that its budget cut
 	// short (askNetworkShare). Such a read is not the answer of the file
 	// system: the share may answer a moment later in the same call. The
@@ -189,8 +195,13 @@ type hookCall struct {
 	scripts     map[scriptReadKey]string
 	scriptBytes int
 	// keyReads are the answers of the private-key reader, by its reading
-	// (ActionPrivateKeyReadBounded).
+	// (ActionPrivateKeyReadBoundedIn).
 	keyReads map[keyReadKey]keyReadAnswer
+	// stateIdentities are the identity indexes of the active state trees
+	// this call walked whose folders had not settled (activeStateIdentities):
+	// kept for the call only, as the file system is the same for the whole
+	// decision.
+	stateIdentities map[string][]activeStateIdentity
 }
 
 type statAnswer struct {
@@ -208,10 +219,11 @@ func callStat(name string) (os.FileInfo, error) {
 }
 
 // stat is callStat for the hook call call (nil: none, pathStat). A loop that
-// stats many paths finds its call once and stats through it: off Windows
-// finding the call is a traceback of the goroutine's stack (goroutineID),
-// and on Windows it was too until hookCallKey, half of a Windows hook
-// decision for the registration names alone (rel-1-0-10:GAP-1293).
+// stats many paths finds its call once and stats through it: finding the call
+// was a traceback of the goroutine's stack (goroutineID), half of a Windows
+// hook decision for the registration names alone (rel-1-0-10:GAP-1293), until
+// hookCallKey read the thread on Windows and goroutineKey the goroutine's g
+// elsewhere (rel-1-0-10:GAP-2215).
 func (call *hookCall) stat(name string) (os.FileInfo, error) {
 	if call == nil {
 		return pathStat(name)
@@ -276,10 +288,76 @@ func HookCall() (end func()) {
 	return end
 }
 
+// Call is the hook call a goroutine runs, found once (the zero Call: none).
+// A caller that reads the call more than once keeps the Call instead of
+// finding it again: off Windows each find is a traceback of the goroutine's
+// stack (goroutineID), and a decision found its call four times per dispatch
+// (DET111-PERF-A). Its readings are those of HookCallState and
+// ShareBodyUnreadCauses for the same call.
+type Call struct{ call *hookCall }
+
+// BeginHookCall is HookCall that also returns the Call the goroutine runs
+// until end: the one it began or the one already open.
+func BeginHookCall() (Call, func()) {
+	call, end := beginHookCall()
+	return Call{call}, end
+}
+
+// CurrentHookCall is the Call the calling goroutine runs (the zero Call: none).
+func CurrentHookCall() Call { return Call{currentHookCall()} }
+
+// JoinHookCall is BeginHookCall for a goroutine that found its open call a
+// moment before (found, from BeginHookCall or CurrentHookCall in a frame
+// that is still running, so the call is still open). Off Windows that call
+// is the one BeginHookCall would find, with nothing to end, and is returned
+// without a second traceback of the goroutine's stack (goroutineID): each
+// costs a walk of every frame, and a gateway decision found its call about
+// 110 times, 8% of its time (DET111-LANEON-PERF, GAP-2197). A zero found,
+// and every call on Windows (foundCallServes), begins as BeginHookCall does.
+func JoinHookCall(found Call) (Call, func()) {
+	if found.call != nil && foundCallServes {
+		return found, func() {}
+	}
+	return BeginHookCall()
+}
+
+// FoundHookCall is CurrentHookCall for a goroutine that found its open call
+// a moment before (found, as for JoinHookCall): off Windows that call, else
+// the call found again.
+func FoundHookCall(found Call) Call {
+	if found.call != nil && foundCallServes {
+		return found
+	}
+	return CurrentHookCall()
+}
+
+// joinHookCall is JoinHookCall on the package's own call type.
+func joinHookCall(found Call) (*hookCall, func()) {
+	if found.call != nil && foundCallServes {
+		return found.call, func() {}
+	}
+	return beginHookCall()
+}
+
+// State is the CallState of the call (the zero CallState: none).
+func (c Call) State() CallState {
+	if c.call == nil {
+		return CallState{}
+	}
+	return c.call.state()
+}
+
+// ShareBodyUnreadCauses is ShareBodyUnreadCauses for the call.
+func (c Call) ShareBodyUnreadCauses() (budget, linkBound bool) {
+	if c.call == nil {
+		return false, false
+	}
+	return c.call.bodyUnread, c.call.bodyLinks
+}
+
 // beginHookCall is HookCall that also returns the call the goroutine runs
 // from then on (nil: none), the one it began or the one already open, so a
 // caller that uses the call does not read the goroutine's key a second time:
-// off Windows each read is a traceback of the stack (goroutineID), and
 // globCutOf runs on every private-key and pattern reading of a decision
 // (rel-1-0-10:GAP-1472).
 func beginHookCall() (*hookCall, func()) {
@@ -313,7 +391,7 @@ func beginHookCall() (*hookCall, func()) {
 // ResolveWriteTarget, newProtectedFiles). It pays where a read is dear: on
 // Windows each stat asks the share check and the file system, 446,000 reads
 // for 100 PowerShell lines, 27 s (rel-1-0-10:GAP-0766). On a POSIX host a
-// stat costs about a microsecond, while finding the call costs a traceback of
+// stat costs about a microsecond, while finding the call cost a traceback of
 // the calling goroutine's stack (goroutineID) on every read: the memory made a
 // decision 1.3 to 4.4 times slower than none (rel-1-0-10:GAP-0844). The
 // answers are the same with it or without it (the file system of one decision
@@ -336,6 +414,11 @@ func memoHookCall() *hookCall {
 // (rel-1-0-10:GAP-1476). The goroutine of a call is already locked to its
 // thread; the lock nests, so its reads are unchanged.
 func currentHookCall() *hookCall {
+	if fixturefs.Unreadable() {
+		// A decision that reads no file system keeps nothing in the call's
+		// memory and reads none of it: its answers are not the host's.
+		return nil
+	}
 	unlock := lockHookCallKey()
 	defer unlock()
 	id := hookCallKey()
@@ -345,13 +428,6 @@ func currentHookCall() *hookCall {
 	hookCalls.mu.Lock()
 	defer hookCalls.mu.Unlock()
 	return hookCalls.calls[id]
-}
-
-// networkPathUnanswered reports a path below a network share that has not
-// answered in time. A local path is never reported and costs no probe.
-func networkPathUnanswered(path string) bool {
-	unanswered, _ := networkPathRead(path)
-	return unanswered
 }
 
 // shareReadCut is why a read of a path that did not answer is not final.
@@ -372,16 +448,10 @@ const (
 	shareReadRemote
 )
 
-// linkUnanswered is networkPathUnanswered for a read that opens no link at
-// the end of the path (lstat, readlink, a directory walk).
-func linkUnanswered(path string) bool {
-	unanswered, _ := networkPathReadAs(path, false)
-	return unanswered
-}
-
-// networkPathRead is networkPathUnanswered that also reports whether the
-// call budget, not the own wait of the share, ended the wait for a share
-// that did not answer (it might have answered had the call had more
+// networkPathRead reports a path below a network share that has not
+// answered in time (a local path is never reported and costs no probe), and
+// whether the call budget, not the own wait of the share, ended the wait for
+// a share that did not answer (it might have answered had the call had more
 // budget), or the link bound stopped the walk to the path.
 func networkPathRead(path string) (unanswered bool, cut shareReadCut) {
 	return networkPathReadAs(path, true)
@@ -430,6 +500,10 @@ type shareGate struct {
 func networkPathGate(path string, followLast bool) (gate shareGate) {
 	name := path
 	gate.read = name
+	if fixturefs.Unreadable() {
+		// A decision that reads no file system asks no share (Unread).
+		return gate
+	}
 	if path != "" && os.IsPathSeparator(path[len(path)-1]) {
 		followLast = true
 	}
@@ -612,11 +686,7 @@ func ShareBodyUnread() bool {
 // links than the walk follows, so a share on it may not have been asked
 // (rel-1-0-9:GAP-0621). Both can hold in one call.
 func ShareBodyUnreadCauses() (budget, linkBound bool) {
-	call := currentHookCall()
-	if call == nil {
-		return false, false
-	}
-	return call.bodyUnread, call.bodyLinks
+	return CurrentHookCall().ShareBodyUnreadCauses()
 }
 
 // evictNetworkShareProbesLocked drops the finished probes and reports
@@ -634,6 +704,16 @@ func evictNetworkShareProbesLocked() bool {
 
 func networkShareError(op, name string) error {
 	return &fs.PathError{Op: op, Path: name, Err: errNetworkShareUnanswered}
+}
+
+// localReadUnanswered reports a read of path that did not answer
+// (errNetworkShareUnanswered) while the gate places path on no network
+// share: a local folder read past networkShareAnswerWait (stillPlain). What
+// that read would have shown is unknown, not absent (rel-1-0-10:GAP-1804).
+// A path on a share is not reported: a file there cannot be a hard link to
+// a local file, so a slow share keeps its answer.
+func localReadUnanswered(path string, err error) bool {
+	return errors.Is(err, errNetworkShareUnanswered) && path != "" && networkShareRootOf(path) == ""
 }
 
 // The file system reads of the target scans and of the write-target walk.
@@ -657,13 +737,20 @@ func readGated[T any](op, name string, read func(path string) (T, error), discar
 		return none, gate.cut, networkShareError(op, name)
 	}
 	path := fixturefs.Map(gate.read)
+	if path == "" && name != "" {
+		// Inside fixturefs.Unread nothing is read: the name does not exist
+		// (filepath.EvalSymlinks of the empty name would answer itself).
+		return none, shareReadFinal, &fs.PathError{Op: op, Path: name, Err: fs.ErrNotExist}
+	}
 	if !gate.proved {
 		value, err := read(path)
 		return value, shareReadFinal, err
 	}
 	still, err := pathidentity.HoldUnlinked(path)
 	switch {
-	case errors.Is(err, pathidentity.ErrLinked):
+	case errors.Is(err, pathidentity.ErrLinked), errors.Is(err, pathidentity.ErrUnpinned):
+		// A link on the way, or a component the hold cannot pin: unknown,
+		// never read unheld (rel-1-0-10:GAP-1263, GAP-1264).
 		return none, shareReadRemote, networkShareError(op, name)
 	case err != nil:
 		return none, shareReadFinal, err
@@ -816,10 +903,11 @@ const pathReadDirChunk = 1024
 // first n in directory order made a key link that sorts early drop out of a
 // directory past the cap (rel-1-0-10:GAP-1468).
 func pathReadDirLimit(name string, n int) ([]os.DirEntry, error) {
-	if networkPathUnanswered(name) {
-		return nil, networkShareError("readdir", name)
-	}
-	dir, err := os.Open(fixturefs.Map(name))
+	// The directory is opened as pathOpen opens it, on the path the share
+	// gate read under its hold; every entry below is read through that
+	// handle. Asking the gate and then opening the name looked the name up
+	// again after the share decision (rel-1-0-10:GAP-1264).
+	dir, err := pathOpen(name)
 	if err != nil {
 		return nil, err
 	}
@@ -867,7 +955,14 @@ func pathReadlink(name string) (string, error) {
 }
 
 func pathEvalSymlinks(name string) (string, error) {
-	resolved, _, err := readGated("evalsymlinks", name, filepath.EvalSymlinks, nil)
+	resolved, _, err := readGated("evalsymlinks", name, winpath.EvalLinks, nil)
+	return fixturefs.Unmap(resolved), err
+}
+
+// pathFinalPath is pathEvalSymlinks with the real final path always
+// (winpath.FinalPath): no subst or mapped drive letter kept.
+func pathFinalPath(name string) (string, error) {
+	resolved, _, err := readGated("evalsymlinks", name, winpath.FinalPath, nil)
 	return fixturefs.Unmap(resolved), err
 }
 
@@ -908,8 +1003,10 @@ func Lstat(name string) (os.FileInfo, error) { return pathLstat(name) }
 // Stat is os.Stat for a path a hook call names, read as pathStat reads it.
 func Stat(name string) (os.FileInfo, error) { return pathStat(name) }
 
-// EvalSymlinks is filepath.EvalSymlinks bounded like the other readers: the
-// gateway reads a link chain of a path a hook call names through it.
+// EvalSymlinks is winpath.EvalLinks bounded like the other readers: the
+// gateway reads a link chain of a path a hook call names through it. On
+// Windows it follows a junction as it follows a symbolic link, which
+// filepath.EvalSymlinks does not (rel-1-0-9:GAP-0621, rel-1-0-10:GAP-2182).
 func EvalSymlinks(name string) (string, error) { return pathEvalSymlinks(name) }
 
 // ReadDir is os.ReadDir for a directory a hook call names, read as pathReadDir reads it.
@@ -930,15 +1027,51 @@ func ReadFile(name string) ([]byte, error) {
 // ReadRegularFileBounded is safefile.ReadRegularFileBounded for a path a
 // hook call names, read as pathOpen reads it: a share on another machine is
 // never contacted, and the file read is the file the share decision was
-// made for (rel-1-0-10:GAP-1074). safefile refuses a name that passes any
-// link, so it reads the name itself: a name the walk read through a link is
-// refused as before, and one it read without is the path the walk read.
+// made for (rel-1-0-10:GAP-1074). safefile reads the path the gate read,
+// under its hold, never the name again: opening the name would follow a
+// link on the way as it is now, which may lead to a share since the walk
+// (rel-1-0-10:GAP-1264). A name the walk read through a link that safefile
+// refuses for the name is refused here before anything opens it
+// (readNameAsSafefile), so the answer stays the one safefile gives the name.
 func ReadRegularFileBounded(name string, maxBytes int64) ([]byte, error) {
-	body, _, err := readGated("open", name, func(string) ([]byte, error) {
-		return safefile.ReadRegularFileBounded(name, maxBytes)
+	body, _, err := readGated("open", name, func(path string) ([]byte, error) {
+		if err := readNameAsSafefile("open", name, path); err != nil {
+			return nil, err
+		}
+		return safefile.ReadRegularFileBounded(path, maxBytes)
 	}, nil)
 	return body, err
 }
+
+// readNameAsSafefile refuses (errNameReadThroughLink) a name that the walk
+// read through a link where safefile refuses one: on Windows any link on the
+// way (rejectReparseChain); elsewhere a link as the last component or as the
+// folder that holds it, which are looked at with the walk's own reads
+// (pathLstat). A link further up is read through, as safefile does.
+func readNameAsSafefile(op, name, path string) error {
+	if path == fixturefs.Map(name) {
+		return nil
+	}
+	if runtime.GOOS == "windows" {
+		return &fs.PathError{Op: op, Path: name, Err: errNameReadThroughLink}
+	}
+	for _, component := range []string{name, filepath.Dir(name)} {
+		info, err := pathLstat(component)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return &fs.PathError{Op: op, Path: name, Err: errNameReadThroughLink}
+		}
+	}
+	return nil
+}
+
+// errNameReadThroughLink is the refusal of a reader that reads the name it
+// is given as a name (safefile, GetLongPathName) when the share walk read
+// that name through a link: the gate's path is the link's target, and the
+// name would be looked up again through the link as it is now.
+var errNameReadThroughLink = errors.New("hookpaths: the name passes a link the share gate resolved")
 
 // LstatPinned is pathidentity.LstatPinned for a path a hook call names,
 // read as pathLstat reads it.
@@ -991,14 +1124,31 @@ type CallState struct {
 	budgetCuts                           uint64
 }
 
-// HookCallState is the CallState of the hook call the goroutine runs.
-func HookCallState() CallState {
-	call := currentHookCall()
-	if call == nil {
-		return CallState{}
+// GlobCut is the caps the pattern expansions of the call hit so far
+// (noteGlobCut): every one is a TRUNCATED reading of the call.
+func (s CallState) GlobCut() bounded.CapSet { return s.globCut }
+
+// noteStateUnanswered marks the goroutine's hook call (none: nothing): a
+// write target was refused as not proved free of the state because a local
+// read it needed did not answer in time (rel-1-0-10:GAP-1805).
+func noteStateUnanswered() {
+	if call := currentHookCall(); call != nil {
+		call.stateUnanswered.Store(true)
 	}
-	return call.state()
 }
+
+// StateCheckUnanswered reports that the goroutine's hook call refused a
+// write target only as not proved free of the DefenseClaw state: a local read
+// the check needed did not answer in time. The caller names that cause, so
+// the user retries instead of reading a state-write reason for an ordinary
+// file (rel-1-0-10:GAP-1805).
+func StateCheckUnanswered() bool {
+	call := currentHookCall()
+	return call != nil && call.stateUnanswered.Load()
+}
+
+// HookCallState is the CallState of the hook call the goroutine runs.
+func HookCallState() CallState { return CurrentHookCall().State() }
 
 // state is the CallState of call (not nil).
 func (call *hookCall) state() CallState {

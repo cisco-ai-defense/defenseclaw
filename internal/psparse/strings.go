@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 )
 
 // stringLit builds a StringLit from a TokString token, resolving the literal
@@ -56,7 +58,9 @@ func collapseDoubled(s string, isClass func(rune) bool) string {
 	var b strings.Builder
 	for i := 0; i < len(rs); i++ {
 		if isClass(rs[i]) && i+1 < len(rs) && isClass(rs[i+1]) {
-			b.WriteRune(rs[i]) // a doubled quote collapses to that same quote char
+			// a doubled quote is its second quote char, as pwsh reads it:
+			// 'a’‘b' is a‘b (rel-1-0-10:GAP-1854)
+			b.WriteRune(rs[i+1])
 			i++
 			continue
 		}
@@ -271,25 +275,15 @@ func (p *parser) decodeBacktick(raw string, stripQuotes bool) (string, bool) {
 }
 
 // scanParenBody returns the text inside a $( ... ) starting just after the '(',
-// and how many runes were consumed including the closing ')'.
+// and how many runes were consumed including the closing ')'. The end is found
+// the way the lexer finds it in a string (scanSubexpr: quotes, nested strings,
+// comments and backtick escapes are skipped whole, so a ")" inside 'a)b' does
+// not end the group). A group that never closes takes the rest of the text.
 func scanParenBody(runes []rune) (string, int) {
-	depth := 1
-	var b strings.Builder
-	i := 0
-	for ; i < len(runes); i++ {
-		r := runes[i]
-		switch r {
-		case '(':
-			depth++
-		case ')':
-			depth--
-			if depth == 0 {
-				return b.String(), i + 1
-			}
-		}
-		b.WriteRune(r)
+	if end, ok := scanSubexpr(runes, 0); ok {
+		return string(runes[:end-1]), end
 	}
-	return b.String(), i
+	return string(runes), len(runes)
 }
 
 // scanEmbeddedVar reads a $var / ${...} / $scope:name beginning at runes[0]=='$'
@@ -339,7 +333,7 @@ func scanEmbeddedVar(runes []rune) (Expr, int) {
 func numberLit(t Token) *Number {
 	n := &Number{span: span{t.Start, t.End}, Text: t.Raw}
 	raw := t.Raw
-	lower := strings.ToLower(raw)
+	lower := asciifold.Lower(raw)
 	// multiplier suffix (kb mb gb tb pb)
 	mult := int64(1)
 	for _, suf := range []string{"kb", "mb", "gb", "tb", "pb"} {
@@ -387,7 +381,7 @@ func numberLit(t Token) *Number {
 		}
 		break
 	}
-	low := strings.ToLower(raw)
+	low := asciifold.Lower(raw)
 	// Conservatism for numeric suffix/multiplier combinations whose exact pwsh
 	// value depends on signed-width wrap or suffix/multiplier ordering we do not
 	// model (0xFFy -> -1, 0x100y -> bareword, 1kbl, 1.5l -> 2): do not assert a

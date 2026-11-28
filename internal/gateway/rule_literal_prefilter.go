@@ -11,6 +11,8 @@ import (
 	"sync"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
 )
 
 // A rule's regular expression can match only text that holds one of its
@@ -246,11 +248,52 @@ type ruleScanText struct {
 	mu     sync.Mutex
 	folded string
 	ready  bool
+	// memo, for a text of a stream's mid-stream checks (midStreamScanState,
+	// GAP-0515): the fold comes from it and view answers the literals.
+	memo *midStreamTextMemo
+	view *rxprefilter.PresenceView
 	// holds is whether the folded text holds each literal searched so far.
 	// The rules of a pack share most literals (ssh, .env, curl), and each
 	// search reads the whole text: a 1 MiB command was read once per rule
 	// literal (rel-1-0-10:GAP-0299).
 	holds map[string]bool
+	// grams is the trigram index of a large folded text (ruleTrigramMin).
+	grams *ruleTrigramIndex
+}
+
+// ruleTrigramMin is the folded size from which a text keeps a trigram
+// index. A literal that misses a rule pack's large text (the common answer)
+// was a search of the whole text per literal: about 16% of the cost of a
+// 1 MiB benign command (rel-1-0-10:GAP-0299). Smaller texts search as before.
+const ruleTrigramMin = 64 << 10
+
+// ruleTrigramIndex has one bit per hashed byte trigram of a text. A literal
+// with a trigram whose bit is clear is not in the text; a set bit proves
+// nothing (another trigram may share it), so the text is then searched.
+type ruleTrigramIndex [1 << 14]uint64
+
+func ruleTrigramBit(a, b, c byte) uint32 {
+	return (uint32(a)<<16 | uint32(b)<<8 | uint32(c)) * 2654435761 >> 12
+}
+
+func newRuleTrigramIndex(text string) *ruleTrigramIndex {
+	index := new(ruleTrigramIndex)
+	for i := 0; i+2 < len(text); i++ {
+		bit := ruleTrigramBit(text[i], text[i+1], text[i+2])
+		index[bit>>6] |= 1 << (bit & 63)
+	}
+	return index
+}
+
+// misses reports a literal of three bytes or more that the text cannot hold.
+func (index *ruleTrigramIndex) misses(literal string) bool {
+	for i := 0; i+2 < len(literal); i++ {
+		bit := ruleTrigramBit(literal[i], literal[i+1], literal[i+2])
+		if index[bit>>6]&(1<<(bit&63)) == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // mayMatch reports whether pattern can match the text: false only when the
@@ -280,15 +323,28 @@ func (t *ruleScanText) mayMatch(pattern *regexp.Regexp) bool {
 func (t *ruleScanText) holdsLiteral(literal string) bool {
 	t.mu.Lock()
 	if !t.ready {
-		t.folded, t.ready = foldRuleText(t.text), true
+		if t.memo != nil {
+			t.folded = t.memo.fold.Apply(t.text, foldRuleText, rxprefilter.SplitBeforeASCII)
+			t.view = t.memo.lits.View(t.folded)
+		} else {
+			t.folded = foldRuleText(t.text)
+			if len(t.folded) >= ruleTrigramMin {
+				t.grams = newRuleTrigramIndex(t.folded)
+			}
+		}
+		t.ready = true
 	}
 	held, known := t.holds[literal]
-	folded := t.folded
+	folded, grams, view := t.folded, t.grams, t.view
 	t.mu.Unlock()
 	if known {
 		return held
 	}
-	held = strings.Contains(folded, literal)
+	if view != nil {
+		held = view.Contains(literal)
+	} else {
+		held = (grams == nil || !grams.misses(literal)) && strings.Contains(folded, literal)
+	}
 	t.mu.Lock()
 	if t.holds == nil {
 		t.holds = make(map[string]bool)

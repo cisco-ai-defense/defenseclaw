@@ -769,14 +769,18 @@ func TestReadPromotedArtifactRejectsPathIndirection(t *testing.T) {
 }
 
 func TestReadPromotedArtifactRequiresExecuteBitOnlyForDirectPath(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows does not use POSIX execute permission bits")
-	}
 	path := filepath.Join(t.TempDir(), "script.sh")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\nrm -rf /\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok := readPromotedArtifact(path, actionfacts.DialectNone); ok {
+	body, dialect, ok := readPromotedArtifact(path, actionfacts.DialectNone)
+	if runtime.GOOS == "windows" {
+		// Windows has no execute bit to gate a direct path on, so the script
+		// is read and its shebang names the dialect.
+		if !ok || dialect != actionfacts.DialectPOSIX || len(body) == 0 {
+			t.Fatalf("Windows direct path: ok=%v dialect=%v, want it promoted as POSIX", ok, dialect)
+		}
+	} else if ok {
 		t.Fatal("non-executable direct path was promoted")
 	}
 	if _, dialect, ok := readPromotedArtifact(

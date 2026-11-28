@@ -30,7 +30,23 @@ func TestWindowsEnterpriseStandaloneClaudeRegistryPolicyPreflight(t *testing.T) 
 		refused    bool
 	}{
 		{name: "claude enrolled, value set", connectors: []string{"codex", "claudecode"}, value: `{"env":{"X":"1"}}`, refused: true},
-		{name: "claude enrolled, mixed case", connectors: []string{"ClaudeCode"}, value: "{}", refused: true},
+		{name: "claude enrolled, mixed case", connectors: []string{"ClaudeCode"}, value: `{"model":"x"}`, refused: true},
+		// GAP-1731: Claude Code skips an empty or control-only value, and a
+		// merge value composes with the drop-in; neither is refused.
+		{name: "claude enrolled, empty object", connectors: []string{"claudecode"}, value: "{}"},
+		{name: "claude enrolled, control keys only", connectors: []string{"claudecode"}, value: `{"managedSourcesBehavior":"merge"}`},
+		{name: "claude enrolled, merge with policy", connectors: []string{"claudecode"}, value: `{"managedSourcesBehavior":"merge","permissions":{"deny":["Bash(curl:*)"]}}`},
+		{name: "claude enrolled, merge disables hooks", connectors: []string{"claudecode"}, value: `{"managedSourcesBehavior":"merge","disableAllHooks":true}`, refused: true},
+		// GAP-1801 (a): a hooks table that names no DefenseClaw hook cannot be
+		// DefenseClaw's matrix, so it is refused before anything changes (the
+		// enrolment gate refused it at rel, after Setup changed the machine); a
+		// table that names the DefenseClaw hook still defers to enrolment, which
+		// compares it with the installed hook.
+		{name: "claude enrolled, hooks table without DefenseClaw", connectors: []string{"claudecode"}, value: `{"hooks":{"PreToolUse":[]}}`, refused: true},
+		{name: "claude enrolled, DefenseClaw hooks table", connectors: []string{"claudecode"}, value: `{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"\"C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-hook.exe\" claudecode"}]}]}}`},
+		// GAP-2175: enrolment matches the hook by file identity, so a matrix
+		// that names it by its 8.3 short path is deferred too.
+		{name: "claude enrolled, DefenseClaw hooks table by 8.3 short path", connectors: []string{"claudecode"}, value: `{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"C:\\PROGRA~1\\Cisco\\DEFENS~1\\bin\\DEFENS~1.EXE","args":["hook","--connector","claudecode","--enterprise-managed"]}]}]}}`},
 		{name: "claude enrolled, no value", connectors: []string{"claudecode"}, value: ""},
 		{name: "claude not enrolled, value set", connectors: []string{"codex", "copilot"}, value: `{"env":{}}`},
 		{name: "config not loadable", loadErr: errors.New("bad config"), value: "{}"},
@@ -56,6 +72,7 @@ func TestWindowsEnterpriseStandaloneClaudeRegistryPolicyPreflight(t *testing.T) 
 					`HKLM\SOFTWARE\Policies\ClaudeCode\Settings`,
 					"nothing was changed",
 					"Delete that registry value",
+					`"managedSourcesBehavior": "merge"`,
 					"guardrail.connectors.claudecode.enabled: false",
 					"run the same command again",
 				} {

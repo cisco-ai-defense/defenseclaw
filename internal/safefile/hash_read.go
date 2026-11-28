@@ -24,11 +24,36 @@ func HashOpenedRegularFileBounded(file *os.File, limit int64) (digest [sha256.Si
 
 // HashOpenedRegularFileBoundedCapture additionally retains at most captureLimit
 // bytes from the same read that produced the digest. Zero disables retention.
-// Bytes are returned only after the opened-file stability check succeeds. The
-// caller still owns the handle and verifies its current child-name binding.
+// Bytes are returned only after the opened-file stability check succeeds. Where
+// the platform retries a read whose file only changed metadata (macOS: a root
+// repair, Spotlight or a scanner adding an xattr), the same handle is read
+// again from offset zero, at most readStabilityMetadataRetries times; consumed
+// is then the last read's. The caller still owns the handle and verifies its
+// current child-name binding.
 func HashOpenedRegularFileBoundedCapture(file *os.File, limit int64, captureLimit int) (digest [sha256.Size]byte, captured []byte, consumed int64, err error) {
 	if captureLimit < 0 {
 		return digest, nil, 0, errors.New("safefile: negative capture limit")
+	}
+	for attempt := 1; ; attempt++ {
+		digest, captured, consumed, err = hashOpenedRegularFileOnce(file, limit, captureLimit, attempt > 1)
+		if !errors.Is(err, errReadMetadataChanged) {
+			return digest, captured, consumed, err
+		}
+		if !retryMetadataChange || attempt >= readStabilityMetadataRetries {
+			return [sha256.Size]byte{}, nil, consumed, fmt.Errorf("safefile: %s changed while reading", file.Name())
+		}
+	}
+}
+
+// hashOpenedAfterRead runs between a hash read and its closing stability
+// snapshot; a test sets it.
+var hashOpenedAfterRead func(*os.File)
+
+func hashOpenedRegularFileOnce(file *os.File, limit int64, captureLimit int, rewind bool) (digest [sha256.Size]byte, captured []byte, consumed int64, err error) {
+	if rewind {
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return digest, nil, 0, err
+		}
 	}
 	info, err := file.Stat()
 	if err != nil {
@@ -49,11 +74,17 @@ func HashOpenedRegularFileBoundedCapture(file *os.File, limit int64, captureLimi
 	if err != nil {
 		return digest, nil, consumed, err
 	}
+	if hashOpenedAfterRead != nil {
+		hashOpenedAfterRead(file)
+	}
 	after, err := readStabilitySnapshot(file)
 	if err != nil {
 		return [sha256.Size]byte{}, nil, consumed, err
 	}
 	if before != after {
+		if before.size == after.size && before.modified == after.modified && before.attributes == after.attributes {
+			return [sha256.Size]byte{}, nil, consumed, errReadMetadataChanged
+		}
 		return [sha256.Size]byte{}, nil, consumed, fmt.Errorf("safefile: %s changed while reading", file.Name())
 	}
 	return digest, captured, consumed, nil

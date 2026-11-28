@@ -128,6 +128,9 @@ type SkillScanner struct {
 	LLM            config.LLMConfig
 	CiscoAIDefense config.CiscoAIDefenseConfig
 	SecureClient   bool
+	// Contain runs the scanner command; nil is RunTracked's namespace
+	// containment. Only the pod's scan worker sets it (GAP-0828).
+	Contain func(*exec.Cmd) error
 }
 
 // NewSkillScannerFromLLM constructs a scanner from the resolved judge LLM
@@ -482,9 +485,12 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err = runScannerCommand(cmd)
+	err = contain(s.Contain, cmd)
 	result.Duration = time.Since(start)
 	stderrStr := stderr.String()
+	// ctx carries scan_s: a deadline here means the scan was cut off, not that
+	// the scanner failed on its own (GAP-1030).
+	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
 
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -499,13 +505,22 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 		if _, lerr := exec.LookPath(binary); lerr != nil && stdout.Len() == 0 {
 			return nil, scannerNotFound(s.Name(), s.Config.Binary, "repair the managed DefenseClaw installation; source checkouts: uv sync")
 		}
+		if timedOut && stdout.Len() == 0 {
+			scanErr = errors.New(skillScanFailureText(s.Name(), true, s.Config.ScanTimeoutSeconds(), exitCode, stderrStr))
+			if !errors.As(err, &exitErr) {
+				result.ExitCode = -1
+				result.ScanError = scanErr.Error()
+				return result, scanErr
+			}
+			return nil, scanErr
+		}
 		if !errors.As(err, &exitErr) {
 			result.ExitCode = -1
 			result.ScanError = err.Error()
 			return result, fmt.Errorf("scanner: %s could not complete: %w", s.Name(), err)
 		}
 		if stdout.Len() == 0 {
-			scanErr = fmt.Errorf("scanner: %s exited %d: %s", s.Name(), exitCode, scannerFailureText(stderrStr))
+			scanErr = errors.New(skillScanFailureText(s.Name(), false, s.Config.ScanTimeoutSeconds(), exitCode, stderrStr))
 			return nil, scanErr
 		}
 	}
@@ -528,11 +543,42 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 	// an LLM/behavioral/meta configuration error, and DefenseClaw never
 	// passes --fail-on-severity, so there is no "findings" exit to accept.
 	if exitCode != 0 {
-		scanErr = fmt.Errorf("scanner %s exited %d (stderr=%s)", s.Name(), exitCode, scannerFailureText(stderrStr))
+		if timedOut {
+			scanErr = errors.New(skillScanFailureText(s.Name(), true, s.Config.ScanTimeoutSeconds(), exitCode, stderrStr))
+		} else {
+			scanErr = fmt.Errorf("scanner %s exited %d (stderr=%s)", s.Name(), exitCode, scannerFailureText(stderrStr))
+		}
 		return result, scanErr
 	}
 
 	return result, nil
+}
+
+// skillScanFailureText words a scan that produced no usable output. A scan cut
+// off by timeouts.scan_s says it timed out and names the key; a scanner killed
+// by a signal or the OS (a negative exit status, 128+signal, or the Windows
+// 4294967295 kill) says it crashed with its exit code. Both stay scan errors, so
+// the skill stays blocked (fail-closed); only the wording changed (GAP-1030).
+func skillScanFailureText(name string, timedOut bool, scanS, exitCode int, stderr string) string {
+	detail := scannerFailureText(stderr)
+	switch {
+	case timedOut:
+		text := fmt.Sprintf("scanner: %s timed out after %d s (scanners.skill_scanner.timeouts.scan_s); the scan did not finish, so the skill stays blocked", name, scanS)
+		if detail != "" {
+			text += ": " + detail
+		}
+		return text
+	case exitCode < 0 || exitCode >= 128:
+		text := fmt.Sprintf("scanner: %s crashed with exit code %d", name, exitCode)
+		if detail != "" {
+			text += ": " + detail
+		}
+		return text
+	case detail == "":
+		return fmt.Sprintf("scanner: %s exited %d with no error output", name, exitCode)
+	default:
+		return fmt.Sprintf("scanner: %s exited %d: %s", name, exitCode, detail)
+	}
 }
 
 // RuleLLMAnalysisFailed is the INFO finding skill-scanner reports when its

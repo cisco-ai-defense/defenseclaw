@@ -87,9 +87,9 @@ func resolveWindowsDirectoryFacts(sid string, upnWait time.Duration) (useridenti
 			return useridentity.DirectoryFacts{}, err
 		}
 		if _, _, _, err = parsed.LookupAccount(""); err != nil {
-			return useridentity.DirectoryFacts{}, fmt.Errorf("Windows directory lookup: %w", err)
+			return useridentity.DirectoryFacts{}, fmt.Errorf("directory lookup on Windows: %w", err)
 		}
-		return useridentity.DirectoryFacts{}, errors.New("Windows directory lookup returned no facts")
+		return useridentity.DirectoryFacts{}, errors.New("directory lookup on Windows returned no facts")
 	}
 	return facts, nil
 }

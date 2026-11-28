@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: E501
 """The fixture root a run rewrites its corpus to does not depend on the run label or directory (rel-1-0-10 GAP-0495, GAP-0736)."""
+
 from __future__ import annotations
 
 import json
@@ -20,7 +21,10 @@ import s7gate as G  # noqa: E402, N812
 
 class FixtureRoot(unittest.TestCase):
     def test_two_run_directories_share_one_root_and_one_rewritten_byte_stream(self):
-        with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, {"S7_FIXTURE_ROOT": os.path.join(td, "fx")}):
+        with (
+            tempfile.TemporaryDirectory() as td,
+            mock.patch.dict(os.environ, {"S7_FIXTURE_ROOT": os.path.join(td, "fx")}),
+        ):
             a, b = os.path.join(td, "runs", "wr3-rel"), os.path.join(td, "runs", "wr3-head")
             self.assertEqual(G.fixture_root(a), G.fixture_root(b))
             self.assertNotIn("wr3", G.fixture_root(a))

@@ -30,11 +30,13 @@ const restartBracketListenerEnv = "DC_TEST_RESTART_BRACKET_LISTENER"
 // TestRestartBracketListener is a second process that owns the new gateway's
 // port. The parent closes the old listener after its call has begun.
 func TestRestartBracketListener(t *testing.T) {
-	addr := os.Getenv(restartBracketListenerEnv)
-	if addr == "" {
+	if os.Getenv(restartBracketListenerEnv) == "" {
 		t.Skip("listener process only")
 	}
-	listener, err := net.Listen("tcp", addr)
+	// The parent bound the port and passes the listening socket as fd 3, so the
+	// port is never free between the parent choosing it and this process
+	// serving it (a parallel test binary could take a freed port, GAP-1510).
+	listener, err := net.FileListener(os.NewFile(3, "restart-bracket-listener"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,12 +66,17 @@ func TestGAP0295FreshGatewayBenignHookFollowsOutageMode(t *testing.T) {
 			home := t.TempDir()
 			dataDir := filepath.Join(home, ".defenseclaw")
 			hookDir := filepath.Join(dataDir, "hooks")
-			free, err := net.Listen("tcp", "127.0.0.1:0")
+			bound, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
 				t.Fatal(err)
 			}
-			addr := free.Addr().String()
-			_ = free.Close()
+			addr := bound.Addr().String()
+			boundFile, err := bound.(*net.TCPListener).File()
+			_ = bound.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer boundFile.Close() // also closed once the fixture serves: a listener shared with this process is not the gateway's alone
 			if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, SetupOpts{
 				DataDir: dataDir, APIAddr: addr, APIToken: "scoped-test-token", HookFailMode: tc.mode,
 			}, NewClaudeCodeConnector()); err != nil {
@@ -80,6 +87,7 @@ func TestGAP0295FreshGatewayBenignHookFollowsOutageMode(t *testing.T) {
 			writeOutageTierConfig(t, dataDir, tc.config)
 			gateway := exec.Command(os.Args[0], "-test.run=^TestRestartBracketListener$")
 			gateway.Env = append(sanitizedTestEnv(), restartBracketListenerEnv+"="+addr)
+			gateway.ExtraFiles = []*os.File{boundFile}
 			ready, err := gateway.StdoutPipe()
 			if err != nil || gateway.Start() != nil {
 				t.Fatal("gateway fixture did not start")
@@ -88,6 +96,7 @@ func TestGAP0295FreshGatewayBenignHookFollowsOutageMode(t *testing.T) {
 			if line, err := bufio.NewReader(ready).ReadString('\n'); err != nil || line != "ready\n" {
 				t.Fatalf("gateway fixture not ready: %q, %v", line, err)
 			}
+			_ = boundFile.Close() // the fixture is the only holder of the listener now
 			identity, ok := procidentity.Recorded(gateway.Process.Pid)
 			if !ok {
 				t.Fatal("gateway fixture identity unavailable")
@@ -210,11 +219,20 @@ func TestLinuxShellHookCallBracketingRestartFollowsOutageMode(t *testing.T) {
 				defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 			}
 			if tc.swap {
+				// The replacement takes over the old socket (a dup of it, held
+				// until the replacement serves) instead of binding the port
+				// again, so no other process can take the port in between.
+				inherited, err := server.Listener.(*net.TCPListener).File()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer inherited.Close()
 				if err := server.Listener.Close(); err != nil {
 					t.Fatal(err)
 				}
 				newGateway := exec.Command(os.Args[0], "-test.run=^TestRestartBracketListener$")
 				newGateway.Env = append(sanitizedTestEnv(), restartBracketListenerEnv+"="+addr)
+				newGateway.ExtraFiles = []*os.File{inherited}
 				ready, err := newGateway.StdoutPipe()
 				if err != nil {
 					t.Fatal(err)
@@ -226,6 +244,7 @@ func TestLinuxShellHookCallBracketingRestartFollowsOutageMode(t *testing.T) {
 				if line, err := bufio.NewReader(ready).ReadString('\n'); err != nil || line != "ready\n" {
 					t.Fatalf("replacement gateway did not listen: %q, %v", line, err)
 				}
+				_ = inherited.Close() // the replacement is the only holder of the listener now
 				if err := os.WriteFile(filepath.Join(dataDir, "gateway.pid"), []byte(strconv.Itoa(newGateway.Process.Pid)+"\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}

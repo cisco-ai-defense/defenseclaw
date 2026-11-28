@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
+	"github.com/ai-openshell/sdk-go/openshell/v1/types"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -237,7 +237,7 @@ func TestAReconcileDoesNotTakeAnotherSandboxForAGuestOfTheSameName(t *testing.T)
 	b.rec.ID = "id-twin"
 	e.m.mu.Unlock()
 	labels := map[string]string{LabelManaged: "true", LabelOwner: e.owner}
-	_, err := other.SDK().Sandboxes().Create(t.Context(), openshell.DefaultWorkspace, "twin", &types.SandboxSpec{}, labels)
+	_, err := other.SDK().Sandboxes().Create(t.Context(), openshell.DefaultWorkspace, "twin", &types.SandboxSpec{}, types.WithLabels(labels))
 	must(t, err)
 	twin, err := away.Client.GetSandbox(t.Context(), "twin")
 	must(t, err)

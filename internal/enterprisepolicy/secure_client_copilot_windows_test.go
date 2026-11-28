@@ -19,6 +19,7 @@ import (
 // never touches a host it did not publish to or the administrator's own
 // policy files.
 func TestPublishWindowsSecureClientCopilot(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	opts := windowsTestOptions(t)
 	opts.HookBinary = `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw-hook.exe`
 	if _, err := PublishWindowsSecureClientCopilot(opts, true); err == nil {

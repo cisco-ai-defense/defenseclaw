@@ -148,7 +148,12 @@ func TestSetupUsesAGatewayRunAnotherWay(t *testing.T) {
 		// doctor's fix, before it installs, plans or asks anything.
 		for flags, o := range map[string]SetupOptions{"": {}, "--install-openshell": {InstallOpenShell: true}, "-n": {NonInteractive: true}} {
 			t.Run(strings.TrimSpace(goos+" gateway down "+flags), func(t *testing.T) {
-				ta, inst := newApp(t, "", false)
+				input := ""
+				if mac {
+					// The MicroVM question comes first on a Mac (GAP-1704).
+					input = "y\n"
+				}
+				ta, inst := newApp(t, input, false)
 				wantErr(t, ta.Setup(bg, o), "the OpenShell gateway is not usable yet (Gateway); see `defenseclaw sandbox doctor`")
 				has(t, ta.output(), line, "✗ Gateway: the gateway is not answering: connection refused\n", "→ "+startIt)
 				lacks(t, ta.output(), "Install OpenShell", "is needed", "already installed", "✓ OpenShell", "Write this change?", "⚠ Gateway service")
@@ -175,17 +180,38 @@ func TestSetupUsesAGatewayRunAnotherWay(t *testing.T) {
 					// The mounts and telemetry questions come first.
 					input = "\n\n" + input
 				}
+				if mac && input != "" {
+					// A yes keeps this gateway on the MicroVM driver (GAP-1704).
+					input = "y\n" + input
+				}
 				ta, inst := newApp(t, input, true)
 				if tc.o.NonInteractive {
 					ta.IO.TTY = false
 				}
 				tc.o.SkipImages, tc.o.NoWrappers = true, true
-				ta.ok(t, ta.Setup(bg, tc.o))
+				// -n takes the MicroVM question's default on a Mac: the docker
+				// driver, never vm, which this gateway runs until its user
+				// restarts it, so setup ends not ready (GAP-1704).
+				macVM := mac && !tc.o.NonInteractive
+				leavesVM := mac && !macVM
+				if leavesVM {
+					wantExit(t, ta.Setup(bg, tc.o), 1)
+				} else {
+					ta.ok(t, ta.Setup(bg, tc.o))
+				}
 				out := ta.output()
 				has(t, out, line, "⚠ Gateway service: "+gatewayWarn+"\n",
 					"→ setup uses this gateway as it runs: after a gateway change, restart it yourself, the way you started it\n",
 					"then you restart the gateway, the way you started it, so it loads the change (DefenseClaw cannot restart it)",
-					"✓ openshell.enabled is on", "Done →")
+					"✓ openshell.enabled is on")
+				if leavesVM {
+					// The restart is the user's, and it stops what runs on it (GAP-1743).
+					has(t, out, "not ready for sandboxes yet: restart the OpenShell gateway yourself, the way you started it, so it runs the docker driver (restarting it stops every ",
+						"); then `defenseclaw sandbox run ")
+					lacks(t, out, "Done →")
+				} else {
+					has(t, out, "Done →")
+				}
 				lacks(t, out, "✗", "Restart the OpenShell gateway now?", "restarts the gateway", "systemctl --user restart", "brew services restart", "doctor --fix")
 				if !tc.o.NonInteractive {
 					has(t, out, "Write this change? DefenseClaw cannot restart this gateway: you restart it, the way you started it, to apply it [Y/n]")
@@ -215,9 +241,13 @@ func TestSetupUsesAGatewayRunAnotherWay(t *testing.T) {
 					stops = "restarting it stops every sandbox on it (none runs now): save or sync a MicroVM guest's work first, then stop it before the restart " +
 						"(`defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or, for raw OpenShell sandboxes, save work outside the guest first on a gateway older than 0.1.5 because raw stop may not flush it, then `openshell sandbox stop NAME`; DefenseClaw's stop requests a disk sync; raw OpenShell stop on a gateway running 0.1.5 or later requests a guest flush before a planned stop); if a flush fails, changes after the last successful disk sync may be lost\n"
 				}
-				has(t, out, "✓ gateway configuration written; it takes effect when you restart the gateway\n",
-					"⚠ restart the OpenShell gateway yourself, the way you started it, so it runs on the change above (DefenseClaw cannot restart it); "+stops)
-				if p := ta.gateway.planned[0]; mac && (p.ComputeDriver != openshell.DriverVM || p.VMIdentity == nil) || !mac && (!p.EnableBindMounts || p.Env[openshell.EnvTelemetryEnabled] != "false") {
+				has(t, out, "✓ gateway configuration written; it takes effect when you restart the gateway\n")
+				if !leavesVM {
+					has(t, out, "⚠ restart the OpenShell gateway yourself, the way you started it, so it runs on the change above (DefenseClaw cannot restart it); "+stops)
+				}
+				if p := ta.gateway.planned[0]; macVM && (p.ComputeDriver != openshell.DriverVM || p.VMIdentity == nil) ||
+					mac && !macVM && (p.ComputeDriver != openshell.DriverDocker || p.VMIdentity != nil) ||
+					!mac && (!p.EnableBindMounts || p.Env[openshell.EnvTelemetryEnabled] != "false") {
 					t.Fatalf("plan = %+v", p)
 				}
 				// Teardown restores what it wrote.
@@ -298,7 +328,7 @@ func TestSetupSaysAnUnwrittenChangeNeedsSetup(t *testing.T) {
 // last line names the sandboxes running on it.
 func TestSetupSaysTheRestartYouMakeStopsSandboxes(t *testing.T) {
 	for _, mac := range []bool{true, false} {
-		goos, input := "darwin", "\n"
+		goos, input := "darwin", "y\n\n"
 		if !mac {
 			// The mounts and telemetry questions come first.
 			goos, input = "linux", "\n\n\n"

@@ -19,6 +19,7 @@ import (
 // must reach /openai/v1/chat/completions, and .../v1 must reach
 // /v1/chat/completions, never /v1/v1/... or a path without the prefix.
 func TestJudgeBaseURLKeepsTheModelPathPrefix(t *testing.T) {
+	closeBifrostTenantsAfter(t)
 	for _, tc := range []struct{ base, want string }{
 		{"/openai/v1", "/openai/v1/chat/completions"},
 		{"/openai/v1/", "/openai/v1/chat/completions"},

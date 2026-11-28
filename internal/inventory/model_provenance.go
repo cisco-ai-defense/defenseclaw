@@ -28,6 +28,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
@@ -614,7 +615,7 @@ func canonicalRootModel(reference string, rule modelPublisherRule) string {
 
 func cleanDerivedModelName(value string) string {
 	value = strings.TrimSpace(value)
-	lower := strings.ToLower(value)
+	lower := asciifold.Lower(value)
 	for _, ext := range []string{".safetensors", ".gguf", ".ggml", ".onnx", ".ort", ".bin"} {
 		if strings.HasSuffix(lower, ext) {
 			value = value[:len(value)-len(ext)]
@@ -634,7 +635,7 @@ func cleanDerivedModelName(value string) string {
 	for {
 		before := value
 		for _, suffix := range []string{"-gguf", "_gguf", "-mlx", "_mlx", "-awq", "_awq", "-gptq", "_gptq", "-exl2", "_exl2"} {
-			if strings.HasSuffix(strings.ToLower(value), suffix) {
+			if strings.HasSuffix(asciifold.Lower(value), suffix) {
 				value = value[:len(value)-len(suffix)]
 				break
 			}

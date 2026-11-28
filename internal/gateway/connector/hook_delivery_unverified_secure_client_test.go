@@ -83,7 +83,7 @@ func TestUnverifiedSecureClientHostKeepsManagedHooksClosed(t *testing.T) {
 			cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}`)
 			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "DEFENSECLAW_FAIL_MODE=open"}
 			out, err := cmd.CombinedOutput()
-			blocked := err != nil || strings.Contains(string(out), `"decision":"block"`)
+			blocked := codexPreToolUseBlocked(t, out, err)
 			if want := scenario == "missing-token"; blocked != want {
 				t.Fatalf("an unverified Secure Client host's %s: blocked=%t, want %t: %s", scenario, blocked, want, out)
 			}

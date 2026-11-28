@@ -1368,7 +1368,11 @@ def test_a_relative_uv_cache_folder_is_measured_where_uv_will_use_it(
     # folder is. The limit is sized from the short cache folder, so the answer
     # does not depend on how long the runner's temp folder already is; the real
     # limit and reserve are held by the length cases above.
-    deep = tmp_path.joinpath(*["d" * 50] * 3)
+    # Only the difference of the two folders matters, so the deep one is just
+    # longer than the short one: a deep fixture of 150 characters could not be
+    # created at all where the runner temp folder is already long (the
+    # Windows native runs: WinError 3 past MAX_PATH, GAP-2173).
+    deep = tmp_path / "deep" / "deeper"
     shallow = tmp_path / "s"
     deep.mkdir(parents=True)
     shallow.mkdir()
@@ -8207,6 +8211,7 @@ function Write-Info([string]$m) {{ "INFO $m" }}
 function Die([string]$m) {{ throw "DIE $m" }}
 {_ps1_function("Get-ProcessesUnder")}
 {_ps1_function("Get-GatewayDescendants")}
+{_ps1_function("Wait-UpgradeCaller")}
 {_ps1_function("Wait-VenvFree")}
 "SCANS=$((Get-GatewayDescendants | ForEach-Object {{ $_.ProcessId }}) -join ',')"
 try {{ Wait-VenvFree; "FREE sleeps=$script:sleeps" }} catch {{ "$($_.Exception.Message)" }}

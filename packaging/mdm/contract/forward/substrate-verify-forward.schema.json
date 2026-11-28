@@ -35,13 +35,20 @@
       "$ref": "#/$defs/policy_conflicts",
       "description": "The agents in policy_conflict per atespace (from 1.0.10). The policy_conflict check fails while one is there, and warns when they could not be counted."
     },
+    "bundles": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/bundle_stage"
+      },
+      "description": "The signed policy bundles in force, one per stage (from 1.0.11); left out when substrate.bundles is off. The bundle_state check fails when one no longer verifies."
+    },
     "checks": {
       "type": "array",
       "items": {
         "$ref": "#/$defs/check"
       },
       "minItems": 12,
-      "maxItems": 12
+      "maxItems": 14
     }
   },
   "$defs": {
@@ -97,12 +104,14 @@
             "sign_in_server",
             "snapshot_bucket",
             "openfga_grants",
+            "bundle_state",
             "callout_registered",
             "ingress_clients",
             "actor_service_routes",
             "api_access_label",
             "policy_conflict",
-            "worker_drain"
+            "worker_drain",
+            "relay_tls"
           ]
         },
         "status": {
@@ -157,6 +166,74 @@
           "type": "integer",
           "minimum": 0,
           "description": "Its agents in policy_conflict."
+        }
+      }
+    },
+    "bundle_stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "applied_at",
+        "atespaces",
+        "bundle_id",
+        "manifest_sha256",
+        "receipt_id",
+        "source",
+        "stage",
+        "state",
+        "version"
+      ],
+      "description": "One rollout stage and the signed policy bundle in force there (GAP-0432): bundle_id, version and receipt_id name the bundle and its apply receipt. The signing key id is not forwarded.",
+      "properties": {
+        "stage": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+        },
+        "atespaces": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(\\*|[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)$"
+          }
+        },
+        "bundle_id": {
+          "type": "string",
+          "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "applied_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+        },
+        "source": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,31}$",
+          "description": "Where the apply came from: admin, inbox, or the name of another source (a registry source fills the same fields)."
+        },
+        "state": {
+          "enum": [
+            "verified",
+            "unverified",
+            "unchecked"
+          ],
+          "description": "verified: the bundle verifies against the current trust anchors; unverified: it no longer does and is not enforced (problem names the code); unchecked: verify could not check it from where it ran."
+        },
+        "problem": {
+          "type": "string",
+          "pattern": "^[a-z_]+$",
+          "description": "The bundle error code when state is unverified."
+        },
+        "receipt_id": {
+          "type": "string",
+          "pattern": "^r-[0-9a-f]{16}$",
+          "description": "Names the apply receipt: r- and the first 16 hex digits of the SHA-256 of applied_at, source, stage and manifest_sha256 joined with a newline. Receipts carry no id of their own."
         }
       }
     }

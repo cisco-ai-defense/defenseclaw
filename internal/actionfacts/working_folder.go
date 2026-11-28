@@ -5,6 +5,7 @@ package actionfacts
 
 import (
 	"path"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -143,6 +144,25 @@ func unionWorkFolders(sets ...workFolders) workFolders {
 	return append(out, workFolder{unknown: true})
 }
 
+// identicalWorkFolders reports the same folders in the same order; an
+// empty set (the hook's own folder) equals only another empty set of the
+// same kind: what a reading started from a or from b cannot tell apart
+// (loop).
+func identicalWorkFolders(a, b workFolders) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return (a == nil) == (b == nil)
+	}
+	for i := range a {
+		if !a[i].same(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 func sameWorkFolders(a, b workFolders) bool {
 	a, b = a.orHook(), b.orHook()
 	if len(a) != len(b) {
@@ -204,8 +224,15 @@ func (s workFolders) within(outer workFolders) workFolders {
 }
 
 // resolveWorkFolder is the folder a command runs in: cwd moved by the steps
-// of w. ok is false when the folder is unresolved or a step cannot be
-// resolved.
+// of w, by the rules the walk moves its own folder by (simpleChangedDir): a
+// POSIX folder joins a step with POSIX rules, a native Windows folder or
+// home (C:\Users\alice, the folder Git Bash runs a POSIX call in) with
+// native ones. ok is false when the folder is unresolved or a step cannot be
+// resolved. A Windows home once gave up on ~ and every step relative to a
+// Windows folder, so the folder of cd ~/.defenseclaw was dropped from the
+// folders a later statement may run in after a cd that may fail, and a write
+// there through a variable was allowed on a Windows gateway
+// (rel-1-0-10:GAP-1880).
 func resolveWorkFolder(cwd, home string, w workFolder) (string, bool) {
 	if w.unknown {
 		return "", false
@@ -214,27 +241,37 @@ func resolveWorkFolder(cwd, home string, w workFolder) (string, bool) {
 	for _, step := range w.steps {
 		switch {
 		case step == "~" || step == "":
-			if !strings.HasPrefix(home, "/") {
+			if !simplePathAbs(home) {
 				return "", false
 			}
-			current = path.Clean(home)
+			current = simplePathClean(home)
 		case strings.HasPrefix(step, "~/"):
-			if !strings.HasPrefix(home, "/") {
+			if !simplePathAbs(home) {
 				return "", false
 			}
-			current = path.Join(home, step[2:])
+			current = workFolderJoin(home, step[2:])
 		case strings.HasPrefix(step, "~"):
 			return "", false
-		case strings.HasPrefix(step, "/"):
-			current = path.Clean(step)
+		case simplePathAbs(step):
+			current = simplePathClean(step)
 		default:
-			if !strings.HasPrefix(current, "/") {
+			if !simplePathAbs(current) {
 				return "", false
 			}
-			current = path.Join(current, step)
+			current = workFolderJoin(current, step)
 		}
 	}
 	return current, true
+}
+
+// workFolderJoin is the folder step names from the absolute folder dir: as
+// the walk joins a cd operand to its folder, with POSIX rules under a POSIX
+// folder and native ones under a Windows folder.
+func workFolderJoin(dir, step string) string {
+	if simplePOSIXAbs(dir) {
+		return path.Join(dir, step)
+	}
+	return filepath.Clean(filepath.Join(dir, step))
 }
 
 // workFolderTracker records, for every statement, the folders it may start
@@ -243,6 +280,24 @@ type workFolderTracker struct {
 	folders map[*syntax.Stmt]workFolders
 	// movers are the functions of the text whose body may move the folder.
 	movers map[string]bool
+	// runners are the functions of the text whose every definition only
+	// runs its arguments in the shell (f() { "$@"; }): a call f cd X is the
+	// cd X (substrate-1:GAP-0713).
+	runners map[string]bool
+	// shadowed: the text defines a function named cd, chdir, pushd, popd,
+	// builtin or command, so a call of that name may run it instead of the
+	// builtin: every move may go to an unresolved folder (substrate-1:GAP-0684)
+	// as well as where the builtin goes (substrate-1:GAP-0686).
+	shadowed bool
+	// exitShadowed: the text defines a function named exit or builtin, so
+	// an exit call may return (substrate-1:GAP-0699).
+	exitShadowed bool
+	// unset holds the function names an unset of the text may remove, and
+	// unsetAny says one may remove any function (workFolderUnsetNames): a
+	// definition of such a name may be gone at a call, which then runs the
+	// builtin or program of the name (substrate-1:GAP-1166).
+	unset    map[string]bool
+	unsetAny bool
 	// decls are the definitions of the movers the text defines once (nil
 	// for one defined more than once): a call of one the definition may
 	// have run before (workFolderDefinedAt) leaves the shell in the folders
@@ -279,6 +334,11 @@ type workFolderTracker struct {
 	// posixWorkFolders).
 	unreadMovers bool
 }
+
+// workFolderEveryLoopPass reads the second pass of every loop (loop), the
+// reading before substrate-1 GAP-1152. Only its test sets it, to show both
+// readings agree.
+var workFolderEveryLoopPass bool
 
 // workFolderFirstRun is the earliest offset of a call of an outer function
 // whose definition may have run there (ok false when no call qualifies).
@@ -343,6 +403,21 @@ func newWorkFolderTracker(file *syntax.File) *workFolderTracker {
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch node := node.(type) {
 		case *syntax.FuncDecl:
+			if node.Name != nil {
+				// A function of a move's name may run instead of the
+				// builtin (substrate-1:GAP-0684): every move may go to an
+				// unresolved folder, in the text and in mover bodies.
+				switch node.Name.Value {
+				case "cd", "chdir", "pushd", "popd", "builtin", "command":
+					tracker.shadowed = true
+				}
+				// A function named exit (or builtin) may return: an exit
+				// call ends nothing (substrate-1:GAP-0699).
+				switch node.Name.Value {
+				case "exit", "builtin":
+					tracker.exitShadowed = true
+				}
+			}
 			if node.Name != nil && node.Body != nil {
 				all = append(all, node)
 			}
@@ -363,6 +438,19 @@ func newWorkFolderTracker(file *syntax.File) *workFolderTracker {
 		return tracker // no function, so no mover
 	}
 	tracker.movers, tracker.decls = map[string]bool{}, map[string]*syntax.FuncDecl{}
+	tracker.runners = map[string]bool{}
+	notRunner := map[string]bool{}
+	for _, decl := range all {
+		if workFolderArgRunner(decl.Body) {
+			tracker.runners[decl.Name.Value] = true
+		} else {
+			notRunner[decl.Name.Value] = true
+		}
+	}
+	for name := range notRunner {
+		delete(tracker.runners, name)
+	}
+	tracker.unset, tracker.unsetAny = workFolderUnsetNames(calls, all, tracker.runners)
 	tracker.defs, tracker.callsOf = map[*syntax.FuncDecl]workFolderDef{}, map[string][]*syntax.CallExpr{}
 	tracker.calls, tracker.defined = new(int), map[workFolderDefinedKey]bool{}
 	tracker.firstRun = map[workFolderDefinedKey]workFolderFirstRun{}
@@ -388,7 +476,10 @@ func newWorkFolderTracker(file *syntax.File) *workFolderTracker {
 	}
 	for _, decl := range all {
 		name := decl.Name.Value
-		if !tracker.movers[name] {
+		if !tracker.movers[name] && !tracker.runners[name] {
+			// A runner keeps its definition too: its call is read as its
+			// arguments only where the definition has run
+			// (substrate-1:GAP-0713, CHK-T6-SCB).
 			continue
 		}
 		if _, seen := tracker.decls[name]; seen {
@@ -516,7 +607,8 @@ func posixWorkFolders(file *syntax.File) (folders, unread map[*syntax.Stmt]workF
 	if tracker.calls == nil || *tracker.calls == 0 {
 		return tracker.folders, nil // no mover body was read: the readings agree
 	}
-	other := &workFolderTracker{folders: make(map[*syntax.Stmt]workFolders), movers: tracker.movers, unreadMovers: true}
+	other := &workFolderTracker{folders: make(map[*syntax.Stmt]workFolders), movers: tracker.movers, unreadMovers: true,
+		exitShadowed: tracker.exitShadowed}
 	other.list(file.Stmts, hookWorkFolders)
 	return tracker.folders, other.folders
 }
@@ -565,7 +657,7 @@ func (t *workFolderTracker) moverCall(name string, call *syntax.CallExpr, in wor
 	// the folders the call leaves are read here.
 	inner := &workFolderTracker{folders: make(map[*syntax.Stmt]workFolders), movers: t.movers, decls: t.decls,
 		defs: t.defs, callsOf: t.callsOf, depth: t.depth + 1, inBody: t.inBody + 1, calls: t.calls, defined: t.defined,
-		firstRun: t.firstRun}
+		firstRun: t.firstRun, shadowed: t.shadowed, exitShadowed: t.exitShadowed, unset: t.unset, unsetAny: t.unsetAny}
 	ok, after = inner.stmt(decl.Body, in)
 	// `f() { test -f .bashrc && return; cd /tmp; }; f && echo x >> .bashrc`
 	// may leave the shell where the body returned, with status 0 (the
@@ -580,13 +672,116 @@ func (t *workFolderTracker) moverCall(name string, call *syntax.CallExpr, in wor
 	if len(inner.returnedOK) != 0 {
 		ok = unionWorkFolders(ok, inner.returnedOK)
 	}
-	if !t.defs[decl].topLevel {
+	if t.mayUnset(name) {
+		// An unset of the name may have removed the definition: the call
+		// then runs the builtin or program of the name, which may succeed
+		// where the shell was (substrate-1:GAP-1166).
+		ok, after = unionWorkFolders(ok, in), unionWorkFolders(after, in)
+	} else if !t.defs[decl].topLevel {
 		// A definition in a list, a branch or a body may not have run: the
 		// call then finds no function, fails and leaves the shell where it
 		// was.
 		after = unionWorkFolders(after, in)
 	}
 	return ok, after
+}
+
+// mayUnset reports a function name an unset of the text may remove.
+func (t *workFolderTracker) mayUnset(name string) bool { return t.unsetAny || t.unset[name] }
+
+// workFolderUnsetNames returns the function names the unset calls among
+// calls may remove: unset -f NAME, and unset NAME, which removes the function
+// when no variable has the name (only -v or -n with no -f leaves functions
+// alone). It reads every unset of the text, before or after a call: one
+// after a call in a loop runs before its next turn, and one after the last
+// call (a script that removes its helper at its end) only adds the folder
+// the shell was in. An unset run through builtin or command, with or
+// without their options, is read the same. expands says the text may run
+// an unset it does not spell out, so it may remove any function
+// (substrate-1:GAP-1166): an option or operand of an unset expands, a
+// command name expands ($u -f f), or eval or trap runs text that expands or
+// names unset. A runner's name before an unset runs it too.
+func workFolderUnsetNames(calls []*syntax.CallExpr, decls []*syntax.FuncDecl, runners map[string]bool) (names map[string]bool, expands bool) {
+	// The "$@" of a runner body runs the arguments of its calls, read
+	// below as the command after the runner's name.
+	runs := map[*syntax.CallExpr]bool{}
+	for _, decl := range decls {
+		if runners[decl.Name.Value] && workFolderArgRunner(decl.Body) {
+			runs[decl.Body.Cmd.(*syntax.Block).Stmts[0].Cmd.(*syntax.CallExpr)] = true
+		}
+	}
+	for _, call := range calls {
+		if runs[call] {
+			continue
+		}
+		args := call.Args
+		for len(args) > 1 {
+			prefix := projectPOSIXWord(args[0])
+			if !prefix.Expands && runners[prefix.Value] {
+				args = args[1:] // f unset -f g runs the unset
+				continue
+			}
+			if prefix.Expands || prefix.Value != "builtin" && prefix.Value != "command" {
+				break
+			}
+			// command -p unset ...: the options of builtin and command
+			// do not change the command they run.
+			for args = args[1:]; len(args) > 1; args = args[1:] {
+				if option := projectPOSIXWord(args[0]); option.Expands || len(option.Value) < 2 || option.Value[0] != '-' {
+					break
+				}
+			}
+		}
+		program := projectPOSIXWord(args[0])
+		if program.Expands {
+			return nil, true
+		}
+		if program.Value == "eval" || program.Value == "trap" {
+			for _, arg := range args[1:] {
+				if word := projectPOSIXWord(arg); word.Expands || strings.Contains(word.Value, "unset") {
+					return nil, true
+				}
+			}
+			continue
+		}
+		if program.Value != "unset" {
+			continue
+		}
+		functions, variablesOnly, operands := false, false, false
+		var unset []string
+		for _, arg := range args[1:] {
+			word := projectPOSIXWord(arg)
+			if word.Expands {
+				if variablesOnly && !functions {
+					// unset -v "$X" removes a variable: a word that
+					// expands to -f then is a usage error.
+					break
+				}
+				return nil, true
+			}
+			if !operands && word.Value == "--" {
+				operands = true
+				continue
+			}
+			if !operands && len(word.Value) > 1 && word.Value[0] == '-' {
+				functions = functions || strings.Contains(word.Value, "f")
+				variablesOnly = variablesOnly || strings.ContainsAny(word.Value, "vn")
+				continue
+			}
+			operands = true
+			unset = append(unset, word.Value)
+		}
+		if variablesOnly && !functions {
+			continue
+		}
+		for _, name := range unset {
+			if names == nil {
+				names = map[string]bool{}
+			}
+			names[name] = true
+		}
+	}
+	return names, false
 }
 
 // add is s with the folders of in, the hook's own folder for an empty in.
@@ -635,6 +830,30 @@ func workFolderReturn(call *syntax.CallExpr) (returns, ok bool) {
 	return true, true
 }
 
+// workFolderArgRunner reports a function body that only runs the
+// function's arguments as a command in the shell: { "$@"; } with no
+// redirect, background or negation (a ( ) body runs them in a copy).
+func workFolderArgRunner(body *syntax.Stmt) bool {
+	block, ok := body.Cmd.(*syntax.Block)
+	if !ok || len(body.Redirs) != 0 || len(block.Stmts) != 1 {
+		return false
+	}
+	stmt := block.Stmts[0]
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || stmt.Background || stmt.Negated || stmt.Coprocess || len(stmt.Redirs) != 0 ||
+		len(call.Assigns) != 0 || len(call.Args) != 1 || len(call.Args[0].Parts) != 1 {
+		return false
+	}
+	quoted, ok := call.Args[0].Parts[0].(*syntax.DblQuoted)
+	if !ok || quoted.Dollar || len(quoted.Parts) != 1 {
+		return false
+	}
+	param, ok := quoted.Parts[0].(*syntax.ParamExp)
+	return ok && param.Param != nil && param.Param.Value == "@" &&
+		param.Exp == nil && param.Repl == nil && param.Slice == nil && param.Index == nil &&
+		!param.Excl && !param.Length && !param.Width && param.Names == 0
+}
+
 // workFolderBodyMoves reports a function body with a folder move in it, or
 // a call of one of movers.
 func workFolderBodyMoves(body *syntax.Stmt, movers map[string]bool) bool {
@@ -652,6 +871,37 @@ func workFolderBodyMoves(body *syntax.Stmt, movers map[string]bool) bool {
 		return !moves
 	})
 	return moves
+}
+
+// exits reports a statement after which the shell runs nothing more: a
+// call of the exit builtin (or builtin exit), alone or as the last statement
+// of a { } group, in the shell itself (not in the background, a pipe or a
+// subshell), when no function of the text is named exit.
+func (t *workFolderTracker) exits(stmt *syntax.Stmt) bool {
+	for stmt != nil && !t.exitShadowed && !stmt.Background && !stmt.Coprocess && !stmt.Negated {
+		switch cmd := stmt.Cmd.(type) {
+		case *syntax.Block:
+			if len(cmd.Stmts) == 0 {
+				return false
+			}
+			stmt = cmd.Stmts[len(cmd.Stmts)-1]
+		case *syntax.CallExpr:
+			args := cmd.Args
+			if len(args) > 1 {
+				if word := projectPOSIXWord(args[0]); !word.Expands && word.Value == "builtin" {
+					args = args[1:]
+				}
+			}
+			if len(args) == 0 {
+				return false
+			}
+			name := projectPOSIXWord(args[0])
+			return !name.Expands && name.Value == "exit"
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // list tracks statements run one after the other from in: ok are the folders
@@ -709,6 +959,13 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 			for _, candidate := range cdPathCandidates(cmd, target) {
 				moved = unionWorkFolders(moved, in.with(candidate))
 			}
+			if t.shadowed {
+				// A function of the move's name may run instead of the
+				// builtin and go anywhere, or where the builtin goes
+				// (cd(){ builtin cd "$@"; }): both, so the call is never
+				// weaker than its plain form (substrate-1:GAP-0686).
+				moved = unionWorkFolders(moved, unresolvedWorkFolders)
+			}
 			// The cd may fail: after it the shell is in the moved folder if
 			// it worked, where it was if not.
 			return moved, unionWorkFolders(moved, in)
@@ -724,6 +981,28 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 				return t.moverCall(name.Value, cmd, in)
 			}
 		}
+		if len(cmd.Args) > 1 && len(t.runners) != 0 {
+			if name := projectPOSIXWord(cmd.Args[0]); !name.Expands && t.runners[name.Value] {
+				// After f() { "$@"; }, f cd X is the cd X, run in the shell
+				// itself (substrate-1:GAP-0713). Only a definition at the
+				// top level of the text before the call has surely run; one
+				// that may have run (in a list, a branch or a body) may leave
+				// the call to a builtin or program of the name, so the shell
+				// may also stay where it was; one that cannot have run yet
+				// leaves it there (CHK-T6-SCB). So does one an unset of the
+				// text may remove (unset -f f, or unset f): the call may run
+				// the builtin of the name (substrate-1:GAP-1166).
+				decl := t.decls[name.Value]
+				if decl == nil || !t.definedAt(decl, cmd, 0) {
+					return in, in
+				}
+				ok, after := t.command(&syntax.Stmt{Cmd: &syntax.CallExpr{Args: cmd.Args[1:]}}, in)
+				if !t.defs[decl].topLevel || t.mayUnset(name.Value) {
+					ok, after = unionWorkFolders(ok, in), unionWorkFolders(after, in)
+				}
+				return ok, after
+			}
+		}
 		return in, in
 	case *syntax.BinaryCmd:
 		switch cmd.Op {
@@ -734,11 +1013,27 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 		case syntax.OrStmt:
 			leftOK, leftAfter := t.stmt(cmd.X, in)
 			rightOK, rightAfter := t.stmt(cmd.Y, leftAfter)
+			if t.exits(cmd.Y) {
+				// After `cd X || exit` the shell goes on only where the
+				// left side succeeded: the exit ends it where the cd failed
+				// (substrate-1:GAP-0699).
+				return leftOK, leftOK
+			}
 			return unionWorkFolders(leftOK, rightOK), unionWorkFolders(leftAfter, rightAfter)
-		default: // a pipe: each member runs in a copy of the shell
+		default:
+			// A pipe: each member runs in a copy of the shell, but zsh, and
+			// Bash with lastpipe (shopt -s lastpipe, bash -O lastpipe -c),
+			// run the last stage in the shell itself, so the shell may go on
+			// in a folder that stage moves to: true | { cd D && ls; }; X
+			// runs X in D there, a state write in D included (substrate-1
+			// GAP-0668). The stages of an inner pipeline (cmd.X) are never
+			// the last stage.
 			t.stmt(cmd.X, in)
-			t.stmt(cmd.Y, in)
-			return in, in
+			lastOK, lastAfter := t.stmt(cmd.Y, in)
+			if sameWorkFolders(lastOK, in) && sameWorkFolders(lastAfter, in) {
+				return in, in
+			}
+			return unionWorkFolders(in, lastOK), unionWorkFolders(in, lastAfter)
 		}
 	case *syntax.Subshell:
 		t.list(cmd.Stmts, in)
@@ -809,14 +1104,26 @@ func (t *workFolderTracker) ifClause(clause *syntax.IfClause, in workFolders) wo
 
 // loop reads a loop body twice: the second pass starts wherever a pass may
 // leave the shell. A body that moves further on every pass (a relative step)
-// leaves an unresolved folder.
+// leaves an unresolved folder. A first pass that leaves the shell exactly
+// where it started, and read no mover body, is the second pass: the same
+// start and the same state give the same folders and the same records, so
+// it is not read again. Reading it again made every loop in a loop read its
+// body twice per outer pass, 2^depth readings for loops nested depth deep
+// (20 nested for loops took minutes, substrate-1 GAP-1152).
 func (t *workFolderTracker) loop(cond, body []*syntax.Stmt, in workFolders) (ok, after workFolders) {
 	pass := func(start workFolders) workFolders {
 		_, condAfter := t.list(cond, start)
 		_, bodyAfter := t.list(body, condAfter)
 		return unionWorkFolders(start, condAfter, bodyAfter)
 	}
+	calls := 0
+	if t.calls != nil {
+		calls = *t.calls
+	}
 	first := pass(in)
+	if !workFolderEveryLoopPass && (t.calls == nil || *t.calls == calls) && identicalWorkFolders(first, in) {
+		return first, first
+	}
 	second := pass(first)
 	if !sameWorkFolders(first, second) {
 		second = unionWorkFolders(second, unresolvedWorkFolders)
@@ -1224,7 +1531,8 @@ func (f Facts) MoverCallsUnread() bool { return f.moverCallsUnread }
 // where the walk moved, so after `[ -e .bashrc ] || cd /tmp` or a mover
 // call that may return, a write was never read in the hook's folder on a
 // Windows gateway (substrate-1:GAP-0696). resolveWorkFolder reads a step
-// from it as it does from a POSIX folder, and gives up on a relative one.
+// from it, and from a Windows home, as the walk does (rel-1-0-10:GAP-1880),
+// and gives up on a relative one.
 func simplePartWorkFolders(source string, parts []sequenceStatement, cwd, home string) [][]string {
 	out := make([][]string, len(parts))
 	if !simplePathAbs(cwd) || len(parts) == 0 {

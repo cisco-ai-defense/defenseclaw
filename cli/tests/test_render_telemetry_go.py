@@ -85,9 +85,13 @@ def test_real_candidate_renders_exact_complete_deterministic_outputs(
     family_counts = Counter(item.signal for item in candidate_index.enriched_families.values())
     family_total = sum(family_counts.values())
     catalog = payloads[coordinator.EXACT_GO_OUTPUT_PATHS[1]]
-    base_contracts = catalog.split(b"var generatedFamilyBaseContracts = map[string]familyDescriptorContract{", 1)[1]
-    base_contracts = base_contracts.split(b"\n}\n", 1)[0]
-    assert base_contracts.count(b'\n\t"') == family_total
+    base_contracts = catalog.split(
+        b"var generatedFamilyBaseContracts = sync.OnceValue(func() map[string]familyDescriptorContract {\n"
+        b"\treturn map[string]familyDescriptorContract{",
+        1,
+    )[1]
+    base_contracts = base_contracts.split(b"\n\t}\n})\n", 1)[0]
+    assert base_contracts.count(b'\n\t\t"') == family_total
     assert catalog.count(b" familyTraceContract() familyTraceContract {") == family_counts["traces"]
     assert catalog.count(b" familyMetricContract() familyMetricContract {") == family_counts["metrics"]
     assert (
@@ -106,7 +110,8 @@ def test_real_candidate_renders_exact_complete_deterministic_outputs(
     assert producer.count(b"ContextIdentitySetID:") == len(producer_plan.groups)
     assert b"var generatedInboundNonNativeMatches = []generatedInboundMatch{" in producer
     assert b"var generatedInboundNonNativeTargets = []generatedInboundTarget{" in producer
-    assert b"var generatedInboundMatches, generatedInboundTargets = deriveGeneratedInboundNativeCatalog(" in producer
+    assert b"func generatedInboundNativeCatalog() ([]generatedInboundMatch, []generatedInboundTarget) {" in producer
+    assert b"var generatedInboundMatches" not in producer
     assert b'ClassID: "otlp.native.' not in producer
     assert b"NativeRoundTrip: true" not in producer
     assert b"var generatedInboundNativeMarkers = []generatedInboundNativeMarker{" in producer
@@ -318,9 +323,13 @@ def test_catalog_renderer_has_no_hand_maintained_global_family_count(candidate_i
     plan = candidate_index.go_api_plan
     forged = dataclasses.replace(plan, descriptors=plan.descriptors[:-1])
     rendered = renderer._render_catalog_body(forged)
-    base_contracts = rendered.split(b"var generatedFamilyBaseContracts = map[string]familyDescriptorContract{", 1)[1]
-    base_contracts = base_contracts.split(b"\n}\n", 1)[0]
-    assert base_contracts.count(b'\n\t"') == len(forged.descriptors)
+    base_contracts = rendered.split(
+        b"var generatedFamilyBaseContracts = sync.OnceValue(func() map[string]familyDescriptorContract {\n"
+        b"\treturn map[string]familyDescriptorContract{",
+        1,
+    )[1]
+    base_contracts = base_contracts.split(b"\n\t}\n})\n", 1)[0]
+    assert base_contracts.count(b'\n\t\t"') == len(forged.descriptors)
 
 
 def test_renderer_uses_the_compiler_owned_cross_field_relation_bound() -> None:

@@ -71,6 +71,7 @@ func claudeGate(reg *fakeWSLRegistry) *RegValue {
 // The Claude Desktop gate is merged only where Claude Desktop's hive rule
 // makes that safe, and removal takes back only what DefenseClaw wrote.
 func TestWindowsWSLClaudeDesktopGate(t *testing.T) {
+	requireElevatedMachinePolicyWindows(t)
 	adminPolicy := RegValue{Name: "isClaudeCodeForDesktopEnabled", Type: RegSZ, String: "true"}
 
 	t.Run("merged into existing machine policy and removed on uninstall", func(t *testing.T) {

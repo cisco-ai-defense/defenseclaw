@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // TestTrustedDispatchMemoKeyCoversEveryField: every field of a request that
@@ -17,17 +18,25 @@ import (
 // out-parameter the memo replays, or a recorder that turns the memo off
 // (trustedDispatchMemo). A new such field must be placed here first.
 // ShellStartup is a value: the key keeps the pointer and reflect.DeepEqual
-// compares the startup it points at (GAP-1296's client header).
+// compares the startup it points at (GAP-1296's client header). So are a
+// Substrate actor's home places (homePlaceSet, substrate-1 GAP-0758).
+// guestWriteClaimOnly and guestByNameOnly are out-parameters the memo does
+// not replay: a request that asks for either is judged without the memo
+// (TestTrustedDispatchMemoOffFieldsSkipTheMemo, substrate-1 GAP-1048).
 func TestTrustedDispatchMemoKeyCoversEveryField(t *testing.T) {
 	placed := map[string]string{
 		"conflictSource": "value", "parentPatch": "value",
 		"ResolvedWriteTargets": "value", "ActiveAgentFileIdentities": "value", "ShellStartup": "value",
+		"guestClaimHomePlaces": "value", "guestHomePlaces": "value",
 		"budget": "identity", "capFloor": "identity", "generation": "identity", "targetMemo": "identity",
-		"windowsTwinHosts": "identity", "windowsPowerShellReading": "identity",
-		"simpleMemo":         "cache",
+		"windowsTwinHosts": "identity", "windowsPowerShellReading": "identity", "Tiers": "identity",
+		"preservedHookConfigTargets": "value",
+		"simpleMemo":                 "cache", "guestMemo": "cache",
 		"overBudgetOmission": "out", "unresolvedTarget": "out", "resolvedTarget": "out",
 		"nonWriteMention": "out", "unprovenTarget": "out", "unknownMention": "out",
 		"record": "recorder", "recordTelemetry": "recorder", "recordEffectShadow": "recorder",
+		"aliasPending":        "recorder",
+		"guestWriteClaimOnly": "off", "guestByNameOnly": "off",
 	}
 	rt := reflect.TypeOf(trustedActionRequest{})
 	for i := range rt.NumField() {
@@ -169,5 +178,86 @@ func TestTrustedDispatchMemoChargesTheBudget(t *testing.T) {
 	}
 	if onCost != offCost || onReached != offReached || on != off {
 		t.Fatalf("budget %d: memo on: cost %d reached %v %s\nmemo off: cost %d reached %v %s", limit, onCost, onReached, on, offCost, offReached, off)
+	}
+}
+
+// TestTrustedDispatchMemoAliasPendingReevaluates keeps a pending cross-call
+// alias write from being lost when the same call is judged twice.
+func TestTrustedDispatchMemoAliasPendingReevaluates(t *testing.T) {
+	previous := trustedDispatchRunHook
+	t.Cleanup(func() { trustedDispatchRunHook = previous })
+	runs := 0
+	trustedDispatchRunHook = func(request trustedActionRequest) {
+		if request.aliasPending != nil {
+			runs++
+		}
+	}
+	ctx := context.WithValue(t.Context(), trustedDispatchMemoKey{}, &trustedDispatchMemo{})
+	request := trustedActionRequest{
+		Input:     actionfacts.Input{Tool: "Bash", Command: "echo constant"},
+		Connector: "claudecode", aliasPending: &effectAliasPending{},
+	}
+	dispatchTrustedAction(ctx, request)
+	request.aliasPending = &effectAliasPending{}
+	dispatchTrustedAction(ctx, request)
+	if runs != 2 {
+		t.Fatalf("pending alias recorder saw %d dispatches, want both calls", runs)
+	}
+}
+
+// TestTrustedDispatchMemoOffFieldsSkipTheMemo: a request that asks for an
+// out-parameter the memo does not replay (the "off" fields of
+// TestTrustedDispatchMemoKeyCoversEveryField) is judged without the memo. A
+// stored answer for the very same key is not replayed, so the run still
+// tells the out-parameter (the GAP-1022 by-name gate reads guestByNameOnly),
+// and the run is not stored for a later repeat (substrate-1 GAP-1048).
+func TestTrustedDispatchMemoOffFieldsSkipTheMemo(t *testing.T) {
+	gap0437Server(t, gap0437Packs[1], "openclaw", "action")
+	dir := t.TempDir()
+	command := "sudo tee /etc/cron.d/x <<< 'defenseclaw-gateway stop'"
+	for _, name := range []string{"guestWriteClaimOnly", "guestByNameOnly"} {
+		t.Run(name, func(t *testing.T) {
+			asked := false
+			request := trustedActionRequest{
+				Input:      actionfacts.Input{Tool: "exec", Command: command, CWD: dir},
+				LegacyText: command, Connector: "openclaw", EnforcementCapable: true, StrictPolicy: true,
+				budget: newTrustedActionBudget(false),
+			}
+			switch name {
+			case "guestWriteClaimOnly":
+				request.guestWriteClaimOnly = &asked
+			case "guestByNameOnly":
+				request.guestByNameOnly = &asked
+			}
+			memo := &trustedDispatchMemo{}
+			ctx := context.WithValue(context.Background(), trustedDispatchMemoKey{}, memo)
+			bucket := request.Input.Tool + "\x00" + request.Input.Command + "\x00" + request.LegacyText
+			key, refs := trustedDispatchMemoKeyOf(request)
+			state := trustedDispatchStateOf(hookpaths.FoundHookCall(request.hookCall), request)
+			poison := []RuleFinding{{RuleID: "GAP-1048-STALE-REPLAY"}}
+			memo.store(bucket, &trustedDispatchMemoEntry{ctx: ctx, key: key, refs: refs, state: state, findings: poison})
+			if memo.lookup(ctx, bucket, key, refs, state) == nil {
+				t.Fatal("the seeded answer is not found for its own key; the test proves nothing")
+			}
+			got := memo.dispatch(ctx, request)
+			for _, finding := range got {
+				if finding.RuleID == poison[0].RuleID {
+					t.Fatalf("a request that asks for %s was answered from the memo: %v", name, got)
+				}
+			}
+			if n := len(memo.entries[bucket]); n != 1 {
+				t.Fatalf("a request that asks for %s was stored in the memo (%d entries)", name, n)
+			}
+			want := dispatchTrustedActionOnce(context.Background(), trustedActionRequest{
+				Input:      actionfacts.Input{Tool: "exec", Command: command, CWD: dir},
+				LegacyText: command, Connector: "openclaw", EnforcementCapable: true, StrictPolicy: true,
+				budget: newTrustedActionBudget(false),
+			})
+			gotJSON, _ := json.Marshal(got)
+			wantJSON, _ := json.Marshal(want)
+			if string(gotJSON) != string(wantJSON) {
+				t.Fatalf("%s: through the memo %s, alone %s", name, gotJSON, wantJSON)
+			}
+		})
 	}
 }

@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 )
 
 const maliciousPersistenceDownloadExecuteClass = "download_execute"
@@ -240,7 +242,7 @@ func exactPersistencePowerShellIWRStage(payload string) bool {
 		return false
 	}
 	remainder := strings.TrimSpace(payload[iwr[1]:])
-	if strings.HasPrefix(strings.ToLower(remainder), "-uri") {
+	if strings.HasPrefix(asciifold.Lower(remainder), "-uri") {
 		remainder = strings.TrimSpace(remainder[len("-uri"):])
 	}
 	target, remainder, ok := persistenceLiteralToken(remainder)

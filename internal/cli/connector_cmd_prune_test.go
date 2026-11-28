@@ -33,6 +33,14 @@ func setUpClaudeCodeAfterOperator(t *testing.T, dataDir string) string {
 	connector.ClaudeCodeSettingsPathOverride = settingsPath
 	t.Cleanup(func() { connector.ClaudeCodeSettingsPathOverride = previous })
 	opts := connector.SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	// Unix registers the generated hook script under <data>/hooks. A Windows
+	// account registers the native launcher instead (behind the cmd.exe
+	// guard), so the entries name that launcher.
+	registered := filepath.Join(dataDir, "hooks")
+	if runtime.GOOS == "windows" {
+		opts.HookExecutable = pinWindowsHookLauncherForTest(t, dataDir)
+		registered = "defenseclaw-hook.exe"
+	}
 	if err := connector.NewClaudeCodeConnector().Setup(context.Background(), opts); err != nil {
 		t.Fatalf("claudecode setup: %v", err)
 	}
@@ -40,10 +48,38 @@ func setUpClaudeCodeAfterOperator(t *testing.T, dataDir string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), filepath.Join(dataDir, "hooks")) {
+	if !strings.Contains(string(data), registered) && !strings.Contains(string(data), strings.ReplaceAll(registered, `\`, `\\`)) {
 		t.Fatalf("setup wrote no DefenseClaw hook entries:\n%s", data)
 	}
 	return settingsPath
+}
+
+// pinWindowsHookLauncherForTest installs a stand-in native launcher under
+// dataDir/bin and makes it the launcher connector rendering resolves.
+func pinWindowsHookLauncherForTest(t *testing.T, dataDir string) string {
+	t.Helper()
+	launcher := filepath.Join(dataDir, "bin", "defenseclaw-hook.exe")
+	if err := os.MkdirAll(filepath.Dir(launcher), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcher, []byte("MZ fixture hook launcher"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(connector.PinNativeHookExecutableForTest(launcher))
+	return launcher
+}
+
+// removeClaudeCodeRegistrationTarget removes what the registered entries run:
+// the hook script on Unix, the native launcher on Windows.
+func removeClaudeCodeRegistrationTarget(t *testing.T, dataDir string) {
+	t.Helper()
+	target := filepath.Join(dataDir, "hooks", "claude-code-hook.sh")
+	if runtime.GOOS == "windows" {
+		target = filepath.Join(dataDir, "bin", "defenseclaw-hook.exe")
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // rel-1-0-1:GAP-0009: a rollback restored the data directory from before
@@ -52,9 +88,6 @@ func setUpClaudeCodeAfterOperator(t *testing.T, dataDir string) string {
 // Code blocked every prompt. prune-orphans removes those entries, and only
 // those: the operator's hook and env stay.
 func TestConnectorPruneOrphansRemovesHooksOfAConnectorRolledBackAway(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses the POSIX hook layout")
-	}
 	dataDir := testenv.PrivateTempDir(t)
 	defer withConnectorState(t, dataDir, "codex")()
 	settingsPath := setUpClaudeCodeAfterOperator(t, dataDir)
@@ -194,9 +227,6 @@ func TestConnectorPruneOrphansRestoresAntigravityAfterRollback(t *testing.T) {
 // A connector that config.yaml or the runtime connector state names is never
 // an orphan, even while its hook script is missing (doctor reports that).
 func TestConnectorPruneOrphansKeepsConfiguredConnectors(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses the POSIX hook layout")
-	}
 	for _, source := range []string{"config", "runtime state"} {
 		t.Run(source, func(t *testing.T) {
 			dataDir := testenv.PrivateTempDir(t)
@@ -211,9 +241,7 @@ func TestConnectorPruneOrphansKeepsConfiguredConnectors(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := os.Remove(filepath.Join(dataDir, "hooks", "claude-code-hook.sh")); err != nil {
-				t.Fatal(err)
-			}
+			removeClaudeCodeRegistrationTarget(t, dataDir)
 			before, err := os.ReadFile(settingsPath)
 			if err != nil {
 				t.Fatal(err)

@@ -505,7 +505,7 @@ func TestGAP0007DockerDesktopRunFollowsTheVMsLandlock(t *testing.T) {
 		{"ABI 2", 2, nil, "Docker Desktop's Linux VM has Landlock ABI 2, and OpenShell sandboxes need ABI 3 or newer"},
 		{"no Landlock", 0, openshell.ErrLandlockMissing, "Docker Desktop's Linux VM has no Landlock, which OpenShell sandboxes need"},
 		{"turned off", 0, openshell.ErrLandlockDisabled, "Docker Desktop's Linux VM has Landlock turned off"},
-		{"no image to check in", 0, openshell.ErrNoProbeImage, "the OpenShell base image it checks in is not on this machine yet (`defenseclaw sandbox doctor --fix` downloads it and checks)"},
+		{"no image to check in", 0, openshell.ErrNoProbeImage, "the OpenShell base image it checks in is not on this machine yet; nothing was built or created\n  → `defenseclaw sandbox image build claude` downloads it (about 4 GB) with the Claude Code image; then run this again"},
 		{"probe failed", 0, errors.New("the probe container failed"), "could not check Docker Desktop's Linux VM for the Landlock OpenShell sandboxes need (the probe container failed)"},
 	} {
 		ta := newTestApp(t, "")

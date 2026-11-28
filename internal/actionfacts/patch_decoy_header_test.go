@@ -72,7 +72,7 @@ func TestPatchDecoyHeaderKeepsThePlacedChanges(t *testing.T) {
 				if slices.ContainsFunc(facts.Paths, func(path PathFact) bool { return strings.Contains(path.Value, "decoy") }) {
 					t.Fatalf("the unplaced header is a fact: %#v", facts.Paths)
 				}
-				if !PatchNamesUnplacedTarget("apply_patch", args) {
+				if !PatchNamesUnplacedTarget(Input{Tool: "apply_patch", Args: args}) {
 					t.Fatal("the unplaced header is not reported")
 				}
 				targets := NativeCallWriteTargets(input, facts)

@@ -78,7 +78,7 @@ func (r *gap0430Reader) Read(b []byte) (int, error) {
 
 func gap0430Run(t *testing.T, stream string, cuts []int) string {
 	t.Helper()
-	proxy := newTestProxy(t, &mockProvider{}, retestInspector(), "action")
+	proxy := gap0429Proxy(t, &mockProvider{}, retestInspector())
 	req := streamTailWithTier(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`)), "default", false)
 	rec := httptest.NewRecorder()
 	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}},

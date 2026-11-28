@@ -5,11 +5,37 @@ package connector
 
 import (
 	"bytes"
+	"path"
 	"path/filepath"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
+
+// copilotCleanAbsoluteScriptWord reports whether word, the script word of a
+// Copilot bash entry, is an absolute and clean path as that entry's shell
+// reads it: a native path, or a POSIX one (/dir/copilot-hook.sh), which
+// Copilot's bash runs on Windows too and which the doctor reads as text on
+// every OS (editedHookEntryClaimed). Setup's removal claims
+// (copilotBoundEventOwnsCommand, copilotOldManagedCopyEntry) read the word
+// by this rule, so on Windows Setup removes the POSIX-form copy the doctor
+// reports, as it does on Linux and macOS, instead of refusing the event
+// (GAP-2234). On Linux and macOS both halves are the same test. A //host
+// spelling is not clean and stays the user's.
+func copilotCleanAbsoluteScriptWord(word string) bool {
+	if filepath.IsAbs(word) && filepath.Clean(word) == word {
+		return true
+	}
+	return strings.HasPrefix(word, "/") && path.Clean(word) == word
+}
+
+// copilotPOSIXOnlyScriptWord reports a script word that is a POSIX absolute
+// path but not a native one: /dir/copilot-hook.sh on Windows, where Copilot's
+// bash resolves / under its own root and a native read of the word reaches a
+// different file (GAP-2284). Never true on Linux or macOS.
+func copilotPOSIXOnlyScriptWord(word string) bool {
+	return !filepath.IsAbs(word) && strings.HasPrefix(word, "/")
+}
 
 // copilotManagedShellCommand recognizes a plain script invocation, optionally
 // through a shell interpreter. It never evaluates wrapper text or reads a

@@ -124,6 +124,11 @@ type EnterpriseOpenShellConfig struct {
 	// E2fsprogsDir is the administrator's e2fsprogs directory (macOS only;
 	// absolute, with a root-owned chain).
 	E2fsprogsDir string `mapstructure:"e2fsprogs_dir" yaml:"e2fsprogs_dir,omitempty"`
+	// AllowDowngrade lets ensure apply a setup-mode version below a release
+	// an account already ran. OpenShell has no down migration: such an
+	// account's sandboxes start only after its gateway database is moved
+	// aside, and ensure warns for each one (rel-1-0-10:GAP-1781).
+	AllowDowngrade bool `mapstructure:"allow_downgrade" yaml:"allow_downgrade,omitempty"`
 }
 
 // EnterpriseInspectionConfig chooses the optional remote inspection of a

@@ -383,7 +383,7 @@ func (a *APIServer) auditForeignHookSessionDenial(
 	// agent, as the session's own rows), so a SIEM joins the block to the
 	// session and agent it stopped (GAP-1903). An exchange with no session
 	// (an OpenCode denial keyed on the agent process) still names the agt-.
-	ctx = enrichAgentHookContext(ctx, agentHookRequest{
+	ctx = enrichAgentHookContextOnly(ctx, agentHookRequest{
 		ConnectorName: connectorName,
 		SessionID:     strings.TrimSpace(exchange.Key.Session),
 	})

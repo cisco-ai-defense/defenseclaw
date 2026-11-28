@@ -44,6 +44,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	pb "github.com/defenseclaw/defenseclaw/third_party/substrate/api/ateapi/v1"
 )
 
@@ -271,13 +272,11 @@ func TestProjectedSymlinkToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(ts, "token"), []byte("tok-projected"))
-	if err := os.Symlink(ts, filepath.Join(r.dir, "..data")); err != nil {
-		t.Fatal(err)
-	}
+	// A standard Windows account may not create a symbolic link: the
+	// kubelet layout cannot exist there and the test skips (GAP-0638).
+	testenv.Symlink(t, ts, filepath.Join(r.dir, "..data"))
 	link := filepath.Join(r.dir, "ptoken")
-	if err := os.Symlink(filepath.Join("..data", "token"), link); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, filepath.Join("..data", "token"), link)
 	o := r.opts()
 	o.TokenFile = link
 	c := r.client(t, o)

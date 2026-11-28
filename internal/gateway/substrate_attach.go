@@ -18,16 +18,20 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/revocation"
 )
 
 // Attach through the admin listener (GAP-0085, GAP-0086; lead ruling
@@ -42,13 +46,14 @@ import (
 //	ANY  /api/v1/substrate/actors/{atespace}/{name}/attach/{rest}   the relay's dcrelay/1/{rest}:
 //	     poll[/{id}] (long-poll fallback), task[/{id}], status, exec, files
 //
-// The person must own the actor; an administrator may attach to any actor
-// and is recorded as themselves (E2). The relay still requires a
+// Only the person who owns the actor may attach; an administrator sees the
+// inventory, never a session, and is refused with not_your_agent and
+// audited as themselves (GAP-0435). The relay still requires a
 // person-bound session token: the gateway mints one for the signed-in
 // person and this actor incarnation for each request, so a token never
 // crosses the laptop's network. The hop from the router to the relay is
-// inside the cluster network; it is plain HTTP until the relay serves TLS
-// with a certificate the gateway can verify (GAP-0109, documented limit).
+// TLS for a template whose signed kit serves it (substrate.relay_tls,
+// substrate_relaycert.go); templates built before 1.0.11 are plain.
 
 // substrateAttachPath is the attach route and everything below it.
 var substrateAttachPath = regexp.MustCompile(`^/api/v1/substrate/actors/[^/]+/[^/]+/attach(/.*)?$`)
@@ -66,12 +71,21 @@ const (
 // workspace cap (E23) for a file upload, a frame cap otherwise.
 func substrateAttachBodyCap(r *http.Request, workspaceMax int64) int64 {
 	if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/attach/files") {
-		if workspaceMax <= 0 {
-			workspaceMax = 1 << 30
-		}
 		return workspaceMax + substrateTarOverhead
 	}
 	return substrateAttachFrameMax
+}
+
+// substrateWorkspaceMin is the smallest workspace cap (design 2.6: 1 MiB
+// to 64 GiB): a value meant as megabytes (workspace_max_bytes: 512) would
+// otherwise refuse every upload (RV1 P4-1).
+const substrateWorkspaceMin int64 = 1 << 20
+
+func substrateWorkspaceMax(configured int64) int64 {
+	if configured <= 0 {
+		return config.DefaultSubstrateWorkspaceMaxBytes
+	}
+	return max(min(configured, relay.MaxFilesBytes), substrateWorkspaceMin)
 }
 
 // substrateAttachCSRF is the browser gate of attach traffic: a request
@@ -99,8 +113,10 @@ type SubstrateRelayDialer interface {
 }
 
 // substrateAttachSessionTTL is the lifetime of the per-request session
-// token (a WebSocket keeps its connection past it; the relay checks the
-// token at the upgrade).
+// token. The relay ends an attachment at its token's exp (GAP-0070), and
+// the token ends with the caller's sign-in when that comes first
+// (GAP-0588): the launcher then reconnects with a fresh one, as a planned
+// renew.
 const substrateAttachSessionTTL = 10 * time.Minute
 
 // substrateSessionActor is the actor incarnation a relay session token
@@ -162,8 +178,26 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, status, reason)
 			return
 		}
+		// A port forward or MCP bridge (B3.2, B3.3) gets a token for its
+		// own dc.scope only (substrate_streams.go).
+		stream, sstatus, sreason := a.substrateStreamOpen(st, r, reg, rest)
+		if sstatus != http.StatusOK {
+			writeSubstrateJSONError(w, sstatus, sreason)
+			return
+		}
+		defer stream.close(r.Context())
+		actor := substrateSessionActor(reg)
+		if stream != nil {
+			actor.Scope = stream.scope
+		}
 		c, _ := substrateCallerFrom(r.Context())
-		tok, _, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), substrateAttachSessionTTL)
+		tok, exp, err := st.cfg.Sessions.IssueUntil(identity.SignInOf(c.person), actor, substrateAttachSessionTTL, c.person.SessionBound())
+		if errors.Is(err, identity.ErrSessionBound) {
+			// The sign-in ends this second: the launcher asks for a new
+			// one (GAP-0588).
+			writeSubstrateRefusal(w, http.StatusUnauthorized, string(identity.ReasonExpired))
+			return
+		}
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "session_refused")
 			return
@@ -173,9 +207,36 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 			// A terminal attachment (WebSocket, or a long-poll request
 			// other than its close) is reported while it is open, so a
 			// controller without a CPU feed keeps the actor (GAP-0534).
-			if head == relay.RouteWS || (head == relay.RoutePoll && r.Method != http.MethodDelete) {
+			if head == relay.RouteWS || stream != nil || (head == relay.RoutePoll && r.Method != http.MethodDelete) {
 				defer substrateReportAttach(st.cfg.Activity, reg.Atespace, reg.UID)()
 			}
+		}
+		if rest == relay.RouteFiles && r.Method == http.MethodPut {
+			// B2: a push or a sync batch says so; the admin-off switch
+			// refuses it here (the first copy of a run carries no op).
+			switch r.Header.Get(relay.OpHeader) {
+			case relay.OpPush:
+				if !substrateSwitch(st.cfg.FilesPush) {
+					writeSubstrateJSONError(w, http.StatusForbidden, "push_disabled")
+					return
+				}
+			case relay.OpSync:
+				if !substrateSwitch(st.cfg.FilesSync) {
+					writeSubstrateJSONError(w, http.StatusForbidden, "sync_disabled")
+					return
+				}
+			}
+		}
+		dial, dstatus, dreason := a.substrateRelayDial(r.Context(), st, reg)
+		if dstatus != http.StatusOK {
+			writeSubstrateJSONError(w, dstatus, dreason)
+			return
+		}
+		if stream != nil && stream.kind == relay.RouteMCP {
+			// B3.3: the gateway ends an MCP stream itself and judges every
+			// tools/call (substrate_mcpbridge.go); it is never a byte proxy.
+			a.serveSubstrateMCPBridge(w, r, st, reg, stream, tok, dial)
+			return
 		}
 		space, name := reg.Atespace, reg.Name
 		proxy := &httputil.ReverseProxy{
@@ -186,6 +247,10 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 				pr.Out.Header.Del("Authorization")
 				pr.Out.Header.Del("Cookie")
 				pr.Out.Header.Del("X-Forwarded-For")
+				pr.Out.Header.Del(relay.UploadMaxHeader)
+				if rest == relay.RouteFiles && r.Method == http.MethodPut {
+					pr.Out.Header.Set(relay.UploadMaxHeader, strconv.FormatInt(substrateWorkspaceMax(st.cfg.WorkspaceMaxBytes), 10))
+				}
 				// Only the token the gateway minted reaches the relay.
 				var keep []string
 				for _, v := range pr.In.Header.Values("Sec-WebSocket-Protocol") {
@@ -203,16 +268,39 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 			},
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					return st.cfg.Relays.DialRelay(ctx, space, name)
+					c, err := dial(ctx)
+					return stream.wrap(c), err
 				},
 				Proxy: nil, DisableKeepAlives: true, ResponseHeaderTimeout: 60 * time.Second,
 			},
 			FlushInterval: -1, // stream poll and task answers as they come
+			// A terminal WebSocket learns how long its session token
+			// lives, so the launcher renews the attachment just before
+			// the relay would end it (GAP-0588). Only the gateway sets the
+			// header; one from the relay is dropped.
+			ModifyResponse: func(resp *http.Response) error {
+				resp.Header.Del(relay.SessionSecondsHeader)
+				if resp.StatusCode == http.StatusSwitchingProtocols {
+					if left := int(time.Until(exp) / time.Second); left > 0 {
+						resp.Header.Set(relay.SessionSecondsHeader, strconv.Itoa(left))
+					}
+				}
+				return nil
+			},
 			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 				st.logRefusal("attach to %s/%s failed: %v", space, name, err)
 				writeSubstrateJSONError(w, http.StatusBadGateway, "relay_unreachable")
 			},
 		}
-		proxy.ServeHTTP(w, r)
+		// The stream ends when its sign-in is ended (B5.1): the proxy closes
+		// the upgraded relay connection when the request context ends.
+		ctx, release := st.cfg.Streams.Open(r.Context(), revocation.Stream{Person: c.person.ID(), TokenKey: c.person.TokenKey, IssuedAt: c.person.IssuedAt})
+		defer release()
+		if ctx.Err() != nil && r.Context().Err() == nil {
+			// Ended while the request was on its way here (RV1-04).
+			writeSubstrateJSONError(w, http.StatusUnauthorized, substrateReasonSigninEnded)
+			return
+		}
+		proxy.ServeHTTP(w, r.WithContext(ctx))
 	}
 }

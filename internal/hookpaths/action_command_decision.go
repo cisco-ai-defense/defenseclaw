@@ -5,16 +5,21 @@ package hookpaths
 
 import (
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
+	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/textlower"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -71,6 +76,65 @@ func ActionCommandDecisionInShell(command, cwd, home string, facts map[string]st
 // the file system answers of the evaluation m (nil: none).
 func (m *TargetMemo) ActionCommandDecisionInShell(command, cwd, home string, facts map[string]string, posixShell bool) string {
 	return actionTargetDecision(command, cwd, home, "", posixShell, facts, m)
+}
+
+// unreadDecisionKey is the input of one UnreadCommandDecision.
+type unreadDecisionKey struct {
+	command, cwd, home string
+	dialect            actionfacts.Dialect
+	posixShell         bool
+	startup            *ShellStartup
+}
+
+// UnreadCommandDecision is the decision of command in cwd by its words
+// alone, for a caller inside fixturefs.Unread (the by-name reading of a
+// copy-mode Substrate actor's call, substrate-1 GAP-0922):
+// ActionCommandDecisionInShell, then with a dialect hint
+// ActionCommandDecisionWithDialectAndGlobFacts, with the shell startup of m.
+// Inside Unread no read reaches the file system or the hook call's memory,
+// so the answer depends on the inputs alone: the evaluation m answers a
+// repeat from the first answer, and all these decisions share one memo,
+// kept apart from m's own answers (the host's). A copy-mode call over the
+// compound limit asked the same by-name decision for each statement the cap
+// floor judged, each with a new memo that read the home's key files again
+// (FIX-F3PERF). With no m, glob facts, or outside Unread, every decision is
+// read on its own, as before.
+func (m *TargetMemo) UnreadCommandDecision(command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string, posixShell bool) string {
+	startup := m.ShellStartup()
+	if m == nil || len(facts) != 0 || !fixturefs.Unreadable() {
+		return unreadCommandDecisionWith(NewTargetMemo().WithShellStartup(startup).withCallDotglobOf(m), command, cwd, home, dialect, facts, posixShell)
+	}
+	key := unreadDecisionKey{command: command, cwd: cwd, home: home, dialect: dialect, posixShell: posixShell, startup: startup}
+	m.mu.Lock()
+	decision, known := m.unreadDecisions[key]
+	if m.unread == nil || m.unread.startup != startup || m.unread.callMayDotglob() != m.callMayDotglob() {
+		m.unread = newTargetMemo().WithShellStartup(startup).withCallDotglobOf(m)
+	}
+	memo := m.unread
+	m.mu.Unlock()
+	if known {
+		return decision
+	}
+	decision = unreadCommandDecisionWith(memo, command, cwd, home, dialect, facts, posixShell)
+	m.mu.Lock()
+	if m.unreadDecisions == nil {
+		m.unreadDecisions = make(map[unreadDecisionKey]string)
+	}
+	if len(m.unreadDecisions) < maxTargetMemoEntries {
+		m.unreadDecisions[key] = decision
+	}
+	m.mu.Unlock()
+	return decision
+}
+
+// unreadCommandDecisionWith is the decision UnreadCommandDecision reads, in
+// memo.
+func unreadCommandDecisionWith(memo *TargetMemo, command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string, posixShell bool) string {
+	decision := memo.ActionCommandDecisionInShell(command, cwd, home, facts, posixShell)
+	if dialect != "" {
+		decision = memo.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, dialect, facts)
+	}
+	return decision
 }
 
 func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string, memo *TargetMemo) string {
@@ -139,7 +203,7 @@ func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect
 			return "protected-target"
 		}
 	}
-	if actionPureMake(command, home) {
+	if actionPureMake(command, home, memo) {
 		if actionMakeProtectedRecipe(command, cwd, home) {
 			return "protected-target"
 		}
@@ -259,7 +323,7 @@ func actionConcreteProtectedWriteOnWithOperands(command, cwd, home string, windo
 		writes = append(writes, bounded...)
 	}
 	var directoryParsed bool
-	directoryWrites, _ := shellDirectoryWriteOperandsWithFile(command, cwd, home, nil, false, false, &directoryParsed, file)
+	directoryWrites, _ := shellDirectoryWriteOperandsWithFile(command, cwd, home, nil, false, false, false, &directoryParsed, file)
 	if cache != nil && cache.ready {
 		cache.shellParsed = directoryParsed
 	}
@@ -268,7 +332,7 @@ func actionConcreteProtectedWriteOnWithOperands(command, cwd, home string, windo
 	}
 	// A patch envelope and each supported patch program spell "patch".
 	// Other commands cannot contribute patch targets to this writer list.
-	if strings.Contains(strings.ToLower(command), "patch") {
+	if strings.Contains(textlower.Lower(command), "patch") {
 		patches, _ := ApplyPatchWriteTargets("Bash", nil, command, cwd, home)
 		writes = append(writes, patches...)
 	}
@@ -480,6 +544,14 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 // ActionPrivateKeyReadWithDialect uses the executing shell to distinguish
 // PowerShell pipeline path binding from POSIX stdin readers.
 func ActionPrivateKeyReadWithDialect(command, cwd, home string, dialect actionfacts.Dialect) bool {
+	return actionPrivateKeyReadIn(command, cwd, home, dialect, false)
+}
+
+// actionPrivateKeyReadIn is ActionPrivateKeyReadWithDialect for a command
+// that may run in a nested shell: cdSearch is set when the enclosing command
+// names CDPATH or cdable_vars (actionCdSearchMayApply), which the nested
+// shell inherits (GAP-1155).
+func actionPrivateKeyReadIn(command, cwd, home string, dialect actionfacts.Dialect, cdSearch bool) bool {
 	if command == "" || home == "" {
 		return false
 	}
@@ -495,17 +567,17 @@ func ActionPrivateKeyReadWithDialect(command, cwd, home string, dialect actionfa
 		// POSIX reader, on the Windows file system; another POSIX shell
 		// call on this host is read by both readers (GAP-1717).
 		if actionGitBashReadsAlone(command, home, dialect) {
-			return actionPosixPrivateKeyRead(command, cwd, home, dialect)
+			return actionPosixPrivateKeyRead(command, cwd, home, dialect, cdSearch)
 		}
 		return actionWindowsPrivateKeyReadIn(command, cwd, home, dialect == actionfacts.DialectPOSIX) ||
 			actionLiteralIndirectPrivateKeyRead(command, cwd, home, dialect) ||
 			dialect == actionfacts.DialectPOSIX && runtime.GOOS == "windows" &&
-				actionPosixPrivateKeyRead(command, cwd, home, dialect)
+				actionPosixPrivateKeyRead(command, cwd, home, dialect, cdSearch)
 	}
-	return actionPosixPrivateKeyRead(command, cwd, home, dialect)
+	return actionPosixPrivateKeyRead(command, cwd, home, dialect, cdSearch)
 }
 
-// ActionPrivateKeyReadBounded is ActionPrivateKeyReadWithDialect that also
+// ActionPrivateKeyReadBoundedIn is ActionPrivateKeyReadWithDialect that also
 // reports the caps its pattern expansions hit (actionBoundedGlob): a pattern
 // expanded on this host only up to its cap, with no key among the matches
 // read before it, is a truncated reading the caller judges at least at the
@@ -526,8 +598,12 @@ func ActionPrivateKeyReadWithDialect(command, cwd, home string, dialect actionfa
 // them and the repeat finds in that state. The file system is the same for
 // the whole decision, as for the call's other memories (callStat). The repeat
 // adds the caps the first read hit to the call, as a read would.
-func ActionPrivateKeyReadBounded(command, cwd, home string, dialect actionfacts.Dialect) (read bool, truncated bounded.CapSet) {
-	call, end := beginHookCall()
+//
+// found is the hook call the calling goroutine found a moment before (as for
+// JoinHookCall), which is not found again for each read; the zero Call finds
+// it.
+func ActionPrivateKeyReadBoundedIn(found Call, command, cwd, home string, dialect actionfacts.Dialect) (read bool, truncated bounded.CapSet) {
+	call, end := joinHookCall(found)
 	defer end()
 	if call == nil {
 		return ActionPrivateKeyReadWithDialect(command, cwd, home, dialect), bounded.CapSet{}
@@ -549,7 +625,7 @@ func ActionPrivateKeyReadBounded(command, cwd, home string, dialect actionfacts.
 }
 
 // keyReadKey is one reading of the private-key reader
-// (ActionPrivateKeyReadBounded).
+// (ActionPrivateKeyReadBoundedIn).
 type keyReadKey struct {
 	command, cwd, home string
 	dialect            actionfacts.Dialect
@@ -598,8 +674,10 @@ func (call *hookCall) globCutOf(read func()) bounded.CapSet {
 	return truncated
 }
 
-// actionPosixPrivateKeyRead is the POSIX shell's private-key reader.
-func actionPosixPrivateKeyRead(command, cwd, home string, dialect actionfacts.Dialect) bool {
+// actionPosixPrivateKeyRead is the POSIX shell's private-key reader. cdSearch
+// is set when an enclosing command names CDPATH or cdable_vars
+// (actionPrivateKeyReadIn).
+func actionPosixPrivateKeyRead(command, cwd, home string, dialect actionfacts.Dialect, cdSearch bool) bool {
 	if actionLiteralIndirectPrivateKeyRead(command, cwd, home, dialect) {
 		return true
 	}
@@ -634,14 +712,23 @@ func actionPosixPrivateKeyRead(command, cwd, home string, dialect actionfacts.Di
 	// directory or a later one, not in the earlier candidates (cd ~/.ssh &&
 	// cd /proj && grep -rn TODO ., GAP-2421). cdAt is where each cd call
 	// put its directory in dirs.
-	certain := actionCertainDirectoryCalls(file, home)
+	// A bare relative cd may follow CDPATH or cdable_vars when this command
+	// or one that runs it names them; a nested shell inherits them
+	// (GAP-1155).
+	if cdSearch || actionCdSearchMayApply(file, home) {
+		cdSearch = true
+		mode |= keyReadCdSearch
+	}
+	certain := actionCertainDirectoryCalls(file, home, cdSearch)
 	cdAt := make(map[*syntax.CallExpr]int)
-	readAt := func(call *syntax.CallExpr, words []string) bool {
-		candidates := dirs
+	candidatesOf := func(call *syntax.CallExpr) []string {
 		if at, ok := cdAt[certain[call]]; ok {
-			candidates = dirs[at:]
+			return dirs[at:]
 		}
-		for _, dir := range candidates {
+		return dirs
+	}
+	readAt := func(call *syntax.CallExpr, words []string) bool {
+		for _, dir := range candidatesOf(call) {
 			if actionPrivateKeyReadWords(words, dir, home, mode, 0) {
 				return true
 			}
@@ -703,8 +790,27 @@ func actionPosixPrivateKeyRead(command, cwd, home string, dialect actionfacts.Di
 				case len(words) == 1:
 					dirs = append(dirs, home)
 				case len(words) == 2 && words[1] != "" && words[1] != "-":
-					cdAt[call] = len(dirs)
-					dirs = append(dirs, OperandPath(words[1], dirs[len(dirs)-1]))
+					if filepath.IsAbs(words[1]) {
+						cdAt[call] = len(dirs)
+						dirs = append(dirs, OperandPath(words[1], dirs[len(dirs)-1]))
+						break
+					}
+					// A relative operand names a folder under the folder
+					// the cd ran in, which is any of its own candidates
+					// (GAP-1155). A call certain of this cd reads only in
+					// those folders, when all of them fit.
+					var entered []string
+					for _, dir := range candidatesOf(call) {
+						if next := OperandPath(words[1], dir); !slices.Contains(entered, next) {
+							entered = append(entered, next)
+						}
+					}
+					if len(dirs)+len(entered) <= 8 {
+						cdAt[call] = len(dirs)
+						dirs = append(dirs, entered...)
+					} else {
+						dirs = append(dirs, OperandPath(words[1], dirs[len(dirs)-1]))
+					}
 				}
 			}
 			return !found
@@ -751,6 +857,9 @@ const (
 	keyReadWindows keyReadMode = 1 << iota
 	keyReadDotglob
 	keyReadNativeGlob
+	// keyReadCdSearch: the command names CDPATH or cdable_vars, which a
+	// nested shell inherits (GAP-1155).
+	keyReadCdSearch
 )
 
 // Wrapper arguments are not file reads. Resolve a bounded, literal child
@@ -884,7 +993,7 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, mode keyReadMod
 		if body, known := shellCommandBodyIndex(words); known && body < len(words) {
 			// The -c body runs in the child shell. On Windows, losing the
 			// POSIX dialect here would read a Git Bash glob as PowerShell.
-			return ActionPrivateKeyReadWithDialect(words[body], cwd, home, actionfacts.DialectPOSIX)
+			return actionPrivateKeyReadIn(words[body], cwd, home, actionfacts.DialectPOSIX, mode&keyReadCdSearch != 0)
 		}
 		return false
 	}
@@ -932,7 +1041,8 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, mode keyReadMod
 		actionPrivateKeyReadWords(shell, cwd, home, mode, depth+1) {
 		return true // A command an awk program starts reads the key.
 	}
-	if actionRecursiveKeyDirectoryRead(words, cwd, home, windows) {
+	if actionRecursiveKeyDirectoryRead(words, cwd, home, windows) ||
+		!windows && actionFindPrivateKeyRead(words, cwd, home) {
 		return true
 	}
 	switch program {
@@ -1138,7 +1248,9 @@ func actionPosixCommandDecision(command, cwd, home string, depth int) string {
 						return false
 					}
 				}
-				return true // A fixed producer bound every child operand.
+				if !xargsPerlChild(strings.Fields(command)) {
+					return true // A fixed producer bound every child operand.
+				}
 			}
 		}
 		if reason == "" {
@@ -1328,23 +1440,137 @@ func actionPrivateKeyGlob(value, cwd, home string, mode keyReadMode) bool {
 	pattern := OperandPath(value, cwd)
 	dotglob := mode&keyReadDotglob != 0
 	fold := runtime.GOOS == "darwin"
+	// The key paths are matched against the folder the pattern's dot-dot
+	// steps lead to (actionGlobPatternPlaced), not its spelling: x/../.ssh/*
+	// after cd .. names the key folder as .ssh/* does (rel-1-0-10:GAP-1020).
+	placed := actionGlobPatternPlaced(pattern, home)
 	for _, name := range actionPrivateKeyNames {
 		key := filepath.Join(home, ".ssh", name)
 		if fold {
-			if actionKeyPatternMatch(strings.ToLower(pattern), strings.ToLower(key), dotglob) {
+			if actionKeyPatternMatch(strings.ToLower(placed), strings.ToLower(key), dotglob) {
 				return true
 			}
-		} else if actionKeyPatternMatch(pattern, key, dotglob) {
+		} else if actionKeyPatternMatch(placed, key, dotglob) {
 			return true
 		}
 	}
 	return actionGlobReadsPrivateKey(pattern, dotglob, cwd, home)
 }
 
+// actionGlobPatternPlaced is an absolute pattern with its dot-dot steps
+// applied, for a component match against protected paths (the key paths, the
+// .ssh folder and its authorized keys files), which compares names and would
+// read a step as a name (rel-1-0-10:GAP-1020: x/../.ssh/* and proj/../.ssh/*
+// after cd .. matched no key and no authorized keys file, where .ssh/*
+// blocks). Each step goes where the host's own path resolution takes it, so
+// the match is never weaker and never stronger than the path that is opened:
+//   - On Windows a step is applied by name always: Win32, PowerShell and MSYS
+//     normalize the path before any open, through a junction, a symbolic link
+//     or a name that is not there (rel-1-0-10:GAP-2242).
+//   - On POSIX a step out of a folder that is there and is no link is the
+//     folder above it. A step out of a link to a folder is the folder above
+//     the link's target, as the kernel opens it, spelled through the home when
+//     it lies in the home (rel-1-0-10:GAP-2241: lp/../.ssh/* with lp a link to
+//     ~/proj names ~/.ssh). A step out of a name that is not there, a file or
+//     a link that resolves to no folder keeps the pattern as written: the
+//     shell expands nothing below it.
+//   - A step after a pattern component (*/../.ssh/*) is applied by name, as
+//     the host expansion joins it (actionBoundedGlob).
+//
+// A pattern with no step is returned as given.
+func actionGlobPatternPlaced(pattern, home string) string {
+	if !filepath.IsAbs(pattern) {
+		return pattern
+	}
+	volume := filepath.VolumeName(pattern)
+	slashed := filepath.ToSlash(pattern[len(volume):])
+	parts := strings.Split(slashed, "/")
+	if !slices.Contains(parts, "..") {
+		return pattern
+	}
+	separator := string(filepath.Separator)
+	byName := runtime.GOOS == "windows"
+	// The home is resolved at most once per pattern, at the first step out
+	// of a link, however many link steps the pattern has.
+	var realHome string
+	var realHomeErr error
+	homeResolved := false
+	resolvedHome := func() (string, error) {
+		if !homeResolved {
+			realHome, realHomeErr = pathEvalSymlinks(home)
+			homeResolved = true
+		}
+		return realHome, realHomeErr
+	}
+	var kept []string
+	for _, part := range parts {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(kept) == 0 {
+				continue
+			}
+			if dir := volume + separator + strings.Join(kept, separator); !byName && !strings.ContainsAny(dir, "*?[") {
+				info, err := pathLstat(dir)
+				if err != nil {
+					return pattern
+				}
+				if info.Mode()&fs.ModeSymlink != 0 {
+					above, ok := actionLinkParentPlaced(dir, home, resolvedHome)
+					if !ok || filepath.VolumeName(above) != volume {
+						return pattern
+					}
+					kept = strings.FieldsFunc(filepath.ToSlash(above[len(volume):]), func(r rune) bool { return r == '/' })
+					continue
+				}
+				if !info.IsDir() {
+					return pattern
+				}
+			}
+			kept = kept[:len(kept)-1]
+			continue
+		}
+		kept = append(kept, part)
+	}
+	placed := volume + separator + strings.Join(kept, separator)
+	if strings.HasSuffix(slashed, "/") && len(kept) > 0 {
+		placed += separator
+	}
+	return placed
+}
+
+// actionLinkParentPlaced is the folder a step out of the link at link leads
+// to on POSIX: the folder above the link's resolved target. A target inside
+// the home is spelled through home, the spelling the protected paths are
+// matched in; resolvedHome gives the home with its links followed. A link
+// that does not resolve to a folder has no step (false).
+func actionLinkParentPlaced(link, home string, resolvedHome func() (string, error)) (string, bool) {
+	target, err := pathEvalSymlinks(link)
+	if err != nil {
+		return "", false
+	}
+	if info, err := pathStat(target); err != nil || !info.IsDir() {
+		return "", false
+	}
+	above := filepath.Dir(target)
+	if home == "" {
+		return above, true
+	}
+	realHome, err := resolvedHome()
+	if err != nil {
+		return above, true
+	}
+	if rel, err := filepath.Rel(realHome, above); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return filepath.Join(home, rel), true
+	}
+	return above, true
+}
+
 // actionGlobReadsPrivateKey reports a match of an absolute pattern, expanded
 // on this host (actionBoundedGlob), that reads an active private key. When
 // the expansion hit its cap and no match read before it is a key, the cap is
-// recorded on the hook call (ActionPrivateKeyReadBounded): the reading is
+// recorded on the hook call (ActionPrivateKeyReadBoundedIn): the reading is
 // truncated, not "reads no key".
 func actionGlobReadsPrivateKey(pattern string, dotglob bool, cwd, home string) bool {
 	matches, truncated := actionBoundedGlob(pattern, dotglob)
@@ -1442,7 +1668,7 @@ func actionBoundedGlob(pattern string, dotglob bool) ([]string, bounded.CapSet) 
 // actionMSYSDrivePath maps /c/... and /cygdrive/c/... to c:/... (Git Bash and
 // Cygwin spellings of a Windows drive).
 func actionMSYSDrivePath(value string) string {
-	lower := strings.ToLower(value)
+	lower := asciifold.Lower(value)
 	if strings.HasPrefix(lower, "/cygdrive/") && len(value) >= 11 && asciiLetter(value[10]) &&
 		(len(value) == 11 || value[11] == '/') {
 		return value[10:11] + ":" + value[11:]
@@ -1667,7 +1893,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 			return "dynamic-argument"
 		}
 	}
-	for _, target := range directLiteralProgramOperands(words, stmt, cwd, home, false) {
+	for _, target := range directLiteralProgramOperands(words, stmt, cwd, home, 0, false, nil) {
 		if protectedReachPath(target, protected, ssh) {
 			return "dynamic-argument"
 		}
@@ -2241,7 +2467,9 @@ func actionWrappedDecision(program string, words []string, cwd, home string, dep
 					return "dynamic-argument"
 				}
 			}
-			return ""
+			if !xargsPerlChild(words[index:]) {
+				return ""
+			}
 		}
 		if actionProgramMayWrite(programBase(words[index])) {
 			return "dynamic-argument"

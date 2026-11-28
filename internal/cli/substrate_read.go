@@ -23,16 +23,18 @@ import (
 	"fmt"
 	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"io"
-	"os"
 	"sort"
+	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 )
 
 // actorRef is how a person names an actor: "name" or "atespace/name".
@@ -219,20 +221,7 @@ them and how long ago they started. Administrators see only their own agents unl
 				fmt.Fprintln(cmd.OutOrStdout(), "You have no agents running. Start one with: defenseclaw substrate run claude")
 				return nil
 			}
-			now := time.Now()
-			rows := make([][]string, 0, len(live))
-			for _, a := range live {
-				row := []string{a.Atespace + "/" + a.Name, substrateDash(a.Connector), substrateDash(a.Profile), substrateActorState(a), substrateAge(a.CreatedAt, now), substrateDash(a.BatchID)}
-				if all {
-					row = append(row, substrateListOwner(a))
-				}
-				rows = append(rows, row)
-			}
-			header := []string{"NAME", "AGENT", "PROFILE", "STATE", "AGE", "BATCH"}
-			if all {
-				header = append(header, "OWNER")
-			}
-			substrateTable(cmd.OutOrStdout(), header, rows)
+			printSubstrateActors(cmd.OutOrStdout(), live, all, time.Now())
 			return nil
 		},
 	}
@@ -241,6 +230,23 @@ them and how long ago they started. Administrators see only their own agents unl
 	cmd.Flags().StringVar(&batch, "batch", "", "only the agents of this batch")
 	cmd.Flags().BoolVar(&all, "all", false, "every person's agents (administrators only)")
 	return cmd
+}
+
+// printSubstrateActors is the table of substrate list.
+func printSubstrateActors(w io.Writer, live []api.Actor, all bool, now time.Time) {
+	rows := make([][]string, 0, len(live))
+	for _, a := range live {
+		row := []string{a.Atespace + "/" + a.Name, substrateDash(a.Connector), substrateDash(a.Profile), substrateActorState(a), substrateActivityCell(a, now), substrateAge(a.CreatedAt, now), substrateDash(a.BatchID), substrateDash(safetext.Line(a.Budget))}
+		if all {
+			row = append(row, substrateListOwner(a))
+		}
+		rows = append(rows, row)
+	}
+	header := []string{"NAME", "AGENT", "PROFILE", "STATE", "ACTIVITY", "AGE", "BATCH", "BUDGET"}
+	if all {
+		header = append(header, "OWNER")
+	}
+	substrateTable(w, header, rows)
 }
 
 // substrateListOwner is list --all's OWNER column: the person, or that the
@@ -311,6 +317,10 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 				if err != nil {
 					return substrateFail(err)
 				}
+				// Only the one-agent answer names the pending asks.
+				if one, err := s.Client.Get(ctx, a.Atespace, a.Name); err == nil && one.Activity != nil {
+					a.Activity = one.Activity
+				}
 				if asJSON {
 					return writeSubstrateJSON(w, a)
 				}
@@ -322,8 +332,14 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 				if a.State != "" {
 					fmt.Fprintf(w, "State:     %s\n", a.State)
 				}
+				for _, line := range substrateActivityLines(a, time.Now()) {
+					fmt.Fprintln(w, line)
+				}
 				if a.BatchID != "" {
 					fmt.Fprintf(w, "Batch:     %s\n", a.BatchID)
+				}
+				if a.Budget != "" {
+					fmt.Fprintf(w, "Budget:    %s\n", safetext.Line(a.Budget))
 				}
 				if a.Unattended {
 					fmt.Fprintf(w, "Mode:      %s\n", substrateUnattendedMode(a))
@@ -331,9 +347,28 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 				if line := substratePolicyConflictLine(a); line != "" {
 					fmt.Fprintln(w, "Policy:    "+line)
 				}
+				if e := substrateEgressInfo(ctx, s); e.Replaced() {
+					// GAP-0497: say which protections are off.
+					fmt.Fprintf(w, "Egress:    %s\n", substrateEgressSummary(e))
+				}
 				if a.State == substrateStateCrashed {
 					// GAP-0410: say it crashed and the way back.
 					fmt.Fprintf(w, "Crashed:   its worker went away. Bring it back with: defenseclaw substrate undo %s\n", a.Name)
+					if a.Unattended {
+						// GAP-0420: the run and log of a headless task were in
+						// the crashed actor. undo starts the task again from
+						// the record run --task keeps on the computer that
+						// started it (at least once).
+						if _, ok := loadSubstrateTaskRecord(auth.StateDir(), a); ok {
+							fmt.Fprintf(w, "Task:      lost in the crash. undo starts it again from the beginning on a fresh copy of its folder: defenseclaw substrate undo %s\n", a.Name)
+						} else {
+							agent := a.Connector
+							if spec, err := sandboxcli.ResolveHarness(a.Connector); err == nil {
+								agent = spec.Command
+							}
+							fmt.Fprintf(w, "Task:      lost in the crash. Run defenseclaw substrate undo %s on the computer that started it to start the task again, or re-run it with: defenseclaw substrate run %s --task ...\n", a.Name, substrateDash(agent))
+						}
+					}
 					return nil
 				}
 				fmt.Fprintf(w, "Come back: defenseclaw substrate connect %s\n", a.Name)
@@ -354,12 +389,22 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 			if tok != nil {
 				who = substrateDash(tok.Principal)
 			}
+			egress := substrateEgressInfo(ctx, s)
 			if asJSON {
-				return writeSubstrateJSON(w, map[string]any{"context": s.Name, "admin_url": s.Ctx.AdminURL, "signed_in_as": who, "agents": n})
+				doc := map[string]any{"context": s.Name, "admin_url": s.Ctx.AdminURL, "signed_in_as": who, "agents": n}
+				if egress != nil {
+					doc["egress_callout"] = egress
+				}
+				return writeSubstrateJSON(w, doc)
 			}
 			fmt.Fprintf(w, "Cluster:    %s (%s)\n", s.Name, s.Ctx.AdminURL)
 			fmt.Fprintf(w, "Signed in:  %s\n", who)
 			fmt.Fprintf(w, "Agents:     %d\n", n)
+			if egress.Replaced() {
+				// GAP-0497: not "all is well" while another callout holds
+				// Substrate's egress slot.
+				fmt.Fprintf(w, "Egress:     %s\n", substrateEgressSummary(egress))
+			}
 			return nil
 		},
 	}
@@ -411,9 +456,10 @@ func newSubstrateDeleteCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "delete [name...]",
 		Short: "Delete agents with their work and snapshots",
-		Long: `Deletes the named agents (or every agent of --batch) and the snapshots the cluster
-holds for them. Pull the changes first with "defenseclaw substrate pull": what is not pulled
-is gone.`,
+		Long: `Deletes the named agents (or every agent of --batch), the snapshots the cluster
+holds for them and the checkpoints saved inside them. The question and the output say how
+many snapshots each agent had. Pull the changes first with "defenseclaw substrate pull":
+what is not pulled is gone.`,
 		Args: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 && batch == "" {
 				return errors.New("name the agents to delete (list them with: defenseclaw substrate list), or pass --batch ID")
@@ -451,11 +497,13 @@ is gone.`,
 			}
 			w := cmd.OutOrStdout()
 			if !yes {
-				var names []string
-				for _, a := range targets {
-					names = append(names, a.Atespace+"/"+a.Name)
+				// One actor's status carries its snapshot count (GAP-0474).
+				for i, a := range targets {
+					if got, err := s.Client.Get(ctx, a.Atespace, a.Name); err == nil && got.Snapshots != nil {
+						targets[i].Snapshots = got.Snapshots
+					}
 				}
-				ok, err := substrateConfirm(cmd, fmt.Sprintf("Delete %s? Changes you have not pulled will be lost.", strings.Join(names, ", ")))
+				ok, err := substrateConfirm(cmd, substrateDeletePrompt(targets))
 				if err != nil {
 					return err
 				}
@@ -466,11 +514,12 @@ is gone.`,
 			}
 			var failed []string
 			for _, a := range targets {
-				if err := s.Client.Delete(ctx, a.Atespace, a.Name); err != nil {
+				got, err := s.Client.Delete(ctx, a.Atespace, a.Name)
+				if err != nil {
 					failed = append(failed, fmt.Sprintf("%s/%s: %v", a.Atespace, a.Name, substrateFail(err)))
 					continue
 				}
-				fmt.Fprintf(w, "Deleted %s/%s\n", a.Atespace, a.Name)
+				fmt.Fprintf(w, "Deleted %s/%s: %s\n", a.Atespace, a.Name, substratePurged(got.Snapshots))
 			}
 			if len(failed) > 0 {
 				return fmt.Errorf("could not delete:\n  %s", strings.Join(failed, "\n  "))
@@ -484,10 +533,42 @@ is gone.`,
 	return cmd
 }
 
+// substratePurged names what a delete removes with an agent: its snapshots
+// (with the count when the cluster gave one) and the checkpoints saved
+// inside it (GAP-0474).
+func substratePurged(snapshots *int) string {
+	switch {
+	case snapshots == nil:
+		return "the agent, its snapshots and the checkpoints saved inside it"
+	case *snapshots == 1:
+		return "the agent, 1 snapshot and the checkpoints saved inside it"
+	default:
+		return fmt.Sprintf("the agent, %d snapshots and the checkpoints saved inside it", *snapshots)
+	}
+}
+
+// substrateDeletePrompt is the delete question: every agent with what goes
+// with it, and what is lost (GAP-0474).
+func substrateDeletePrompt(targets []api.Actor) string {
+	var b strings.Builder
+	if len(targets) == 1 {
+		a := targets[0]
+		fmt.Fprintf(&b, "Delete %s/%s? This removes %s. ", a.Atespace, a.Name, substratePurged(a.Snapshots))
+	} else {
+		fmt.Fprintf(&b, "Delete %d agents? This removes:", len(targets))
+		for _, a := range targets {
+			fmt.Fprintf(&b, "\n  %s/%s: %s", a.Atespace, a.Name, substratePurged(a.Snapshots))
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("Changes you have not pulled will be lost.")
+	return b.String()
+}
+
 // substrateConfirm asks a yes/no question on a terminal; without one it
 // refuses and names --yes.
 func substrateConfirm(cmd *cobra.Command, q string) (bool, error) {
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
+	if !substrateInteractive() {
 		return false, errors.New("this needs a yes: pass --yes to answer it from a script")
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "%s [y/N] ", q)
@@ -538,8 +619,10 @@ that onto the current kit without losing its work.`,
 
 func newSubstrateApprovalsCmd() *cobra.Command {
 	var (
-		out substrateOutput
-		com substrateCommon
+		out      substrateOutput
+		com      substrateCommon
+		all      bool
+		standing bool
 	)
 	cmd := &cobra.Command{
 		Use:   "approvals",
@@ -548,7 +631,11 @@ func newSubstrateApprovalsCmd() *cobra.Command {
 "defenseclaw substrate approve ID" or "defenseclaw substrate reject ID". An agent attached to your
 terminal shows the same question on its last line. An unattended run (--task, --batch)
 denies its asks unless its profile sets unattended_asks: queue; a queued ask is marked
-"unattended" in the RUN column and is denied when its time runs out.`,
+"unattended" in the RUN column and is denied when its time runs out.
+
+With --standing it lists the approvals given with "approve --always" that are still in force:
+the agent, the host, what the approval covers, who approved it and when. Take one back with
+"defenseclaw substrate revoke NAME HOST".`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			asJSON, err := out.wantJSON()
@@ -561,7 +648,10 @@ denies its asks unless its profile sets unattended_asks: queue; a queued ask is 
 			}
 			ctx, stop := substrateContext(cmd)
 			defer stop()
-			asks, err := s.Client.Asks(ctx)
+			if standing {
+				return printSubstrateStanding(ctx, cmd, s.Client, all, asJSON)
+			}
+			asks, err := s.Client.AsksOf(ctx, all)
 			if err != nil {
 				return substrateFail(err)
 			}
@@ -586,7 +676,46 @@ denies its asks unless its profile sets unattended_asks: queue; a queued ask is 
 	}
 	out.add(cmd)
 	com.add(cmd)
+	cmd.Flags().BoolVar(&all, "all", false, "every person's, not only yours (administrators only)")
+	cmd.Flags().BoolVar(&standing, "standing", false, "list the approvals given with --always that are still in force")
 	return cmd
+}
+
+// printSubstrateStanding lists the standing (always) approvals (GAP-0492).
+func printSubstrateStanding(ctx context.Context, cmd *cobra.Command, cl *api.Client, all, asJSON bool) error {
+	list, err := cl.StandingApprovals(ctx, all)
+	if err != nil {
+		return substrateFail(err)
+	}
+	w := cmd.OutOrStdout()
+	if asJSON {
+		return writeSubstrateJSON(w, map[string]any{"approvals": list})
+	}
+	if len(list) == 0 {
+		fmt.Fprintln(w, "No approval given with --always is in force.")
+		return nil
+	}
+	now := time.Now()
+	header := []string{"AGENT", "HOST", "COVERS", "APPROVED BY", "AGE"}
+	if all {
+		header = append(header, "OWNER")
+	}
+	rows := make([][]string, 0, len(list))
+	for _, a := range list {
+		covers := a.Scope
+		if covers == "" || covers == "host" {
+			covers = "every request to the host"
+		}
+		row := []string{substrateDash(a.Atespace + "/" + a.Actor), substrateDash(a.Host), substrateDash(covers),
+			substrateDash(a.ApprovedBy), substrateAge(a.ApprovedAt, now)}
+		if all {
+			row = append(row, substrateDash(a.Owner))
+		}
+		rows = append(rows, row)
+	}
+	substrateTable(w, header, rows)
+	fmt.Fprintln(w, "\nTake one back with: defenseclaw substrate revoke NAME HOST")
+	return nil
 }
 
 func newSubstrateApproveCmd() *cobra.Command {
@@ -598,15 +727,58 @@ func newSubstrateApproveCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "approve <id>",
 		Short: "Approve a waiting question",
-		Long:  `Approves one question from "defenseclaw substrate approvals" once, or with --always for every later run that asks the same thing.`,
+		Long:  `Approves one question from "defenseclaw substrate approvals" for one request: the next request asks again. With --always it covers every later request of the agent that asks the same thing.`,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return substrateDecide(cmd, &com, args[0], "approve", always, reason)
 		},
 	}
 	com.add(cmd)
-	cmd.Flags().BoolVar(&always, "always", false, "keep this approval for later runs")
+	cmd.Flags().BoolVar(&always, "always", false, "keep this approval for every later request of the agent")
 	cmd.Flags().StringVar(&reason, "reason", "", "note recorded with the decision")
+	return cmd
+}
+
+func newSubstrateRevokeCmd() *cobra.Command {
+	var com substrateCommon
+	cmd := &cobra.Command{
+		Use:   "revoke <name> <host>",
+		Short: "Take back an approval given with --always",
+		Long: `Takes back what "defenseclaw substrate approve --always" allowed for one agent and host: the agent's
+next request to the host asks you again. The cluster drops the host from the agent's network rules
+within about a minute. List the approvals in force with "defenseclaw substrate approvals --standing".
+An administrator names another person's agent as ATESPACE/NAME; the revoke is recorded under their
+own name.`,
+		Example: "defenseclaw substrate revoke fix-tests-7f3a registry.example.test",
+		Args:    cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			s, err := substrateOpen(cmd, &com)
+			if err != nil {
+				return err
+			}
+			ctx, stop := substrateContext(cmd)
+			defer stop()
+			atespace, name, ok := strings.Cut(strings.TrimSpace(args[0]), "/")
+			if !ok || atespace == "" || name == "" || strings.Contains(name, "/") {
+				a, err := resolveSubstrateActor(ctx, s.Client, args[0])
+				if err != nil {
+					return substrateFail(err)
+				}
+				atespace, name = a.Atespace, a.Name
+			}
+			host := strings.ToLower(strings.TrimSpace(args[1]))
+			if _, err := s.Client.Revoke(ctx, atespace, name, host); err != nil {
+				if e, ok := api.AsError(err); ok && e.Status == 404 && e.Reason == "approval_not_found" {
+					return cliusage.WithExitCode(fmt.Errorf("%s/%s has no approval of %s in force; list them with: defenseclaw substrate approvals --standing",
+						atespace, name, safetext.Line(host)), substrateExitRefused)
+				}
+				return substrateFail(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Took back the approval of %s for %s/%s. Its next request there asks you again.\n", safetext.Line(host), atespace, name)
+			return nil
+		},
+	}
+	com.add(cmd)
 	return cmd
 }
 
@@ -636,31 +808,74 @@ func substrateDecide(cmd *cobra.Command, com *substrateCommon, id, decision stri
 	}
 	ctx, stop := substrateContext(cmd)
 	defer stop()
-	if err := s.Client.Decide(ctx, id, decision, always, reason); err != nil {
+	note, err := s.Client.Decide(ctx, id, decision, always, reason)
+	if err != nil {
 		return substrateFail(err)
 	}
 	verb := map[string]string{"approve": "Approved", "deny": "Denied"}[decision]
 	fmt.Fprintf(cmd.OutOrStdout(), "%s %s.\n", verb, id)
+	if note != "" {
+		// The answer is recorded but moved nothing (GAP-0973): say so.
+		fmt.Fprintln(cmd.OutOrStdout(), note)
+	}
 	return nil
 }
 
 // --- usage ------------------------------------------------------------------
 
+// substrateUsageBys are the rollups of substrate usage, with the heading and
+// column word of each.
+var substrateUsageBys = map[string][2]string{
+	"actor": {"agent", "AGENT"}, "model": {"model", "MODEL"}, "batch": {"batch", "BATCH"},
+	"atespace": {"group", "GROUP"}, "day": {"day", "DAY"}, "connector": {"connector", "CONNECTOR"},
+	"provider": {"provider", "PROVIDER"}, "person": {"person", "PERSON"},
+}
+
+// substrateUsageSince validates --since (<n>h or <n>d, at most 31 days, the
+// usage retention) and returns the window for the heading.
+func substrateUsageSince(v string) error {
+	n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimSuffix(v, "h"), "d"))
+	if err != nil || n <= 0 || (!strings.HasSuffix(v, "h") && !strings.HasSuffix(v, "d")) {
+		return cliusage.WithExitCode(errors.New("--since takes a window such as 24h or 7d"), 2)
+	}
+	if (strings.HasSuffix(v, "h") && n > 31*24) || (strings.HasSuffix(v, "d") && n > 31) {
+		return cliusage.WithExitCode(errors.New("--since can reach back at most 31 days (the usage retention)"), 2)
+	}
+	return nil
+}
+
 func newSubstrateUsageCmd() *cobra.Command {
 	var (
-		out   substrateOutput
-		com   substrateCommon
-		batch string
-		all   bool
+		out       substrateOutput
+		com       substrateCommon
+		batch, by string
+		since     string
+		all       bool
 	)
 	cmd := &cobra.Command{
 		Use:   "usage",
 		Short: "Show what your agents used: model calls, tokens and cost",
-		Long:  `Shows the model use of your agents, grouped the way the cluster reports it. You see only your own use.`,
-		Args:  cobra.NoArgs,
+		Long: `Shows the model use of your agents and what it cost, rolled up by agent (the default),
+model, batch, atespace, day, connector or provider. You see only your own use; an
+administrator adds --all for everyone and --by person for one line per person.
+Calls whose model is not in the price table show no cost and are not in the total.`,
+		Example: `  defenseclaw substrate usage
+  defenseclaw substrate usage --by model --since 24h
+  defenseclaw substrate usage --all --by person`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			asJSON, err := out.wantJSON()
 			if err != nil {
+				return err
+			}
+			words, ok := substrateUsageBys[by]
+			if !ok {
+				return cliusage.WithExitCode(errors.New("--by is one of actor, model, batch, atespace, day, connector, provider or person"), 2)
+			}
+			if by == "person" && !all {
+				return cliusage.WithExitCode(errors.New("--by person needs --all (administrators only)"), 2)
+			}
+			if err := substrateUsageSince(since); err != nil {
 				return err
 			}
 			s, err := substrateOpen(cmd, &com)
@@ -669,26 +884,115 @@ func newSubstrateUsageCmd() *cobra.Command {
 			}
 			ctx, stop := substrateContext(cmd)
 			defer stop()
-			u, err := s.Client.Usage(ctx, batch, all)
+			u, err := s.Client.Usage(ctx, api.UsageQuery{By: by, Since: since, Batch: batch, All: all})
 			if err != nil {
 				return substrateFail(err)
 			}
 			if asJSON {
 				return writeSubstrateJSON(cmd.OutOrStdout(), u)
 			}
-			if len(u) == 0 {
-				fmt.Fprintln(cmd.OutOrStdout(), "No use recorded yet.")
-				return nil
-			}
-			printSubstrateMap(cmd.OutOrStdout(), u, "")
+			printSubstrateUsage(cmd.OutOrStdout(), u, words, since, all)
 			return nil
 		},
 	}
 	out.add(cmd)
 	com.add(cmd)
+	cmd.Flags().StringVar(&by, "by", "actor", "roll up by actor, model, batch, atespace, day, connector, provider or person (person needs --all)")
+	cmd.Flags().StringVar(&since, "since", "7d", "window, as <n>h or <n>d (at most 31d)")
 	cmd.Flags().StringVar(&batch, "batch", "", "only this batch")
 	cmd.Flags().BoolVar(&all, "all", false, "everyone's use (administrators only)")
 	return cmd
+}
+
+// printSubstrateUsage writes the usage table: one line per key, a total, the
+// budget lines the caller may see, and a note for calls with no known cost.
+func printSubstrateUsage(w io.Writer, u api.UsageAnswer, words [2]string, since string, all bool) {
+	who := "Your"
+	if all {
+		who = "Everyone's"
+	}
+	if len(u.Rows) == 0 {
+		fmt.Fprintf(w, "No use recorded in the last %s.\n", since)
+	} else {
+		fmt.Fprintf(w, "%s usage by %s, last %s (UTC):\n", who, words[0], since)
+		person := words[1] == "PERSON"
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		if person {
+			fmt.Fprintf(tw, "  %s\tCALLS\tCOST\n", words[1])
+		} else {
+			fmt.Fprintf(tw, "  %s\tCALLS\tINPUT\tOUTPUT\tCOST\n", words[1])
+		}
+		var calls, in, outTok, noCost int64
+		var total float64
+		for _, r := range u.Rows {
+			name := safetext.Line(r.Key)
+			if r.Name != "" {
+				name = safetext.Line(r.Name)
+			}
+			if name == "" {
+				name = "(none)"
+			}
+			calls, in, outTok = calls+r.Calls, in+r.Input, outTok+r.Output
+			if d := r.UsageCalls - r.CostCalls; d > 0 {
+				noCost += d
+			}
+			if r.CostUSD != nil {
+				total += *r.CostUSD
+			}
+			if person {
+				fmt.Fprintf(tw, "  %s\t%d\t%s\n", name, r.Calls, substrateUSD(r.CostUSD))
+			} else {
+				fmt.Fprintf(tw, "  %s\t%d\t%s\t%s\t%s\n", name, r.Calls, substrateTokens(r.Input), substrateTokens(r.Output), substrateUSD(r.CostUSD))
+			}
+		}
+		t := total
+		if person {
+			fmt.Fprintf(tw, "  total\t%d\t%s\n", calls, substrateUSD(&t))
+		} else {
+			fmt.Fprintf(tw, "  total\t%d\t%s\t%s\t%s\n", calls, substrateTokens(in), substrateTokens(outTok), substrateUSD(&t))
+		}
+		_ = tw.Flush()
+		if noCost > 0 {
+			noun := "calls had"
+			if noCost == 1 {
+				noun = "call had"
+			}
+			fmt.Fprintf(w, "%d %s no known cost (the model is not in the price table); not in the total.\n", noCost, noun)
+		}
+	}
+	for _, b := range u.Budgets {
+		if b.SpentUSD == nil {
+			continue
+		}
+		pct := 0.0
+		if b.PercentUsed != nil {
+			pct = *b.PercentUsed
+		}
+		state := fmt.Sprintf("(%.0f %%)", pct)
+		if b.Exceeded {
+			state = "(used up)"
+		}
+		fmt.Fprintf(w, "Budget %s: $%.2f of $%.2f %s %s, resets %s\n", safetext.Line(b.ID), *b.SpentUSD, b.LimitUSD,
+			map[string]string{"day": "today", "week": "this week", "month": "this month"}[b.Period], state, safetext.Line(b.ResetsAt))
+	}
+}
+
+func substrateUSD(v *float64) string {
+	if v == nil {
+		return "-"
+	}
+	return fmt.Sprintf("$%.2f", *v)
+}
+
+// substrateTokens writes a token count as 412, 88.1K or 2.2M.
+func substrateTokens(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fK", float64(n)/1e3)
+	}
+	return strconv.FormatInt(n, 10)
 }
 
 // --- secrets ----------------------------------------------------------------
@@ -701,7 +1005,7 @@ func newSubstrateSecretsCmd() *cobra.Command {
 to requests to the hosts the secret is bound to. These commands list the names you can use,
 store your own, and remove or test them. Values are never shown.`,
 	}
-	parent.AddCommand(newSubstrateSecretsListCmd(), newSubstrateSecretsSetCmd(), newSubstrateSecretsRmCmd(), newSubstrateSecretsTestCmd())
+	parent.AddCommand(newSubstrateSecretsTemplatesCmd(), newSubstrateSecretsAddCmd(), newSubstrateSecretsListCmd(), newSubstrateSecretsSetCmd(), newSubstrateSecretsRmCmd(), newSubstrateSecretsTestCmd())
 	return parent
 }
 
@@ -738,11 +1042,23 @@ func newSubstrateSecretsListCmd() *cobra.Command {
 				fmt.Fprintln(w, "No secrets are available to you.")
 				return nil
 			}
+			now := time.Now()
 			rows := make([][]string, 0, len(list))
 			for _, sec := range list {
-				rows = append(rows, []string{sec.Name, substrateDash(sec.Scope), substrateDash(strings.Join(sec.Hosts, ",")), substrateDash(sec.Status)})
+				agents := "-"
+				if len(sec.Agents) > 0 {
+					agents = strings.Join(sec.Agents, ",")
+				}
+				rows = append(rows, []string{sec.Name, substrateDash(strings.Join(sec.Hosts, ",")), substrateSecretKind(sec),
+					substrateDash(sec.Status), substrateSince(sec.LastUsed, now), substrateUntil(sec.Expires, now), agents})
 			}
-			substrateTable(w, []string{"NAME", "SCOPE", "HOSTS", "STATUS"}, rows)
+			substrateTable(w, []string{"NAME", "HOST", "KIND", "STATUS", "LAST USED", "EXPIRES", "AGENTS"}, rows)
+			for _, sec := range list {
+				if days, soon := substrateExpiresSoon(sec, now); soon {
+					fmt.Fprintf(w, "warning: %s expires in %d days. Renew it: remove it with defenseclaw substrate secrets rm %s and add it again with --expires.\n",
+						sec.Name, days, sec.Name)
+				}
+			}
 			return nil
 		},
 	}
@@ -754,19 +1070,21 @@ func newSubstrateSecretsListCmd() *cobra.Command {
 
 func newSubstrateSecretsSetCmd() *cobra.Command {
 	var (
-		com       substrateCommon
-		fromEnv   string
-		fromStdin bool
+		com substrateCommon
+		src substrateSecretSource
 	)
 	cmd := &cobra.Command{
 		Use:   "set <name>",
 		Short: "Store one of your own secrets",
-		Long: `Stores the value for NAME, bound to the hosts your administrator allowed for it. The value
-is read from the terminal without echo, from standard input with --stdin, or from an environment
-variable with --from-env VAR. It is never put on the command line.`,
+		Long: `Stores the value for NAME, bound to the hosts your administrator allowed for it.
+
+` + substrateSourceHelp,
+		Example: "defenseclaw substrate secrets set GITHUB_TOKEN --from-gh\n" +
+			"defenseclaw substrate secrets set GITLAB_TOKEN --from-op op://eng/gitlab/token\n" +
+			"defenseclaw substrate secrets set NPM_TOKEN --from-keychain npm-publish",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			value, err := readSubstrateSecret(cmd, fromEnv, fromStdin)
+			value, _, err := src.read(cmd)
 			if err != nil {
 				return err
 			}
@@ -784,43 +1102,13 @@ variable with --from-env VAR. It is never put on the command line.`,
 		},
 	}
 	com.add(cmd)
-	cmd.Flags().StringVar(&fromEnv, "from-env", "", "read the value from this environment variable")
+	src.add(cmd)
+	// A no-op kept so older scripts that pass it still run (1.0.10 shipped it);
+	// hidden from help, docs and the TUI (GAP-0786). The stub manifest records it
+	// as hidden, and the Python stub accepts it and forwards it (GAP-0904).
 	cmd.Flags().BoolVar(new(bool), "mine", true, "your own secret (the only kind this command acts on)")
-	cmd.Flags().BoolVar(&fromStdin, "stdin", false, "read the value from standard input")
+	_ = cmd.Flags().MarkHidden("mine")
 	return cmd
-}
-
-func readSubstrateSecret(cmd *cobra.Command, fromEnv string, fromStdin bool) (string, error) {
-	switch {
-	case fromEnv != "":
-		v := os.Getenv(fromEnv)
-		if v == "" {
-			return "", fmt.Errorf("the environment variable %s is empty or not set", fromEnv)
-		}
-		return v, nil
-	case fromStdin:
-		b, err := io.ReadAll(io.LimitReader(cmd.InOrStdin(), 64<<10))
-		if err != nil {
-			return "", err
-		}
-		v := strings.TrimRight(string(b), "\r\n")
-		if v == "" {
-			return "", errors.New("standard input was empty")
-		}
-		return v, nil
-	case term.IsTerminal(int(os.Stdin.Fd())):
-		fmt.Fprint(cmd.ErrOrStderr(), "Secret value (not shown): ")
-		b, err := term.ReadPassword(int(os.Stdin.Fd()))
-		fmt.Fprintln(cmd.ErrOrStderr())
-		if err != nil {
-			return "", err
-		}
-		if len(b) == 0 {
-			return "", errors.New("no value entered")
-		}
-		return string(b), nil
-	}
-	return "", errors.New("give the value with --stdin or --from-env VAR (there is no terminal to ask on)")
 }
 
 func newSubstrateSecretsRmCmd() *cobra.Command {
@@ -858,18 +1146,23 @@ func newSubstrateSecretsRmCmd() *cobra.Command {
 	}
 	com.add(cmd)
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask")
+	// A no-op kept so older scripts that pass it still run (1.0.10 shipped it);
+	// hidden from help, docs and the TUI (GAP-0786). The stub manifest records it
+	// as hidden, and the Python stub accepts it and forwards it (GAP-0904).
 	cmd.Flags().BoolVar(new(bool), "mine", true, "your own secret (the only kind this command acts on)")
+	_ = cmd.Flags().MarkHidden("mine")
 	return cmd
 }
 
 func newSubstrateSecretsTestCmd() *cobra.Command {
 	var (
-		out substrateOutput
-		com substrateCommon
+		out   substrateOutput
+		com   substrateCommon
+		agent string
 	)
 	cmd := &cobra.Command{
 		Use:   "test <name>",
-		Short: "Check that a secret is bound and the cluster can use it",
+		Short: "Check that a secret is stored and usable, and whether an agent gets it",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			asJSON, err := out.wantJSON()
@@ -882,20 +1175,33 @@ func newSubstrateSecretsTestCmd() *cobra.Command {
 			}
 			ctx, stop := substrateContext(cmd)
 			defer stop()
-			res, err := s.Client.TestSecret(ctx, args[0])
+			ref := ""
+			if agent != "" {
+				a, err := resolveSubstrateActor(ctx, s.Client, agent)
+				if err != nil {
+					return substrateFail(err)
+				}
+				ref = a.Atespace + "/" + a.Name
+			}
+			res, err := s.Client.TestSecret(ctx, args[0], ref)
 			if err != nil {
 				return substrateFail(err)
 			}
 			if asJSON {
 				return writeSubstrateJSON(cmd.OutOrStdout(), res)
 			}
-			printSubstrateMap(cmd.OutOrStdout(), res, "")
+			printSubstrateSecretTest(cmd.OutOrStdout(), res, time.Now())
 			return nil
 		},
 	}
 	out.add(cmd)
 	com.add(cmd)
+	cmd.Flags().StringVar(&agent, "agent", "", "also say whether this agent's policy carries the secret")
+	// A no-op kept so older scripts that pass it still run (1.0.10 shipped it);
+	// hidden from help, docs and the TUI (GAP-0786). The stub manifest records it
+	// as hidden, and the Python stub accepts it and forwards it (GAP-0904).
 	cmd.Flags().BoolVar(new(bool), "mine", true, "your own secret (the only kind this command acts on)")
+	_ = cmd.Flags().MarkHidden("mine")
 	return cmd
 }
 
@@ -917,11 +1223,19 @@ func newSubstratePolicyExplainCmd() *cobra.Command {
 		com substrateCommon
 	)
 	cmd := &cobra.Command{
-		Use:   "explain <name>",
-		Short: "Explain the rules and recent decisions for one agent",
-		Args:  cobra.ExactArgs(1),
+		Use:   "explain [name]",
+		Short: "Explain the rules and recent decisions for one agent, or the profile you get",
+		Long: `With an agent name, explains the rules and recent decisions for that agent. With no name, explains the profile you get
+for a new agent: the profile and where it came from (the profile assignment that selected you, or default_profile when none
+did), default_profile, and the assignments that were checked first and did not select you (by place and the selector that
+failed, never another person's group or account).`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return substratePolicyCall(cmd, &out, &com, args[0], nil)
+			ref := ""
+			if len(args) == 1 {
+				ref = args[0]
+			}
+			return substratePolicyCall(cmd, &out, &com, ref, nil)
 		},
 	}
 	out.add(cmd)

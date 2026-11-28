@@ -9,7 +9,7 @@
 param(
     [string]$ModulePath = '',
     [string]$ScratchRoot = [IO.Path]::GetTempPath(),
-    [ValidateSet('All', 'Baseline', 'ExistingCas', 'Marker', 'Linked', 'Junction', 'Interrupted', 'Order')]
+    [ValidateSet('All', 'Baseline', 'ExistingCas', 'Marker', 'Linked', 'Junction', 'Interrupted', 'Order', 'AccountOnly')]
     [string]$Case = 'All'
 )
 
@@ -578,6 +578,113 @@ try {
                 }).Count -eq 0) {
                 throw 'interrupted CAS stopped rollback or lost its leftover'
             }
+        }
+        if ($SelectedCase -in @('All', 'AccountOnly')) {
+        # GAP-2005: the guardian renders an enrolled account's agent files
+        # with a DACL that grants only that account and LocalSystem. Setup
+        # (an elevated administrator) skipped their preimages, and the
+        # rollback left both files as the failed transaction wrote them.
+        $hasBackup = [bool](& "$env:SystemRoot\System32\whoami.exe" /priv |
+            Select-String -SimpleMatch 'SeBackupPrivilege')
+        if (-not $hasBackup) {
+            'SKIP AccountOnly: this token has no SeBackupPrivilege (not elevated)'
+        }
+        else {
+        $userProfile = Join-Path $Scratch 'account-only'
+        $stateRoot = Join-Path $Scratch 'account-only-state'
+        $transaction = Join-Path $stateRoot 'transactions\test'
+        New-Item -ItemType Directory -Force -Path $transaction | Out-Null
+        $layout = @{ StateRoot = $stateRoot }
+        $account = 'S-1-5-21-1-2-3-1001'
+        $plan = [pscustomobject]@{
+            manifest_sha256 = ('c' * 64)
+            roots = @([pscustomobject]@{
+                user_home = $userProfile
+                data_dir = (Join-Path $userProfile '.defenseclaw')
+                sid = $account
+            })
+        }
+        $snapshotPath = Join-Path $transaction 'snapshot.json'
+        [IO.File]::WriteAllText($snapshotPath,
+            (@{ schema_version = 1 } | ConvertTo-Json -Depth 6),
+            [Text.UTF8Encoding]::new($false))
+        $paths = @(Get-DefenseClawUserNativeOTLPTransactionPaths `
+                -UserHome $userProfile)
+        $locked = 'D:P(A;;FA;;;SY)(A;;FA;;;' + $account + ')'
+        $open = 'D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;' + $account + ')'
+        function Set-FixtureDacl([string]$Path, [string]$Sddl) {
+            # The owner keeps WRITE_DAC, so the fixture can lock and unlock
+            # its own file without any privilege.
+            $acl = Get-Acl -LiteralPath $Path
+            $acl.SetSecurityDescriptorSddlForm($Sddl, 'Access')
+            Set-Acl -LiteralPath $Path -AclObject $acl
+        }
+        $native = Initialize-DefenseClawNativeSecurity
+        $before = @()
+        foreach ($index in @(0, 1)) {
+            New-Item -ItemType Directory -Force `
+                -Path ([IO.Path]::GetDirectoryName($paths[$index])) | Out-Null
+            [IO.File]::WriteAllText($paths[$index], ('route-only render ' + $index))
+            $item = Get-Item -LiteralPath $paths[$index]
+            $item.CreationTimeUtc = [DateTime]::UtcNow.AddDays(-3)
+            $item.LastWriteTimeUtc = [DateTime]::UtcNow.AddDays(-2)
+            Set-FixtureDacl -Path $paths[$index] -Sddl $locked
+            $denied = $false
+            try { [void][IO.File]::ReadAllBytes($paths[$index]) }
+            catch [UnauthorizedAccessException] { $denied = $true }
+            if (-not $denied) {
+                throw 'fixture: an account-only file is readable without backup intent'
+            }
+            $snap = $native::CaptureUserFileNoFollowIfExists($paths[$index])
+            $before += [pscustomobject]@{
+                sha256 = Get-DefenseClawNuclearSHA256 -Bytes $snap.Content
+                sddl = [string]$snap.SecurityDescriptor
+                creation = $snap.CreationTimeUtc
+                modified = $snap.LastWriteTimeUtc
+            }
+        }
+        $script:DefenseClawUserNativeOTLPCaptureSkipped = @()
+        $script:DefenseClawRollbackLeftovers = @()
+        Add-DefenseClawUserNativeOTLPTransactionSnapshot `
+            -SnapshotPath $snapshotPath -Layout $layout -Plan $plan
+        if (@($script:DefenseClawUserNativeOTLPCaptureSkipped).Count -ne 0) {
+            throw ('account-only preimage skipped: ' +
+                ($script:DefenseClawUserNativeOTLPCaptureSkipped -join '; '))
+        }
+        # The candidate guardian rewrites both files and keeps the DACL.
+        foreach ($index in @(0, 1)) {
+            Set-FixtureDacl -Path $paths[$index] -Sddl $open
+            [IO.File]::WriteAllText($paths[$index], ('candidate render ' + $index))
+            Set-FixtureDacl -Path $paths[$index] -Sddl $locked
+        }
+        foreach ($agent in @('.codex', '.claude')) {
+            $cas = Join-Path (Join-Path $userProfile $agent) '.defenseclaw-cas-state'
+            New-Item -ItemType Directory -Path $cas | Out-Null
+            [IO.File]::WriteAllBytes(
+                (Join-Path $cas '.defenseclaw-v2-protocol.lock'), [byte[]]::new(0))
+        }
+        Set-DefenseClawUserNativeOTLPTransactionPostimages `
+            -SnapshotPath $snapshotPath -Layout $layout
+        $snapshot = Get-Content -LiteralPath $snapshotPath -Raw | ConvertFrom-Json
+        Restore-DefenseClawUserNativeOTLPTransactionSnapshot `
+            -Snapshot $snapshot -SnapshotPath $snapshotPath -Layout $layout
+        if (@($script:DefenseClawRollbackLeftovers).Count -ne 0) {
+            throw ('account-only rollback left: ' +
+                ($script:DefenseClawRollbackLeftovers -join '; '))
+        }
+        foreach ($index in @(0, 1)) {
+            $after = $native::CaptureUserFileNoFollowIfExists($paths[$index])
+            $hash = Get-DefenseClawNuclearSHA256 -Bytes $after.Content
+            if ($hash -cne $before[$index].sha256 -or
+                [string]$after.SecurityDescriptor -cne $before[$index].sddl -or
+                $after.CreationTimeUtc -ne $before[$index].creation -or
+                $after.LastWriteTimeUtc -ne $before[$index].modified) {
+                throw "rollback did not restore account-only file $index exactly (hash=$($hash -ceq $before[$index].sha256), acl=$([string]$after.SecurityDescriptor -ceq $before[$index].sddl))"
+            }
+            Set-FixtureDacl -Path $paths[$index] -Sddl $open
+        }
+        'PASS: account-only agent files captured and restored'
+        }
         }
         if ($SelectedCase -in @('All', 'Order')) {
             # A malformed per-user receipt must be handled only after the

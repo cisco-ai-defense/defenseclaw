@@ -123,7 +123,7 @@ func DockerDaemonConfigEditFiles(input Input) map[string]string {
 		return name != "" && EtcSpelling(path.Clean(name)) == dockerDaemonConfigPath
 	}
 	var files map[string]string
-	for _, write := range nativeFileWrites(input.Tool, input.Args) {
+	for _, write := range nativeFileWrites(input.Tool, input.Args, patchCallCWD(input)) {
 		target, ok := nativeAbsoluteTarget(write.target, input.CWD)
 		if !ok || !write.edit {
 			continue

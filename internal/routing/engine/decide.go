@@ -83,7 +83,7 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 		pol = verdict.Policy
 		d.Warnings = append(d.Warnings, verdict.Warnings...)
 		d.RuleIDs, d.ChargeKeys = verdict.RuleIDs, verdict.ChargeKeys
-		if verdict.Deny != nil && e.managed {
+		if verdict.Deny != nil && (e.managed || verdict.Enforce) {
 			if e.SensitiveConfigured() && e.sensitiveFloor(req, newest) != "" {
 				// The refused turn may stay in the agent history: keep the
 				// conversation narrowed (GAP-0576 review r3).
@@ -193,7 +193,8 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 	// 5. Nothing survives: D3 fallback to the original request. The admin
 	// Gate judges that original at the forwarded exit (S11 DESIGN 10.2: a
 	// binding rule refuses it there, with its own reason), so only the S1
-	// floor (routing.admin.denied_providers) denies here, managed only.
+	// floor (routing.admin.denied_providers) denies here, on a managed host
+	// and for an enforced (actor) verdict.
 	d.verdict = verdict
 	if narrowed {
 		// Fail closed: a sensitive request never falls back to the
@@ -205,7 +206,7 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 		d.Deny = SensitiveLocalDeny(d.Sensitive.Source, localWhy)
 		return d
 	}
-	if e.managed && e.providerDenied(pol, req.RequestedProvider) {
+	if (e.managed || verdict.Enforce) && e.providerDenied(pol, req.RequestedProvider) {
 		d.Outcome, d.FailureCode = OutcomeDenied, FailureFiltered
 		d.Deny = &DenyReason{Code: "routing_admin_denied", Message: "routing.admin does not allow this model for you, and no allowed model can serve this request"}
 		return d
@@ -262,7 +263,7 @@ func (e *Engine) Gate(d Decision, target GateTarget) *DenyReason {
 	if e.admin == nil || !e.admin.Active() {
 		return nil
 	}
-	deny := e.admin.Gate(d.verdict, target, e.managed)
+	deny := e.admin.Gate(d.verdict, target, e.managed || d.verdict.Enforce)
 	if deny != nil && deny.Code == "routing_admin_denied" && target.Alias == "" && len(d.NoCredential) > 0 {
 		// The administrator allows a model, but no credential is stored
 		// for it, so the request fell back to its own (disallowed) model:

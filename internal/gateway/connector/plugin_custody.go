@@ -22,11 +22,14 @@ var ErrPluginFolderCustody = errors.New("plugin folder is writable by another ac
 // every element the same walk refuses. fix is the shell command that repairs
 // what a command can repair (and nothing else); manual is what only a person
 // can do, as prose: replace a link, give a path back to this account.
+// listFailing lists failing even when it is one folder: the walk met an
+// inherited entry at a folder that is not the one to fix (GAP-1889).
 type pluginCustodyError struct {
-	cause   error
-	failing []string
-	fix     string
-	manual  string
+	cause       error
+	failing     []string
+	fix         string
+	manual      string
+	listFailing bool
 }
 
 func (e *pluginCustodyError) Error() string { return e.CauseText() + e.repairText() }
@@ -38,7 +41,7 @@ func (e *pluginCustodyError) Error() string { return e.CauseText() + e.repairTex
 // the repair or between two names. An ordinary name is written as it is.
 func (e *pluginCustodyError) CauseText() string {
 	text := quotePluginCustodyPaths(fmt.Sprintf("%v", e.cause), e.failing)
-	if len(e.failing) > 1 {
+	if len(e.failing) > 1 || (e.listFailing && len(e.failing) > 0) {
 		quoted := make([]string, len(e.failing))
 		for i, path := range e.failing {
 			quoted[i] = pluginCustodyQuote(path)

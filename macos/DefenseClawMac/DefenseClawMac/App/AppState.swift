@@ -985,7 +985,8 @@ final class AppState {
         origin: String,
         successEffects: [String] = [],
         suggestedNextAction: String = "",
-        refreshOnSuccess: Bool = false
+        refreshOnSuccess: Bool = false,
+        outputSummary: ((CLIResult) -> String)? = nil
     ) async -> CLIResult {
         if let upgradeID = runtimeUpgradeRunID, upgradeID != runID, mutation {
             return CLIResult(exitCode: 75, output: "A runtime upgrade is in progress. Wait for it to finish before making other changes.")
@@ -1023,7 +1024,8 @@ final class AppState {
             category: category,
             origin: origin,
             successEffects: successEffects,
-            suggestedNextAction: suggestedNextAction
+            suggestedNextAction: suggestedNextAction,
+            outputSummary: outputSummary
         )
         if result.succeeded, refreshOnSuccess {
             NotificationCenter.default.post(name: .dcRefreshPanel, object: nil)

@@ -122,6 +122,12 @@ type perUserPeerCheck struct {
 	deciding atomic.Bool
 	// abandoned is set when ownerScanGrace ran out with the scan unfinished.
 	abandoned atomic.Bool
+	// recordedHolder is set once the owner scan has shown that the process
+	// the gateway record names holds the listener of the queued connection
+	// (that no other process of the account holds it may still be read). An
+	// abandoned scan is the outage of an unanswered listener only then
+	// (GAP-1534).
+	recordedHolder atomic.Bool
 	// by is the connect deadline of the try (connectBy); zero when none.
 	by   time.Time
 	ends atomic.Pointer[perUserConnEnds]

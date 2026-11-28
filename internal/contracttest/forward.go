@@ -61,7 +61,7 @@ var KeepOnDevice = []string{
 	// windows_token_groups_pending.
 	"user_id", "user_name", "windows_token_groups_pending",
 	// Tenant, device group and signing-key choices of the administrator.
-	"anchors", "keys", "tenant_id", "device_group", "device_groups", "signer_key_id",
+	"anchors", "keys", "tenant_id", "device_group", "device_groups", "signer_key_id", "key_id",
 }
 
 // forwardKeepGuideMembers are the KeepOnDevice members the guide names as

@@ -599,7 +599,7 @@ func TestSetupOffersTheUpgrade(t *testing.T) {
 	const later = "→ upgrade OpenShell to " + openshell.InstallerVersion + " in place: defenseclaw sandbox setup --install-openshell\n"
 	const names = "(dc-claude-theirs-a, dc-claude-theirs-b)"
 	question := "Upgrade OpenShell 0.1.1 to " + openshell.InstallerVersion + " in place with NVIDIA's installer? (OpenShell 0.1.1 runs no DefenseClaw sandbox; sudo; sha256 verified; pulls OpenShell's " +
-		openshell.InstallerVersion + " supervisor images from ghcr.io; restarts the gateway: it drops the connections of the 2 sandboxes running on it " + names + ") [Y/n]"
+		openshell.InstallerVersion + " supervisor images from ghcr.io; restarts the gateway: it drops the connections of the 2 sandboxes running on it " + names + "; " + openShellUpgradeOneWay + ") [Y/n]"
 	flag := SetupOptions{NonInteractive: true, InstallOpenShell: true}
 	for _, tc := range []struct {
 		name     string
@@ -1433,12 +1433,13 @@ func TestSetupSaysASwitchNotAppliedLeavesDocker(t *testing.T) {
 	lacks(t, ta.output(), "still runs the docker driver", "not ready for sandboxes yet")
 }
 
-// TestSetupOnAMacAlreadyOnMicroVMs asks nothing about the driver or
-// mounts, and restarts nothing when the configuration is current; a
+// TestSetupOnAMacAlreadyOnMicroVMs: a yes to the MicroVM question (asked
+// on every Mac since GAP-1704) keeps the vm driver; nothing is asked about
+// mounts, and nothing restarts when the configuration is current; a
 // configuration that selects MicroVMs on a gateway not restarted since
 // is restarted, with consent.
 func TestSetupOnAMacAlreadyOnMicroVMs(t *testing.T) {
-	ta := setupApp(t, "", "", false)
+	ta := setupApp(t, "y\n", "", false)
 	ta.GOOS = "darwin"
 	ta.gateway.state.Env = map[string]string{openshell.EnvTelemetryEnabled: "false"}
 	ta.Gateway = emptyPlans{ta.gateway}
@@ -1447,7 +1448,8 @@ func TestSetupOnAMacAlreadyOnMicroVMs(t *testing.T) {
 	has(t, ta.output(), "✓ darwin/arm64  ✓ Landlock (MicroVM)  ✓ Docker 29.1.5  ✓ MicroVM driver  ✓ OpenShell 0.1.1\n",
 		"every run works on a copy (the MicroVM driver mounts no host folders)",
 		"the first run of each image uses about 12 GiB while preparing its MicroVM disk")
-	lacks(t, ta.output(), "Run sandboxes in OpenShell MicroVMs?", "Allow sandboxes to mount", "Restart the OpenShell gateway")
+	has(t, ta.output(), "Run sandboxes in OpenShell MicroVMs? This gateway runs the MicroVM driver")
+	lacks(t, ta.output(), "Allow sandboxes to mount", "Restart the OpenShell gateway")
 	if len(ta.gateway.planned) != 1 || ta.gateway.applied != 0 || ta.gateway.restarts != 0 {
 		t.Fatalf("plans %+v, applied %d, restarts %d", ta.gateway.planned, ta.gateway.applied, ta.gateway.restarts)
 	}
@@ -1486,8 +1488,9 @@ func TestSetupBuildsTheImagesForItsDriver(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ta := setupApp(t, "", "", false)
 			opts := SetupOptions{Yes: true, NoWrappers: true, Harnesses: []string{"claude"}}
-			if tc.mac && tc.driver == openshell.DriverDocker {
-				// --yes takes the Docker default on a Mac: the switch is a yes.
+			if tc.mac {
+				// --yes takes the Docker default on a Mac: MicroVMs are a yes
+				// (GAP-1704: also on a gateway already on vm).
 				ta = setupApp(t, "y\n\n\n\n\n", "", false)
 				opts.Yes = false
 			} else {

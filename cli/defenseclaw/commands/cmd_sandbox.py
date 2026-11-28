@@ -61,6 +61,7 @@ class _Flag:
     short: str = ""
     default: str = ""
     metavar: str = ""
+    hidden: bool = False
 
 
 @dataclass(frozen=True)
@@ -253,6 +254,13 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
                 "NAME=host[:port]: give the sandbox a placeholder for $NAME that works only against "
                 "that host (repeatable)",
                 metavar="NAME=HOST",
+            ),
+            _Flag(
+                "vault",
+                "stringArray",
+                "NAME: give the sandbox a placeholder for $NAME from your vault; it works only against the host the "
+                "vault binds it to (repeatable; see sandbox vault)",
+                metavar="NAME",
             ),
             _Flag(
                 "github-write",
@@ -664,6 +672,75 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         flags=(_OUTPUT, _JSON),
     ),
     _Cmd(("pack", "validate"), "Validate a pack file strictly", args=(_Arg("path"),)),
+    _Cmd(
+        ("vault",),
+        "Keep your secrets for your sandboxes: list, add, replace, bind and remove",
+        long=(
+            "The vault keeps your secrets for your sandboxes. Each secret is bound to the one host it may be sent "
+            'to. Start a sandbox with "--vault NAME" and the agent inside sees only a placeholder in $NAME; '
+            "OpenShell puts the real value in on the way out, to that host only. DefenseClaw also captures secrets "
+            "for you: when an agent in a sandbox is given a secret with a well-known shape (an Anthropic, OpenAI, "
+            "GitHub, Slack, Stripe or Google API key), in a prompt or a tool call, the secret goes into your vault and "
+            "the call is stopped before the value reaches the model. The vault is a file only your account can read, "
+            "in your DefenseClaw state directory. Values are never printed: list and show give names, hosts and "
+            "status only."
+        ),
+    ),
+    _Cmd(("vault", "list"), "List your secrets (names, hosts and status; never values)", flags=(_OUTPUT, _JSON)),
+    _Cmd(
+        ("vault", "show"),
+        "Show one secret's host, status, source and use (never its value)",
+        args=(_Arg("name"),),
+        flags=(_OUTPUT, _JSON),
+    ),
+    _Cmd(
+        ("vault", "add"),
+        "Add a secret bound to one host (asks for the value with echo off)",
+        long=(
+            "Adds a secret. NAME is the environment variable the sandbox sees (for example STRIPE_API_KEY); --host "
+            "is the only host the value is ever sent to (api.stripe.com, or host:port). The value is typed with echo "
+            "off, or piped with --value-stdin; it never goes on the command line."
+        ),
+        args=(_Arg("name"),),
+        flags=(
+            _Flag("host", "string", "the only host the secret may be sent to (host or host:port)", metavar="HOST"),
+            _Flag("value-stdin", "bool", "read the value from standard input (one line)"),
+        ),
+    ),
+    _Cmd(
+        ("vault", "replace"),
+        "Replace a secret's value (after you rotate it)",
+        args=(_Arg("name"),),
+        flags=(_Flag("value-stdin", "bool", "read the value from standard input (one line)"),),
+    ),
+    _Cmd(
+        ("vault", "confirm"),
+        "Confirm a captured secret is yours, so sandboxes can use it",
+        long=(
+            "A secret DefenseClaw captured from a sandbox is unconfirmed until you confirm it: an agent in a "
+            "sandbox can make a call that looks like your prompt, so a captured value may be one it planted. "
+            "confirm shows where the secret came from and the last 4 characters of its value, then asks."
+        ),
+        args=(_Arg("name"),),
+        flags=(_Flag("yes", "bool", "do not ask", short="y"),),
+    ),
+    _Cmd(
+        ("vault", "bind"),
+        "Set the one host a secret may be sent to",
+        args=(_Arg("name"),),
+        flags=(_Flag("host", "string", "the only host the secret may be sent to (host or host:port)", metavar="HOST"),),
+    ),
+    _Cmd(
+        ("vault", "rename"),
+        "Rename a secret (the variable the sandbox sees)",
+        args=(_Arg("name"), _Arg("new_name")),
+    ),
+    _Cmd(
+        ("vault", "remove"),
+        "Remove a secret from the vault",
+        args=(_Arg("name"),),
+        flags=(_Flag("yes", "bool", "do not ask", short="y"),),
+    ),
     _Cmd(("image",), "Build, list, prune and remove the harness images"),
     _Cmd(
         ("image", "build"),
@@ -851,7 +928,7 @@ def _click_option(flag: _Flag) -> GatewayOption:
     decls = [f"--{flag.name}"]
     if flag.short:
         decls.append(f"-{flag.short}")
-    kwargs: dict[str, Any] = {"help": flag.help}
+    kwargs: dict[str, Any] = {"help": flag.help, "hidden": flag.hidden}
     if flag.go_type == "bool":
         kwargs.update(is_flag=True, default=False)
     elif flag.go_type in {"stringArray", "stringSlice"}:

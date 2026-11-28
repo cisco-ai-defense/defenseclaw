@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -369,11 +370,14 @@ func TestGAP1189CredentialReadsOutsideOwnProviderConfigStay(t *testing.T) {
 // environment, which is where AWS_CONFIG_FILE comes from on Linux.
 func TestGAP1592ProcessStartEnv(t *testing.T) {
 	t.Parallel()
-	if _, err := os.Stat("/proc/self/environ"); err != nil {
-		if value, ok := processStartEnv(os.Getpid(), "PATH"); ok {
-			t.Fatalf("no /proc: got %q", value)
+	if runtime.GOOS != "linux" {
+		// No start environment is read here: only the account's home counts.
+		for _, pid := range []int{os.Getpid(), -1} {
+			if value, ok := processStartEnv(pid, "PATH"); ok {
+				t.Fatalf("pid %d: got %q, want no start environment off Linux", pid, value)
+			}
 		}
-		t.Skip("no /proc on this platform: only the account's home counts")
+		return
 	}
 	for _, name := range []string{"PATH", "HOME"} {
 		if want := os.Getenv(name); want != "" {

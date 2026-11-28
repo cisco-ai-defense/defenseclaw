@@ -35,3 +35,29 @@ func GatewayServiceAccount() string {
 	}
 	return ""
 }
+
+// DeploymentGatewayService is the gateway service of this deployment, for a
+// check that must recognise that service's grants and no other: the service
+// of GatewayServiceAccount (the WindowsServiceAccountEnv pin the managed
+// services carry, else the service the installer registered for the install
+// root of the running binary) when it is the production gateway or a
+// run-scoped certification gateway (DefenseClawCertGateway_<10 lowercase
+// hex>, the pattern the installer and the hook enumerator use), and the
+// production gateway otherwise. Another service, an account outside NT
+// SERVICE or a malformed scope is never returned (rel-1-0-10 GAP-2125: the
+// agent config owner heal took only the production gateway, so a
+// certification install's enumerator read grant was never recognised).
+func DeploymentGatewayService() string {
+	const prefix = `NT SERVICE\`
+	account := GatewayServiceAccount()
+	if len(account) > len(prefix) && strings.EqualFold(account[:len(prefix)], prefix) {
+		name := account[len(prefix):]
+		if strings.EqualFold(name, StandaloneWindowsGatewaySvc) {
+			return StandaloneWindowsGatewaySvc
+		}
+		if managedServiceCertGateway.MatchString(name) {
+			return name
+		}
+	}
+	return StandaloneWindowsGatewaySvc
+}

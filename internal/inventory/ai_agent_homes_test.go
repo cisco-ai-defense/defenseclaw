@@ -20,7 +20,7 @@ import (
 func TestSavedAgentHomesAreScanned(t *testing.T) {
 	restore := savedUserVariable
 	t.Cleanup(func() { savedUserVariable = restore })
-	savedUserVariable = func(home, _, name string) string { return shellSavedVariable(home, name) }
+	savedUserVariable = func(home, _, name string) (string, bool) { return shellSavedVariable(home, name), true }
 
 	home := t.TempDir()
 	cache := filepath.Join(home, "cfg", "claude", "plugins", "cache", "market", "tools", "1.0")
@@ -78,5 +78,44 @@ func TestShellWord(t *testing.T) {
 		if got := shellWord(in); got != want {
 			t.Errorf("shellWord(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// A signed-out Windows user's saved folder cannot be read; the scan keeps
+// using the last one it read, across a restart too, so the user's skills are
+// not reported removed at sign-out and new at sign-in.
+func TestSavedAgentHomeIsRememberedWhileTheUserIsSignedOut(t *testing.T) {
+	restore := savedUserVariable
+	t.Cleanup(func() { savedUserVariable = restore })
+	home, data := t.TempDir(), t.TempDir()
+	moved := filepath.Join(home, "work", "codex")
+	writeSkillFiles(t, home, map[string]string{"work/codex/skills/cx/SKILL.md": "codex"})
+	value, known := moved, true
+	savedUserVariable = func(string, string, string) (string, bool) { return value, known }
+	newService := func() *ContinuousDiscoveryService {
+		svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+			Enabled: true, Mode: "enhanced", DataDir: data, HomeDir: home, ManagedEnterprise: true,
+		}, nil)
+		cleanupPreparedDiscoveryService(t, svc)
+		return svc
+	}
+	svc := newService()
+	if got := svc.agentHome(home, "CODEX_HOME"); got != moved {
+		t.Fatalf("signed in: %q, want %q", got, moved)
+	}
+	value, known = "", false // signed out
+	if got := svc.agentHome(home, "CODEX_HOME"); got != moved {
+		t.Fatalf("signed out: %q, want the remembered %q", got, moved)
+	}
+	if got := newService().agentHome(home, "CODEX_HOME"); got != moved {
+		t.Fatalf("signed out after a restart: %q, want %q", got, moved)
+	}
+	value, known = "", true // signed in, variable removed
+	if got := svc.agentHome(home, "CODEX_HOME"); got != filepath.Join(home, ".codex") {
+		t.Fatalf("variable removed: %q", got)
+	}
+	value, known = "", false
+	if got := svc.agentHome(home, "CODEX_HOME"); got != filepath.Join(home, ".codex") {
+		t.Fatalf("signed out after removing the variable: %q", got)
 	}
 }

@@ -26,6 +26,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 const claudeChainGuardName = "defenseclaw-hook-guard.exe"
@@ -223,6 +224,10 @@ func ensureClaudeChain(launcher string) error {
 		return fmt.Errorf("protect Claude Code hook chain: %w", err)
 	}
 	record, present := readClaudeChainRecord(rootFiles)
+	previousGeneration := ""
+	if present {
+		previousGeneration = record.Generation
+	}
 	if present && !pathidentity.Same(record.Launcher, launcher) {
 		present = false
 	}
@@ -264,35 +269,126 @@ func ensureClaudeChain(launcher string) error {
 		}
 		return fmt.Errorf("installed Claude Code guard cannot start; run the DefenseClaw installer again: %w", err)
 	}
-	versionDir, err := os.MkdirTemp(dir, "chain-")
-	if err != nil {
-		return fmt.Errorf("stage Claude Code guard pair: %w", err)
-	}
-	published := false
-	defer func() {
-		if !published {
-			_ = os.RemoveAll(versionDir)
+	generation, reused := reuseClaudeChainFolder(dir, want, body)
+	if !reused {
+		versionDir, err := os.MkdirTemp(dir, "chain-")
+		if err != nil {
+			return fmt.Errorf("stage Claude Code guard pair: %w", err)
 		}
-	}()
-	if err := safefile.ProtectDirectory(versionDir); err != nil {
-		return fmt.Errorf("protect Claude Code guard pair: %w", err)
+		published := false
+		defer func() {
+			if !published {
+				_ = os.RemoveAll(versionDir)
+			}
+		}()
+		if err := safefile.ProtectDirectory(versionDir); err != nil {
+			return fmt.Errorf("protect Claude Code guard pair: %w", err)
+		}
+		newFiles := claudeChainFilesIn(versionDir)
+		if err := writeClaudeChainFile(newFiles.approved, body); err != nil {
+			return fmt.Errorf("publish approved Claude Code guard: %w", err)
+		}
+		if err := writeClaudeChainFile(newFiles.guard, body); err != nil {
+			return fmt.Errorf("publish Claude Code guard: %w", err)
+		}
+		generation = filepath.Base(versionDir)
+		if err := writeClaudeChainRecord(rootFiles, launcher, want, generation); err != nil {
+			return err
+		}
+		published = true
+	} else if err := writeClaudeChainRecord(rootFiles, launcher, want, generation); err != nil {
+		return err
 	}
-	newFiles := claudeChainFilesIn(versionDir)
-	if err := writeClaudeChainFile(newFiles.approved, body); err != nil {
-		return fmt.Errorf("publish approved Claude Code guard: %w", err)
-	}
-	if err := writeClaudeChainFile(newFiles.guard, body); err != nil {
-		return fmt.Errorf("publish Claude Code guard: %w", err)
-	}
-	encoded, err := json.Marshal(claudeChainRecord{Launcher: launcher, Digest: want, Generation: filepath.Base(versionDir)})
+	pruneClaudeChain(dir, generation, previousGeneration)
+	return nil
+}
+
+func writeClaudeChainRecord(rootFiles claudeChainFiles, launcher, digest, generation string) error {
+	encoded, err := json.Marshal(claudeChainRecord{Launcher: launcher, Digest: digest, Generation: generation})
 	if err != nil {
 		return err
 	}
-	if err := writeClaudeChainFile(rootFiles.record, append(encoded, '\n')); err != nil {
-		return err
+	return writeClaudeChainFile(rootFiles.record, append(encoded, '\n'))
+}
+
+// claudeChainPruneGrace keeps a folder younger than this: another process
+// (the CLI beside the gateway) may be publishing it and has not written the
+// record yet.
+var claudeChainPruneGrace = 10 * time.Minute
+
+// claudeChainGenerations lists the chain-<n> folders of dir, newest first.
+// A link or a file with such a name is not one.
+func claudeChainGenerations(dir string) []os.DirEntry {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
 	}
-	published = true
-	return nil
+	var out []os.DirEntry
+	for _, e := range entries {
+		if e.IsDir() && claudeChainGenerationName(e.Name()) {
+			out = append(out, e)
+		}
+	}
+	modified := func(e os.DirEntry) time.Time {
+		if info, err := e.Info(); err == nil {
+			return info.ModTime()
+		}
+		return time.Time{}
+	}
+	slices.SortStableFunc(out, func(a, b os.DirEntry) int { return modified(b).Compare(modified(a)) })
+	return out
+}
+
+// reuseClaudeChainFolder finds a folder whose approved copy holds the guard
+// with digest want, repairs its working copy if needed, and returns its name.
+// Every upgrade, downgrade or rollback to a guard an earlier folder holds
+// reuses it instead of writing a second 4.8 MB pair (GAP-1075).
+func reuseClaudeChainFolder(dir, want string, body []byte) (string, bool) {
+	for _, e := range claudeChainGenerations(dir) {
+		files := claudeChainFilesIn(filepath.Join(dir, e.Name()))
+		if !claudeFileMatches(files.approved, want) {
+			continue
+		}
+		if !claudeFileMatches(files.guard, want) && writeClaudeChainFile(files.guard, body) != nil {
+			continue
+		}
+		return e.Name(), true
+	}
+	return "", false
+}
+
+// claudeChainSettingsText is what the folders in use are read from: the user
+// settings file Claude Code reads and the local one beside it. Setup writes
+// the wrapper command into them after the chain is published, so at publish
+// time they still name the folder the registered hooks run from.
+var claudeChainSettingsText = func() string {
+	path := claudeCodeSettingsPath()
+	var text strings.Builder
+	for _, p := range []string{path, filepath.Join(filepath.Dir(path), "settings.local.json")} {
+		if data, err := os.ReadFile(p); err == nil && len(data) <= 8<<20 {
+			text.Write(data)
+		}
+	}
+	return text.String()
+}
+
+// pruneClaudeChain removes the chain-<n> folders nothing uses: it keeps the
+// folder just recorded (current), the one the record named before it (the
+// previous release's, for a rollback), every folder a settings file names and
+// every folder younger than claudeChainPruneGrace. Best effort: a folder a
+// running hook still holds open stays until a later publish.
+func pruneClaudeChain(dir, current, previous string) {
+	settings := claudeChainSettingsText()
+	for _, e := range claudeChainGenerations(dir) {
+		name := e.Name()
+		if name == current || name == previous || strings.Contains(settings, name) {
+			continue
+		}
+		if info, err := e.Info(); err != nil || time.Since(info.ModTime()) < claudeChainPruneGrace {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(dir, name))
+	}
 }
 
 func restoreProbedClaudeChainGuard(files claudeChainFiles, digest, dir string) error {
@@ -422,6 +518,21 @@ func claudeManagedGuardPath(launcher string) string {
 	return launcher[:last+1] + windowsHookGuardBinaryName
 }
 
+// claudeManagedGuardOfLauncher reports whether guard is the guard image of
+// launcher: the file windowsHookGuardBinaryName in the launcher's folder.
+// Setup renders both by their long names. An administrator's HKLM matrix can
+// spell either by its 8.3 short names; that spelling names the same file by
+// the same names (winpath.SameNamedFile), as the exec form's command does
+// for verify and enrolment (GAP-2244). A copy, a junction or a hard link in
+// another folder is not the guard.
+func claudeManagedGuardOfLauncher(launcher, guard string) bool {
+	want := claudeManagedGuardPath(launcher)
+	if want == "" || guard == "" {
+		return false
+	}
+	return want == guard || winpath.SameNamedFile(guard, want)
+}
+
 // The managed policy keeps cmd.exe as the registered parent. The small
 // installed guard checks whether the full hook starts and preserves its
 // answer. If the guard itself cannot start, cmd.exe gives the same event's
@@ -545,7 +656,7 @@ func claudeManagedGuardWrapperParts(hook map[string]interface{}) (string, []stri
 		launcher, hookArgs, event, wrapped, open, valid := hookguard.ParseInvocationMode(args[i+1 : i+9])
 		if valid && wrapped && !open &&
 			slices.Equal(hookArgs, []string{"hook", "--connector", "claudecode", "--enterprise-managed"}) &&
-			claudeManagedGuardPath(launcher) == guard &&
+			claudeManagedGuardOfLauncher(launcher, guard) &&
 			claudeManagedGuardWrapperKnown(args, guard, launcher, event, hookArgs) {
 			return launcher, hookArgs, true
 		}

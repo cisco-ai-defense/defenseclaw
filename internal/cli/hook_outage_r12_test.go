@@ -4,7 +4,7 @@
 package cli
 
 import (
-	"os"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"path/filepath"
 	"testing"
 )
@@ -83,9 +83,7 @@ func TestOpenClawOutageFunctionBodiesNeedTheirDefinition(t *testing.T) {
 func TestOpenClawOutageFunctionCallsKeepWhatTheyEstablish(t *testing.T) {
 	root, protected, ordinary := outageR10Fixture(t, "home")
 	link := filepath.Join(ordinary, "config-link")
-	if err := os.Symlink(protected, link); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, protected, link)
 	for _, target := range []struct{ name, value string }{{"file", protected}, {"link", link}} {
 		for _, tc := range []struct {
 			name, command, want string

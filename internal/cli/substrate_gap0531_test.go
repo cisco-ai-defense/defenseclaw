@@ -47,3 +47,12 @@ func TestGAP0531AllowFlaggedNeedsApply(t *testing.T) {
 		t.Fatalf("err = %v (exit %d)", err, cliusage.ExitCode(err))
 	}
 }
+
+// substrate-1 GAP-0489 (RV-T6A): pull's --exclude and --no-exclude say
+// opposite things, refused before anything is read.
+func TestGAP0489PullExcludeAndNoExcludeConflict(t *testing.T) {
+	_, _, err := runSubstrate(t, newSubstratePullCmd(), "a1", "--exclude", "config/local.yaml", "--no-exclude")
+	if cliusage.ExitCode(err) != 2 || !strings.Contains(err.Error(), "--no-exclude") {
+		t.Fatalf("pull --exclude --no-exclude: %v (exit %d)", err, cliusage.ExitCode(err))
+	}
+}

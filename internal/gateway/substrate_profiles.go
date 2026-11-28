@@ -117,23 +117,29 @@ func substrateCallerProfile(g config.GuardrailConfig, p identity.Person, connect
 // select a caller before the actor exists, so an entry with them never
 // matches here.
 func substrateAssignmentSelects(m config.ProfileMatch, p identity.Person, connector string) bool {
-	if (m.Empty() && m.Substrate.Empty()) || len(m.Agents) > 0 {
-		return false
+	return len(substrateAssignmentMisses(m, p, connector)) == 0
+}
+
+// substrateAssignmentMisses names the selector keys of m that do not select
+// the caller, in a fixed order, and none when m selects it. "match" is an
+// entry with no selector at all; "agent" is an entry that names an actor or
+// agent (atespaces, templates, agents), which cannot select a caller before
+// the actor exists; "connectors" is a connector the caller did not name.
+// Only the key is named, never a value, so a person is not told another
+// person's group or account (GAP-0653).
+func substrateAssignmentMisses(m config.ProfileMatch, p identity.Person, connector string) []string {
+	if m.Empty() && m.Substrate.Empty() {
+		return []string{"match"}
 	}
+	var miss []string
+	agent := len(m.Agents) > 0
 	if s := m.Substrate; s != nil {
-		if len(s.Atespaces) > 0 || len(s.Templates) > 0 {
-			return false
-		}
+		agent = agent || len(s.Atespaces) > 0 || len(s.Templates) > 0
 		if len(s.Workloads) > 0 && (p.Kind != identity.PersonWorkload || !anyMatches(s.Workloads, func(v string) bool {
 			return substrateWorkloadMatches(v, p.Subject)
 		})) {
-			return false
+			miss = append(miss, "workloads")
 		}
-	}
-	if len(m.Connectors) > 0 && (connector == "" || !anyMatches(m.Connectors, func(v string) bool {
-		return config.NormalizeConnectorName(v) == connector
-	})) {
-		return false
 	}
 	if len(m.Groups) > 0 && !anyMatches(m.Groups, func(v string) bool {
 		for _, g := range p.Groups {
@@ -143,12 +149,99 @@ func substrateAssignmentSelects(m config.ProfileMatch, p identity.Person, connec
 		}
 		return false
 	}) {
-		return false
+		miss = append(miss, "groups")
 	}
 	if len(m.Users) > 0 && !anyMatches(m.Users, func(v string) bool { return substrateUserMatches(v, p) }) {
-		return false
+		miss = append(miss, "users")
 	}
-	return true
+	if len(m.Connectors) > 0 && (connector == "" || !anyMatches(m.Connectors, func(v string) bool {
+		return config.NormalizeConnectorName(v) == connector
+	})) {
+		miss = append(miss, "connectors")
+	}
+	if agent {
+		miss = append(miss, "agent")
+	}
+	return miss
+}
+
+// SubstrateAssignmentMiss is one profile_assignments entry that was
+// consulted for the caller and did not select it: its 1-based place in the
+// list and the selector keys that failed. Profile is set for an
+// administrator only; a person is not shown the profiles of assignments
+// that are not theirs.
+type SubstrateAssignmentMiss struct {
+	Assignment int
+	Profile    string
+	Missing    []string
+}
+
+// SubstrateProfileWhy says how a person's profile was chosen: which
+// assignment selected it, or that none did and default_profile applies, and
+// the assignments that were consulted first and selected nobody like them
+// (GAP-0653).
+type SubstrateProfileWhy struct {
+	// Profile is the profile the assignments give, "" when none applies.
+	Profile string
+	// DefaultProfile is guardrail.default_profile ("" when unset).
+	DefaultProfile string
+	// Source is "assignment" (Assignment holds its place), "default_profile"
+	// or "none".
+	Source     string
+	Assignment int
+	Unmatched  []SubstrateAssignmentMiss
+}
+
+// SubstrateProfileExplainer reports why a person gets the profile they get
+// (nil in SubstrateConfig: the explain answer leaves it out).
+type SubstrateProfileExplainer func(person identity.Person, admin bool) SubstrateProfileWhy
+
+// SubstrateProfileWhyFor is the explainer over the live configuration. It
+// follows substrateCallerProfile, with no connector named: an assignment
+// that names a connector or an agent shows as not selecting the caller.
+func SubstrateProfileWhyFor(cfg *config.Config) SubstrateProfileExplainer {
+	return func(p identity.Person, admin bool) SubstrateProfileWhy {
+		g := cfg.Guardrail
+		why := SubstrateProfileWhy{DefaultProfile: strings.TrimSpace(g.DefaultProfile)}
+		for i, a := range g.ProfileAssignments {
+			miss := substrateAssignmentMisses(a.Match, p, "")
+			if len(miss) == 0 {
+				why.Source, why.Assignment, why.Profile = "assignment", i+1, strings.TrimSpace(a.Profile)
+				return why
+			}
+			m := SubstrateAssignmentMiss{Assignment: i + 1, Missing: miss}
+			if admin {
+				m.Profile = strings.TrimSpace(a.Profile)
+			}
+			why.Unmatched = append(why.Unmatched, m)
+		}
+		why.Profile = why.DefaultProfile
+		why.Source = "none"
+		if why.DefaultProfile != "" {
+			why.Source = "default_profile"
+		}
+		return why
+	}
+}
+
+// View is the explain answer's fields for the why.
+func (w SubstrateProfileWhy) View() map[string]any {
+	out := map[string]any{"default_profile": w.DefaultProfile, "profile_source": w.Source, "effective_profile": w.Profile}
+	if w.Source == "assignment" {
+		out["matched_assignment"] = w.Assignment
+	}
+	if len(w.Unmatched) > 0 {
+		list := make([]map[string]any, 0, len(w.Unmatched))
+		for _, m := range w.Unmatched {
+			v := map[string]any{"assignment": m.Assignment, "did_not_select_you": m.Missing}
+			if m.Profile != "" {
+				v["profile"] = m.Profile
+			}
+			list = append(list, v)
+		}
+		out["unmatched_assignments"] = list
+	}
+	return out
 }
 
 // substrateUserMatches compares a users entry with the verified principal

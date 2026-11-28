@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // macOSTCCHomeFolders are the home folders macOS privacy protection (TCC)
@@ -134,7 +136,7 @@ func macOSResolvedScanRoot(root string) string {
 	if discoveryGOOS != "darwin" {
 		return ""
 	}
-	resolved, err := filepath.EvalSymlinks(root)
+	resolved, err := winpath.EvalLinks(root)
 	if err != nil || filepath.Clean(resolved) == filepath.Clean(root) {
 		return ""
 	}

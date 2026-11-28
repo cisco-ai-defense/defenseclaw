@@ -31,7 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/claudecodepath"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
-	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // ClaudeCodeConnector is the hook-only security surface for Claude
@@ -1329,7 +1329,11 @@ func claudeCodeHandlerTargetsCurrentRuntime(handler map[string]interface{}, opts
 			expectedCommand = defenseclawHookBinary()
 		}
 		args, ok := claudeCodeNativeExecArguments(handler)
-		if !ok || !pathidentity.Same(command, expectedCommand) {
+		// The installed hook binary by its own name or an 8.3 alias of it,
+		// never a junction, symbolic link or hard link elsewhere: the same
+		// rule machine-policy verify, status and the guardian apply
+		// (winpath.SameNamedFile, GAP-2175).
+		if !ok || !winpath.SameNamedFile(command, expectedCommand) {
 			return false
 		}
 		expectedArgs := []string{"hook", "--connector", "claudecode"}
@@ -1629,7 +1633,7 @@ func (c *ClaudeCodeConnector) ManagedHookPolicy(opts SetupOpts) ([]byte, error) 
 	if !opts.ManagedEnterprise {
 		return nil, fmt.Errorf("Claude Code managed hook policy requires managed enterprise setup") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
-	if err := validateClaudeCodeManagedFileDestination(); err != nil {
+	if err := validateClaudeCodeManagedFileDestination(opts); err != nil {
 		return nil, err
 	}
 	hookExecutable := strings.TrimSpace(opts.HookExecutable)
@@ -3063,14 +3067,15 @@ func isOwnedHookHandler(rawHook interface{}, hooksDir string) bool {
 			return true
 		}
 	}
-	command = posixHookCommandUnquoted(claudeCodeUnguardedHookCommand(command))
+	unguarded := claudeCodeUnguardedHookCommand(command)
+	command = posixHookCommandUnquoted(unguarded)
 	if _, ok := claudeCodePerUserNativeOwnerHome(hook, false); ok {
 		return true
 	}
 	if _, ok := claudeCodePerUserNativeOwnerHome(hook, true); ok {
 		return true
 	}
-	if hooksDir != "" && strings.HasPrefix(command, hooksDir+"/") {
+	if hooksDir != "" && (posixHookCommandInDir(command, hooksDir) || hookCommandInWindowsDir(unguarded, hooksDir)) {
 		return true
 	}
 	// Native Go hook commands (Windows) are not a file path under hooksDir
@@ -3318,19 +3323,26 @@ func verifyClaudeCodeHookGroups(
 			}
 			return fmt.Errorf("%s observational handler must be asynchronous", expected.eventType)
 		}
-		if fallback {
-			second := locations[1]
-			for _, owned := range []claudeCodeOwnedHookLocation{location, second} {
+		// A synchronous handler enforces policy: a shell setting changes how
+		// Claude Code starts it and a condition skips it. Refuse both on every
+		// owned handler of the event, the Windows launcher handler as well as
+		// the Unix direct and fallback pair (GAP-0322, GAP-2278). Setup writes
+		// neither key. An asynchronous observational handler is not checked.
+		if !expected.async {
+			for _, owned := range locations {
 				if _, exists := owned.handler["shell"]; exists {
-					return fmt.Errorf("%s direct handler has a shell setting", expected.eventType)
+					return fmt.Errorf("%s DefenseClaw handler has a shell setting", expected.eventType)
 				}
 				if condition, exists := owned.handler["if"]; exists {
 					value, ok := condition.(string)
 					if !ok || value != "" {
-						return fmt.Errorf("%s direct handler has a condition", expected.eventType)
+						return fmt.Errorf("%s DefenseClaw handler has a condition", expected.eventType)
 					}
 				}
 			}
+		}
+		if fallback {
+			second := locations[1]
 			fallbackArgs := append([]string{"fallback-guard-user-hook", expectedCommand}, expectedArgs[2:]...)
 			fallbackTimeout, timeoutOK := claudeCodeHookInteger(second.handler["timeout"])
 			fallbackType, _ := second.handler["type"].(string)
@@ -3400,32 +3412,8 @@ func removeOwnedClaudeCodeHooks(
 		return isOwnedHookHandler(hook, hooksDir) ||
 			hookUsesTrackedClaudeCodeCommand(hook, managedCommands) ||
 			hookUsesLegacyClaudeCodeNativeCommand(hook) ||
-			hookUsesForeignDefenseClawClaudeCodeScript(hook)
+			hookUsesForeignDefenseClawClaudeCodeScript(rawHook)
 	}), nil
-}
-
-// hookUsesForeignDefenseClawClaudeCodeScript recognizes a handler that runs
-// a DefenseClaw Claude Code hook Setup did not write at this path: the
-// generated hook of another DefenseClaw data dir (a settings.json copied from
-// another account or from dotfiles, whose script is often unreadable, so the
-// marker check cannot claim it; GAP-2031), or this install's handler after
-// its script path was edited by hand. A handler that still carries the exact
-// generated missing-script guard is DefenseClaw's whatever its path.
-// Setup then kept the dead entries next to its own and the edited one kept
-// failing every call (GAP-0907). Only Setup's and Teardown's removal pass
-// uses this.
-func hookUsesForeignDefenseClawClaudeCodeScript(rawHook interface{}) bool {
-	hook, ok := rawHook.(map[string]interface{})
-	if !ok {
-		return false
-	}
-	command, _ := hook["command"].(string)
-	unguarded := claudeCodeUnguardedHookCommand(command)
-	if unguarded != command {
-		return true
-	}
-	rest, edited := editedDefenseClawHookScript(unguarded, "claude-code-hook.sh")
-	return edited && rest == ""
 }
 
 func validateClaudeCodeHookEventShape(hookEventValue interface{}) error {

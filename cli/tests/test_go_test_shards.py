@@ -346,7 +346,7 @@ def test_linux_gateway_shards_keep_ordinary_tests_covered() -> None:
         "internal/gateway"
     ]
     files = discover_test_files(root / "internal/gateway")
-    shards = partition_test_files(files, 124, seconds)
+    shards = partition_test_files(files, 140, seconds)
     names = [name for _, file_names in files for name in file_names]
     assert check_exact_cover(shards, names) == []
     assert sum("TestAgentHookDispatch_BlockFiresOnBlock" in shard for shard in shards) == 1
@@ -373,7 +373,7 @@ def test_linux_gateway_shard_timeouts_fit_the_job() -> None:
         assert seconds[name] > 30, name
     files = discover_test_files(root / "internal/gateway")
     weigh = go_test_shards.test_weigher(seconds)
-    for index, shard in enumerate(partition_test_files(files, 124, seconds)):
+    for index, shard in enumerate(partition_test_files(files, 140, seconds)):
         planned = sum(weigh(name) for name in shard)
         # No shard reaches the cap: each keeps its 1.5x headroom.
         wanted = planned * go_test_shards.TIMEOUT_HEADROOM + go_test_shards.TIMEOUT_PAD_SECONDS
@@ -787,7 +787,10 @@ def test_windows_gateway_jobs_plan_inside_their_job_budget() -> None:
     # The gateway (gwN) and connector (cnN) parts have their own runners
     # since one runner running both took 14 to 18 minutes (Windows Native CI
     # 44948629287): 32 gateway shards plan at most 419 s (its largest test,
-    # the floor) and 16 connector shards at most 375 s.
+    # the floor) and 18 connector shards at most 335 s (GAP-2145: three
+    # GAP-1923 tests of 85 to 156 s each had no recorded time and all landed
+    # in cn4, 650 s of its 660 s; 16 shards planned on the refreshed times
+    # left 35% at best, 18 leave 43%).
     import json
 
     root = Path(__file__).resolve().parents[2]
@@ -808,6 +811,37 @@ def test_windows_gateway_jobs_plan_inside_their_job_budget() -> None:
         ]
         assert max(jobs) <= 480, (package, [round(seconds) for seconds in jobs])
         assert sum(jobs) / shard_count <= 420, (package, round(sum(jobs) / shard_count))
+        if kind == "connector":
+            # GAP-2145: each cnN runs its tests under go test -timeout=11m
+            # (660 s); the go test build and link take about 45 s more. Keep
+            # 35% of the timeout free, so a slow hosted runner (up to a third
+            # slower) still ends in time.
+            assert max(jobs) + 45 <= 0.65 * 11 * 60, [round(seconds) for seconds in jobs]
+
+
+def test_plain_gateway_shards_plan_on_plain_times() -> None:
+    # substrate-1 GAP-1107: the plain 16-shard gateway gate planned on the
+    # -race times of go-linux.json, where the GAP-0429 stream tests weigh
+    # 17-25 s but take 53-69 s plain (they run larger plain-only tables);
+    # the planner put seven of them in one shard, which ran 753 s at
+    # GOMAXPROCS=4 on dc-build-1 (three shards over go test's 600 s default
+    # timeout). Planned on go-linux-plain.json first, the same run measured
+    # every shard under 600 s. Keep the plain file recording those tests and
+    # the heaviest 16-shard plan inside 560 s (the 600 s default less room
+    # for the test binary's start and a slower box).
+    root = Path(__file__).resolve().parents[2]
+    plain, linux = (
+        json.loads((root / "scripts/test-timings" / name).read_text(encoding="utf-8"))
+        for name in ("go-linux-plain.json", "go-linux.json")
+    )
+    recorded = plain["tests"]["internal/gateway"]
+    for name in ("TestGAP0429StreamedSecretHeldPassthrough", "TestGAP0429StreamedSecretHeldRawForward"):
+        assert recorded[name] >= linux["tests"]["internal/gateway"][name], name
+    tests = package_test_seconds([plain, linux], "internal/gateway")
+    weigh = weigher_of(tests)
+    shards = partition_test_files(discover_test_files(root / "internal/gateway"), 16, tests)
+    jobs = [sum(weigh(name) for name in names) for names in shards]
+    assert max(jobs) <= 560, [round(seconds) for seconds in jobs]
 
 
 def test_test_timing_files_have_no_duplicate_keys() -> None:

@@ -57,8 +57,14 @@ func gapNF8ReviewRows() []gapNF6ParityRow {
 			want = "alert"
 		case "U5":
 			want = "allow"
-		case "U7", "U8", "U9":
+		case "U7", "U8":
 			want, noCopy = "allow", "allow"
+		case "U9":
+			// The laptop file is the one-entry fallback document, not what
+			// Setup writes: without a snapshot the actor requires Setup's
+			// full hook set (substrate-1 GAP-0615; the real-setup row is
+			// TestGAP0615GuestHookConfigParity C1_control_Write_keeps_all_hooks).
+			want, noCopy = "allow", "block"
 		}
 		result = append(result, gapNF6ParityRow{name: "rvnf7 " + r.name, target: r.rel, file: r.file, tool: r.tool, input: r.input, want: want, noCopy: noCopy})
 	}

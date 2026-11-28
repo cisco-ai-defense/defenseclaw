@@ -43,7 +43,7 @@ Install and configure OpenShell sandboxes on an Apple-silicon Mac. Each sandbox 
 | Docker Desktop 29.8 or newer, running | Start it once on your own account first. It asks for Rosetta, local-network access and an administrator password. Turn on **Settings → Resources → Network → Enable host networking**, then restart the gateway (`defenseclaw-gateway restart`). |
 | Disk | At least 13 GiB free in the VM volume (24 GiB recommended). The first image build downloads about 3 GB. |
 
-OpenShell 0.1.6 or newer is required. Setup installs it, or upgrades an older one, after asking. If another account owns Homebrew, setup stops and names the owner and folder. Ask them for write access, or install a Homebrew of your own in your home directory ([below](#a-homebrew-that-belongs-to-another-account)). On a managed Mac an administrator provides OpenShell: [Sandboxes on managed computers](/docs/enterprise/sandboxes).
+OpenShell 0.1.6 or newer is required, and MicroVM sandboxes start on a Mac with OpenShell 0.1.9 or newer, and setup offers them as a choice (Docker stays the default). MicroVM sandboxes on a Mac are a Preview. Setup installs OpenShell, or upgrades an older one, after asking. If another account owns Homebrew, setup stops and names the owner and folder. Ask them for write access, or install a Homebrew of your own in your home directory ([below](#a-homebrew-that-belongs-to-another-account)). On a managed Mac an administrator provides OpenShell: [Sandboxes on managed computers](/docs/enterprise/sandboxes).
 
 ### A Homebrew that belongs to another account
 
@@ -65,12 +65,14 @@ defenseclaw sandbox setup
 DefenseClaw sandbox setup
   Checking this machine…  ✓ darwin/arm64  ✓ Landlock (MicroVM)  ✓ Docker 29.1.5  ✗ OpenShell and its MicroVM driver not installed
 Install OpenShell … with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] y
-Run sandboxes in OpenShell MicroVMs? On a Mac, MicroVMs do not start until OpenShell fixes its MicroVM driver; Docker Desktop 29.8 or newer runs sandboxes on the docker driver (the run-time Landlock check decides). [y/N] y
+Run sandboxes in OpenShell MicroVMs? Each sandbox gets its own kernel and disk (sets compute_driver = "vm" in ~/.config/openshell/gateway.toml and restarts the gateway; OpenShell calls this driver experimental, and sandboxes made on the docker driver cannot start after the switch) [y/N] y
   ✓ gateway configured and restarted: it runs sandboxes in OpenShell MicroVMs
   every run works on a copy (the MicroVM driver mounts no host folders); `defenseclaw sandbox pull NAME --apply` brings the changes back
 
   ✓ Done →  cd <project> && defenseclaw sandbox run claude
 ```
+
+Setup asks the MicroVM question on every Mac, also when the OpenShell gateway already runs the `vm` driver (the OpenShell default on a fresh install). The default answer, no, and `--yes` keep sandboxes on Docker: setup sets `compute_driver = "docker"` and restarts the gateway, and never writes `compute_driver = "vm"`. With a sandbox on the gateway, `--yes` does not restart it; add `--restart-gateway`. Before it moves a gateway off `vm`, setup checks this Mac for the Docker driver, as it does for a gateway already on Docker: Landlock in Docker Desktop's Linux VM (it offers to download the base image to check it in), host networking, and file sharing of your home folder when sandboxes mount folders. With host networking or file sharing off it shows the setting to change and, on a terminal, checks again once you change it; otherwise setup ends with "not ready for sandboxes yet".
 
 Setup installs OpenShell and `e2fsprogs`, switches the gateway to MicroVMs (a backed-up change to its `gateway.toml`, one restart), turns off OpenShell's usage telemetry, and builds the harness images. The MicroVM settings apply to every sandbox on the gateway. Flags are in the [sandbox CLI reference](/docs/reference/sandbox-cli).
 
@@ -82,14 +84,14 @@ You can also run setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenSh
   cwd="~/code/myapp"
   speed={1.6}
   height={620}
-  ariaLabel="Animated terminal replay of defenseclaw sandbox setup on an Apple-silicon Mac whose shared Homebrew belongs to another account: setup stops and names the owner, then a Homebrew of the user's own installs OpenShell 0.1.6, setup switches the gateway to MicroVMs, and the Claude Code image is built."
-  caption="Replay recorded on DefenseClaw 1.0.4 on a Mac, with the OpenShell version updated to the 1.0.10 pin; Docker Desktop was running in the account's session. It shows MicroVMs as the default; as the setup output above says, MicroVMs do not currently start on a Mac, and Docker Desktop 29.8 or newer runs sandboxes on the docker driver. First run: the shared Homebrew at /opt/homebrew belongs to another account, so setup stops before installing. Second run, after installing Homebrew into `~/homebrew` and putting it first on `PATH`: the install plan, then the gateway changes, the harnesses and the image build (Homebrew output trimmed)."
+  ariaLabel="Animated terminal replay of defenseclaw sandbox setup on an Apple-silicon Mac whose shared Homebrew belongs to another account: setup stops and names the owner, then a Homebrew of the user's own installs OpenShell 0.1.9, setup switches the gateway to MicroVMs, and the Claude Code image is built."
+  caption="Replay on a Mac with Docker Desktop running in the account's session. First run: the shared Homebrew at /opt/homebrew belongs to another account, so setup stops before installing. Second run, after installing Homebrew into `~/homebrew` and putting it first on `PATH`: the install plan, then the gateway changes, the harnesses and the image build (Homebrew output trimmed)."
   frames={[
     { type: "cmd", text: "defenseclaw sandbox setup", pauseMs: 700 },
     { type: "out", text: "DefenseClaw sandbox setup" },
     { type: "out", text: "  Checking this machine…  ✓ darwin/arm64  ⚠ Landlock not checked  ✓ Docker 29.8.2  ✗ OpenShell and its MicroVM driver not installed" },
-    { type: "prompt", text: "Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. (sets compute_driver = \"vm\" in the gateway's gateway.toml and restarts the gateway; OpenShell calls this driver experimental) [Y/n] ", reply: "", pauseMs: 800 },
-    { type: "prompt", text: "Install OpenShell 0.1.6 with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] ", reply: "y", pauseMs: 800 },
+    { type: "prompt", text: "Run sandboxes in OpenShell MicroVMs? Each sandbox gets its own kernel and disk (sets compute_driver = \"vm\" in the gateway's gateway.toml and restarts the gateway; OpenShell calls this driver experimental, and sandboxes made on the docker driver cannot start after the switch) [y/N] ", reply: "y", pauseMs: 800 },
+    { type: "prompt", text: "Install OpenShell 0.1.9 with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] ", reply: "y", pauseMs: 800 },
     { type: "out", text: "✗ install OpenShell: this account cannot write to /opt/homebrew/Library/Taps, which ec2-user owns, so Homebrew at /opt/homebrew cannot install the nvidia/openshell formula as this account" },
     { type: "out", text: "→ Homebrew installs formulas only as the account that owns its prefix (ec2-user): install OpenShell from that account (`defenseclaw sandbox setup --install-openshell` there), or have it give this account the prefix, then run `defenseclaw sandbox setup` here" },
     { type: "spacer", pauseMs: 900 },
@@ -98,11 +100,11 @@ You can also run setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenSh
     { type: "cmd", text: "defenseclaw sandbox setup", pauseMs: 700 },
     { type: "out", text: "DefenseClaw sandbox setup" },
     { type: "out", text: "  Checking this machine…  ✓ darwin/arm64  ⚠ Landlock not checked  ✓ Docker 29.8.2  ✗ OpenShell and its MicroVM driver not installed" },
-    { type: "prompt", text: "Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. (sets compute_driver = \"vm\" in the gateway's gateway.toml and restarts the gateway; OpenShell calls this driver experimental) [Y/n] ", reply: "", pauseMs: 800 },
-    { type: "prompt", text: "Install OpenShell 0.1.6 with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] ", reply: "y", pauseMs: 800 },
+    { type: "prompt", text: "Run sandboxes in OpenShell MicroVMs? Each sandbox gets its own kernel and disk (sets compute_driver = \"vm\" in the gateway's gateway.toml and restarts the gateway; OpenShell calls this driver experimental, and sandboxes made on the docker driver cannot start after the switch) [y/N] ", reply: "y", pauseMs: 800 },
+    { type: "prompt", text: "Install OpenShell 0.1.9 with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] ", reply: "y", pauseMs: 800 },
     { type: "out", text: "OpenShell install plan" },
-    { type: "out", text: "  Release     v0.1.6 (NVIDIA OpenShell upstream installer)" },
-    { type: "out", text: "  Script      https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.6/install.sh" },
+    { type: "out", text: "  Release     v0.1.9 (NVIDIA OpenShell upstream installer)" },
+    { type: "out", text: "  Script      https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.9/install.sh" },
     { type: "out", text: "  SHA-256     7bf6706741b8b59c1b61e0c47030f0a34fefba6cee3c74cd52638cbf7cdc3655 (verified)" },
     { type: "out", text: "  Privileges  none: the script runs Homebrew as you, without sudo" },
     { type: "out", text: "  Changes     Homebrew may update itself and its taps first (its auto-update, when due; HOMEBREW_NO_AUTO_UPDATE=1 skips it)" },
@@ -113,9 +115,9 @@ You can also run setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenSh
     { type: "warn", text: "! Homebrew has no prebuilt packages for that prefix, so it may build dependencies from source, which can take many minutes (it prints its progress)" },
     { type: "prompt", text: "Run this plan? [y/N] ", reply: "y", pauseMs: 800 },
     { type: "dim", text: "... (Homebrew output trimmed) ..." },
-    { type: "dim", text: "🍺  ~/homebrew/Cellar/openshell/0.1.6: 10 files, 169.9MB, built in 4 seconds" },
+    { type: "dim", text: "🍺  ~/homebrew/Cellar/openshell/0.1.9: 10 files, 169.9MB, built in 4 seconds" },
     { type: "dim", text: "openshell: openshell status reports connected" },
-    { type: "ok", text: "  ✓ OpenShell 0.1.6 installed, gateway running" },
+    { type: "ok", text: "  ✓ OpenShell 0.1.9 installed, gateway running" },
     { type: "prompt", text: "Disable OpenShell's anonymous usage telemetry? (edits ~/.config/openshell/gateway.env, which the Homebrew service reads, and restarts the OpenShell gateway; no sandbox runs on it now) [Y/n] ", reply: "", pauseMs: 800 },
     { type: "out", text: "  OpenShell gateway configuration changes" },
     { type: "out", text: "    edit ~/homebrew/var/openshell/gateway.toml (a timestamped backup is kept)" },
@@ -269,7 +271,7 @@ Run `defenseclaw sandbox doctor` first. These are the macOS-only failures it rep
 
 **Cause:** the gateway runs the Docker driver, and the kernel of Docker Desktop's Linux VM has no Landlock. Older Docker Desktop releases (kernel 6.12-linuxkit) have none. Docker Desktop 29.8 (kernel 7.0.14-linuxkit) has Landlock ABI 8. DefenseClaw probes the VM kernel and refuses only a VM without Landlock, or one it cannot check, before it builds anything.
 
-**Fix:** update Docker Desktop to 29.8 or newer and turn on **Settings → Resources → Network → Enable host networking** (the OpenShell supervisor needs it). With OpenShell 0.1.6, MicroVMs do not start on a Mac ([MicroVM create is refused](/docs/sandboxes/guide#microvm-create-is-refused-on-linux-with-kvm)), so Docker is the way to run sandboxes on a Mac until a fixed OpenShell release is supported. With a fixed OpenShell release, run `defenseclaw sandbox setup` (or `sandbox doctor --fix`) and answer yes to the MicroVM question. Sandboxes made on the Docker driver cannot start on MicroVMs: setup lists them first, and after the switch they can only be deleted.
+**Fix:** update Docker Desktop to 29.8 or newer and turn on **Settings → Resources → Network → Enable host networking** (the OpenShell supervisor needs it). With OpenShell 0.1.6 to 0.1.8, MicroVMs do not start on a Mac ([MicroVM create is refused](/docs/sandboxes/guide#microvm-create-is-refused-on-linux-with-kvm)), and setup asks the MicroVM question with no as the default, so Docker is the way to run sandboxes there. From OpenShell 0.1.9 MicroVMs start on a Mac and you can choose them at the setup question: run `defenseclaw sandbox setup --install-openshell` to upgrade (the upgrade cannot be undone), then answer yes to the MicroVM question. The default answer, and `--yes`, still keep sandboxes on Docker. Sandboxes made on the Docker driver cannot start on MicroVMs: setup lists them first, and after the switch they can only be deleted.
 
 **Check:** the **Gateway compute driver** row reads `docker`, the driver this Mac is configured for. It reads `vm` only after you switch to MicroVMs.
 

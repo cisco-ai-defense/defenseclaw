@@ -1183,7 +1183,7 @@ func TestAlertAcknowledgementRetainedEventReplayControlsFailClosed(t *testing.T)
 }
 
 func TestAlertAcknowledgementLegacyACKBecomesBaselineWithoutModernAction(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "legacy.db"))
+	store, err := NewStore(realMigrationPath(filepath.Join(t.TempDir(), "legacy.db")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1456,7 +1456,7 @@ func appendAlertEvidenceForTest(
 }
 
 func TestAlertAcknowledgementMigrationIsAppendOnlyAndPartialSchemaSafe(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "partial.db"))
+	store, err := NewStore(realMigrationPath(filepath.Join(t.TempDir(), "partial.db")))
 	if err != nil {
 		t.Fatal(err)
 	}

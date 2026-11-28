@@ -18,6 +18,7 @@ package connector
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -328,6 +329,26 @@ func editedDefenseClawHookCommand(command, scriptName string) bool {
 	return copiedDefenseClawHookCommand(command, scriptName)
 }
 
+// editedDefenseClawHookCommandByAnyPath is editedDefenseClawHookCommand that
+// also reads a script word named by a Windows path (a drive, UNC, \\?\ or
+// \\.\ path, either separator, case folded: windowsHookScriptCommandAsPOSIX).
+// A hook config copied from another Windows account or from dotfiles names
+// DefenseClaw's script that way, and the Codex, Kiro, Copilot, Hermes, Cursor
+// and Devin removal passes kept the copy next to the working set (GAP-1923),
+// as Claude Code's did before GAP-1909. Only the script-shape rule reads the
+// Windows form: the word must lie under a .defenseclaw directory, or be the
+// exact script name under an edited data directory, so a user's script in
+// another folder stays. The doctor's rule (hookDocumentHoldsEditedEntry),
+// shared with cli/defenseclaw/hook_integrity.py, reads the Windows form too,
+// narrowed to what each connector's repair removes (editedHookEntryClaimed).
+func editedDefenseClawHookCommandByAnyPath(command, scriptName string) bool {
+	if editedDefenseClawHookCommand(command, scriptName) {
+		return true
+	}
+	rest, ok := editedDefenseClawHookScript(windowsHookScriptCommandAsPOSIX(command), scriptName)
+	return ok && (rest == "" || defenseClawHookBinding(rest))
+}
+
 // defenseClawHookBinding reports whether rest, the text after a hook
 // command's script word, starts with DefenseClaw's --event or
 // --hook-surface binding.
@@ -400,21 +421,22 @@ func defenseClawHookFile(name string) bool {
 	return bytes.Contains(head[:n], []byte(hookSchemaVersionMarker))
 }
 
-// editedDefenseClawHookHandler applies editedDefenseClawHookCommand to one
-// hook handler: its command or bash field, or the command of a Kiro action.
+// editedDefenseClawHookHandler applies editedDefenseClawHookCommandByAnyPath
+// to one hook handler: its command or bash field, or the command of a Kiro
+// action. Only removal passes use it.
 func editedDefenseClawHookHandler(raw interface{}, scriptName string) bool {
 	entry, ok := raw.(map[string]interface{})
 	if !ok {
 		return false
 	}
 	for _, key := range []string{"command", "bash"} {
-		if command, _ := entry[key].(string); editedDefenseClawHookCommand(command, scriptName) {
+		if command, _ := entry[key].(string); editedDefenseClawHookCommandByAnyPath(command, scriptName) {
 			return true
 		}
 	}
 	action, _ := entry["action"].(map[string]interface{})
 	command, _ := action["command"].(string)
-	return editedDefenseClawHookCommand(command, scriptName)
+	return editedDefenseClawHookCommandByAnyPath(command, scriptName)
 }
 
 // editedDefenseClawHookEntry is editedDefenseClawHookHandler for a handler or
@@ -434,7 +456,9 @@ func editedDefenseClawHookEntry(raw interface{}, scriptName string) bool {
 }
 
 // hookScriptBaseName is the script name editedDefenseClawHookEntry matches
-// for a hook script path Setup writes.
+// for a hook script path Setup writes. A Windows hook command (a launcher,
+// adapter or bridge) is not such a path, so the Hermes, Copilot and Kiro
+// passes, whose command is one there, name their script instead (GAP-1942).
 func hookScriptBaseName(hookScript string) string {
 	return path.Base(filepath.ToSlash(strings.TrimSpace(hookScript)))
 }
@@ -612,6 +636,22 @@ func PinNativeHookExecutableForTest(path string) func() {
 		defenseclawHookBinaryOverride = previous
 		defenseclawHookBinaryOverrideMu.Unlock()
 	}
+}
+
+// PinCodexPolicyInspectorForTest makes Codex setup read an unrestricted
+// effective policy named source instead of starting the selected Codex binary,
+// and returns a restore function. Cross-package tests use it on Windows, where
+// an unmanaged Codex Setup otherwise needs a selection receipt and a runnable
+// codex.exe app-server. It panics unless the process is a test binary.
+func PinCodexPolicyInspectorForTest(source string) func() {
+	if flag.Lookup("test.v") == nil {
+		panic("connector: PinCodexPolicyInspectorForTest is test-only")
+	}
+	previous := codexPolicyInspector
+	codexPolicyInspector = func(context.Context, SetupOpts) (codexEffectivePolicy, error) {
+		return codexEffectivePolicy{Source: source}, nil
+	}
+	return func() { codexPolicyInspector = previous }
 }
 
 type nativeWindowsInstallState struct {

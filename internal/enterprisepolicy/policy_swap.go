@@ -27,6 +27,9 @@ type policyFileBase struct {
 	data   []byte
 	// owned marks a reserved drop-in that only DefenseClaw publishes.
 	owned bool
+	// link is the target of the symbolic link at the path that the write
+	// replaces (Unix only): the file is still that link, unfollowed.
+	link string
 }
 
 // policyFileSwapHook runs just before a policy file write or removal
@@ -42,9 +45,17 @@ func policyFileChanged(path string) error {
 // and metadata alike (GAP-0896, GAP-0908). Otherwise it returns
 // errPolicyFileChanged and leaves the newer file in place.
 func writePolicyFileOver(opts Options, path string, base policyFileBase, data []byte) ([]string, error) {
-	return writePolicyFileWith(opts, path, func(path string) error {
-		return atomicWriteOver(opts, path, base, data)
-	})
+	write := func(path string) error { return atomicWriteOver(opts, path, base, data) }
+	if base.link == "" {
+		return writePolicyFileWith(opts, path, write)
+	}
+	// The rename replaces the link itself, never what it points at.
+	path = platformPath(opts, path)
+	created, err := ensurePolicyDir(opts, dirFor(opts, path))
+	if err != nil {
+		return created, err
+	}
+	return created, write(path)
 }
 
 // removePolicyFileOver is removePolicyFile for a shared file: it deletes path

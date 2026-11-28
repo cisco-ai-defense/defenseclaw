@@ -34,11 +34,17 @@ const (
 	RouteStatus = "status"
 	RouteExec   = "exec"
 	RouteFiles  = "files"
+	// RoutePort (port/N) and RouteMCP (mcp/NAME) are the stream routes
+	// (B3.2, B3.3): one WebSocket each, under a dc.scope token for that
+	// stream only. The gateway opens them only to a relay whose signed kit
+	// names the stream (kit.StreamPort, kit.StreamMCP).
+	RoutePort = "port"
+	RouteMCP  = "mcp"
 )
 
 // AttachRoutes are the first path segments the gateway's attach route
 // passes through to the relay (anything below them goes along).
-var AttachRoutes = []string{RouteWS, RoutePoll, RouteTask, RouteStatus, RouteExec, RouteFiles}
+var AttachRoutes = []string{RouteWS, RoutePoll, RouteTask, RouteStatus, RouteExec, RouteFiles, RoutePort, RouteMCP}
 
 // Path returns the relay's own path of route (route may carry more
 // segments, as "poll/<id>").

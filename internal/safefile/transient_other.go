@@ -21,3 +21,6 @@ func RetryPublishedRead(read func() error) error { return RetryTransientRead(rea
 // A non-Windows rename does not drop the name, but validation can still
 // observe the old and new file identities in one read attempt.
 func transientReadError(err error) bool { return errors.Is(err, ErrReadIdentityChanged) }
+
+// A rename here never drops the name, so a missing name is absence.
+func nameMissing(error) bool { return false }

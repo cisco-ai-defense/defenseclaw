@@ -24,7 +24,7 @@ import (
 // allow on rel too (rel-1-0-10:GAP-1323). An ordinary program behind the same
 // chains stays allowed.
 func TestGAP1321AlertLevelProgramBehindWrapperChainsKeepsTheProgramVerdict(t *testing.T) {
-	env := boundedLaneEnv(t)
+	env := boundedLaneEnvAnyOS(t)
 	limit := actionfacts.InlineChainWrappers
 	nohup := func(count int) string { return strings.Repeat("nohup ", count) }
 	chains := []struct{ id, prefix string }{

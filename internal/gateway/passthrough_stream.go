@@ -4,6 +4,8 @@
 package gateway
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
@@ -60,6 +63,9 @@ type passthroughStream struct {
 	bedrock        *bedrockEventStreamText
 	// ndjson: a native Ollama stream, one JSON event per line (GAP-0370).
 	ndjson bool
+	// eventTyped: the last event eventContent read added typed model text
+	// (rel-1-0-10:GAP-2224).
+	eventTyped bool
 }
 
 // snapshotEvent reports an event whose content repeats what earlier events
@@ -80,6 +86,7 @@ func snapshotEvent(typ string) bool {
 // It returns why the event can be read two ways (a repeated or differently
 // spelled key), "" when it cannot.
 func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *responseText, model *string) string {
+	s.eventTyped = false
 	if !ev.HasData {
 		return ""
 	}
@@ -111,7 +118,18 @@ func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *
 		segs = kept
 	}
 	acc.AddAll(withWalkerPieces(typed, segs))
+	s.eventTyped = piecesHaveText(typed)
 	return sc.Ambiguous
+}
+
+// piecesHaveText reports a piece with model text.
+func piecesHaveText(ps []responsePiece) bool {
+	for _, p := range ps {
+		if p.text != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *passthroughStream) copyHeaders() {
@@ -130,7 +148,7 @@ func (s *passthroughStream) copyHeaders() {
 
 // copyRest forwards what is left of src without inspection (the fail mode
 // of an OSS install, after the alert).
-func (s *passthroughStream) copyRest(src io.Reader) {
+func (s *passthroughStream) copyRest(src io.Reader, tw *clientWriteErrWriter) {
 	flusher, _ := s.w.(http.Flusher)
 	buf := make([]byte, 4096)
 	for {
@@ -142,6 +160,10 @@ func (s *passthroughStream) copyRest(src io.Reader) {
 			}
 		}
 		if err != nil {
+			if err != io.EOF {
+				// A cut here is of unknown cost like any other (GAP-1112).
+				tw.endUsage(s.r.Context(), err)
+			}
 			return
 		}
 	}
@@ -155,10 +177,74 @@ type streamRead struct {
 	panic any
 }
 
+// clientWriteErrWriter hands a failed write to the agent to the usage record
+// of the call as modelusage.ErrClientGone: the agent went away, the
+// upstream did not fail (GAP-1112).
+type clientWriteErrWriter struct {
+	http.ResponseWriter
+	// final: the stream's final event reached the agent (GAP-1121).
+	final bool
+}
+
+func (c *clientWriteErrWriter) Write(b []byte) (int, error) {
+	n, err := c.ResponseWriter.Write(b)
+	if err != nil {
+		setUsageEndErr(c.ResponseWriter, fmt.Errorf("%w: %v", modelusage.ErrClientGone, err))
+	} else if !c.final && finalStreamEvent(b) {
+		c.final = true
+	}
+	return n, err
+}
+
+// finalStreamEvent reports bytes written to the agent that carry the final
+// event of a stream: the OpenAI [DONE] line, an Anthropic message_stop, an
+// OpenAI Responses response.completed, an Ollama done object. Text inside a
+// JSON string cannot match: its quotes are escaped and its line ends are
+// \n, never a real line end.
+func finalStreamEvent(b []byte) bool {
+	return bytes.HasPrefix(b, []byte("data: [DONE]")) || bytes.Contains(b, []byte("\ndata: [DONE]")) ||
+		bytes.HasPrefix(b, []byte("event: message_stop")) || bytes.Contains(b, []byte("\nevent: message_stop")) ||
+		bytes.Contains(b, []byte(`"type":"message_stop"`)) || bytes.Contains(b, []byte(`"type": "message_stop"`)) ||
+		bytes.Contains(b, []byte(`"type":"response.completed"`)) || bytes.Contains(b, []byte(`"type": "response.completed"`)) ||
+		bytes.Contains(b, []byte(`"done":true`)) || bytes.Contains(b, []byte(`"done": true`))
+}
+
+// endUsage ends the call's usage record with why the stream stopped: the
+// agent's context done is a client gone, anything else the upstream's read
+// error. Once the final event reached the agent the call is whole, and
+// neither marks it cut.
+func (c *clientWriteErrWriter) endUsage(ctx context.Context, readErr error) {
+	if c.final {
+		return
+	}
+	if ctx.Err() != nil {
+		setUsageEndErr(c.ResponseWriter, fmt.Errorf("%w: %v", modelusage.ErrClientGone, ctx.Err()))
+		return
+	}
+	setUsageEndErr(c.ResponseWriter, readErr)
+}
+
+func (c *clientWriteErrWriter) Flush() {
+	if f, ok := c.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (c *clientWriteErrWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }
+
 func (s *passthroughStream) run() {
+	// The stream outcome reaches the usage record (GAP-1112): a write to the
+	// agent that fails, the agent's context ending, and an upstream body that
+	// breaks off (below) end the call with that error, so a stream cut after
+	// the provider began answering is of unknown cost.
+	tw := &clientWriteErrWriter{ResponseWriter: s.w}
+	s.w = tw
 	p, w, r, resp, mode, label := s.p, s.w, s.r, s.resp, s.mode, s.label
 	ctx := r.Context()
 	blockedReply := func(msg string) {
+		// The upstream answered: a block from here on cuts the provider's
+		// answer (substrate-1:GAP-1119).
+		usageStreamBlocked(w)
 		out := w
 		if s.bedrock != nil {
 			// The reply headers are out already: the block frames follow them.
@@ -179,7 +265,7 @@ func (s *passthroughStream) run() {
 				return
 			}
 			s.copyHeaders()
-			s.copyRest(resp.Body)
+			s.copyRest(resp.Body, tw)
 			return
 		}
 		// Deferred first, so it runs after the reader goroutine has ended.
@@ -197,6 +283,9 @@ func (s *passthroughStream) run() {
 		flusher.Flush()
 	}
 	var accumulated responseText
+	// The mid-stream checks of this stream share what they read of the
+	// text so far (midStreamScanState, GAP-0515).
+	midCtx := withMidStreamScanState(ctx, newMidStreamScanState())
 	streamResponseModel := ""
 	lastScanLen := 0
 	// lastFullScanLen is the text the last full mid-stream check read: the
@@ -215,9 +304,20 @@ func (s *passthroughStream) run() {
 		sseCalls = newSSEToolCalls(p.maxBodyValues())
 	}
 	framer := &sseFramer{ndjson: s.ndjson}
-	var bedrockPending []byte // the start of a Bedrock frame whose end has not come
-	var queue [][]byte        // events read and not yet sent
-	var queueAt []time.Time   // when each event of the queue was read
+	// tail is the wire shape of the block tail; sent is what the agent got
+	// of the content blocks, from the marks of the events sent (GAP-1206).
+	tail := streamTailOf(s.path, s.provider, s.ndjson)
+	sent := newStreamSent()
+	var bedrockPending []byte  // the start of a Bedrock frame whose end has not come
+	var queue [][]byte         // events read and not yet sent
+	var queueAt []time.Time    // when each event of the queue was read
+	var queueMark []streamMark // the content blocks each event of the queue opens or closes
+	var queueText []int        // the text length once each event of the queue was read (GAP-1306)
+	var queueUntexted []int    // the size of each event of the queue that added no typed model text (GAP-2224)
+	// heldCut: the held bound behind an open token or digit run was passed;
+	// only the first heldCut events may go out, the rest holds the run
+	// (GAP-1306). -1: no cut.
+	heldCut := -1
 	queueBytes := 0
 	relN := 0      // the first relN events of the queue are not held behind an open tool call
 	heldBytes := 0 // bytes of the events held behind an open tool call
@@ -261,19 +361,24 @@ func (s *passthroughStream) run() {
 	maskedRuns := map[int][2]int{}
 
 	writeQueue := func() {
-		if relN == 0 {
+		n := relN
+		if heldCut >= 0 {
+			n, heldCut = min(n, heldCut), -1
+		}
+		if n == 0 {
 			return
 		}
-		for _, ev := range queue[:relN] {
+		for i, ev := range queue[:n] {
 			_, _ = w.Write(ev)
 			queueBytes -= len(ev)
 			released += len(ev)
+			sent.add(queueMark[i])
 		}
-		queue, queueAt = queue[relN:], queueAt[relN:]
+		queue, queueAt, queueMark, queueText, queueUntexted = queue[n:], queueAt[n:], queueMark[n:], queueText[n:], queueUntexted[n:]
 		if len(queue) == 0 {
-			queue, queueAt = nil, nil
+			queue, queueAt, queueMark, queueText, queueUntexted = nil, nil, nil, nil, nil
 		}
-		relN = 0
+		relN -= n
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -299,16 +404,18 @@ func (s *passthroughStream) run() {
 	}
 	// endBlock ends a refused stream: the whole block reply when nothing was
 	// sent yet, else the block as the last assistant text of the stream
-	// under way. Held events are dropped.
+	// under way, in its own shape after the last content block the agent
+	// got (GAP-1206). Held events are dropped.
 	endBlock := func() {
+		usageStreamBlocked(w)
 		switch {
 		case released == 0:
 			blockedReply(sseBlockMsg)
 		case sseCalls != nil:
-			sseCalls.writeSSEBlockTail(w, s.model, sseBlockMsg)
+			writeStreamBlockTail(w, tail, sseCalls, sent, s.model, sseBlockMsg)
 		default:
 			hw := &headersSentWriter{ResponseWriter: w}
-			s.bedrock.writeBlockTail(hw, sseBlockMsg)
+			s.bedrock.writeBlockTail(hw, sent.bedrock+1, sseBlockMsg)
 			hw.Flush()
 		}
 	}
@@ -363,7 +470,7 @@ func (s *passthroughStream) run() {
 		if accumulated.Len() <= lastScanLen {
 			return true
 		}
-		midVerdict, ranFull := p.inspectStreamText(ctx, accumulated.String(), label, mode, full)
+		midVerdict, ranFull := p.inspectStreamText(midCtx, accumulated.CheckText(), label, mode, full)
 		p.resolveConfirm(ctx, r, midVerdict, "completion", label, mode)
 		if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 			fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: %d bytes already forwarded to client, %d held back)\n",
@@ -393,15 +500,74 @@ func (s *passthroughStream) run() {
 		secretOpen, secretKey = false, false
 		return boundHit(c, why)
 	}
+	// runHeldBound decides the held bound behind an open token or digit run
+	// once per call (rel-1-0-10:GAP-1767, LEAD ruling 2026-11-26 21:00Z): past
+	// streamSecretMaxHeld the text read so far is checked and the unknown tier
+	// of the pack decides, so a reply that keeps a run open at every piece end
+	// (a numeric table, GAP-1265) gets the TRUNCATED verdict, never none.
+	// release: the pieces from the first byte of the run are over the bound
+	// themselves, so the run is given up and goes out once decided; otherwise
+	// the pieces before it go out and the run stays held for its own check
+	// (GAP-1306). A later pass of the same call is not decided again.
+	runHeldHit := false
+	runHeldBound := func(release bool) bool {
+		if runHeldHit {
+			// Not decided again, but a run given up still gets the full
+			// check of the text read so far before it goes out, as at the
+			// parent (CHK-RF-1478B N1).
+			if release {
+				if !scanText(true) {
+					return false
+				}
+				accumulated.ReleaseOpenSecret()
+				secretOpen, secretKey = false, false
+			}
+			return true
+		}
+		runHeldHit = true
+		if release {
+			return secretBound(bounded.Bytes, streamRunHeldWhy)
+		}
+		return scanText(true) && boundHit(bounded.Bytes, streamRunHeldWhy)
+	}
+	// maskParkedReasoning preserves an unresolved reasoning run without
+	// holding unrelated answer events behind it (GAP-2170). The existing
+	// lane-aware mask validator refuses an event it cannot rewrite safely.
+	maskParkedReasoning := func() bool {
+		// Anthropic and Bedrock sign thinking blocks. A masked byte with the
+		// original signature breaks the next tool turn. Only OpenAI reasoning
+		// is unsigned, so signed providers keep the original queued hold.
+		if s.provider != "openai" || relN == 0 {
+			return false
+		}
+		runs := accumulated.ParkedReasoningRuns()
+		masked, ok := s.maskHeld(queue[:relN], relN, runs, maskedRuns)
+		if !ok {
+			return false
+		}
+		for i, ev := range masked {
+			queueBytes += len(ev) - len(queue[i])
+			queue[i] = ev
+		}
+		for _, run := range runs {
+			maskedRuns[run.lane] = [2]int{run.start, run.start + len(run.text)}
+		}
+		return true
+	}
 	// secretWait reports that nothing may be sent now: the text ends inside
 	// an open secret (rel-1-0-10:GAP-0429, stream_secret_hold.go). ok is
 	// false when a bound on it blocked.
 	secretWait := func() (wait, ok bool) {
+		heldCut = -1
 		if !tailHold {
 			return false, true
 		}
 		o := accumulated.OpenSecret()
 		secretOpen, secretKey = o.open, o.pem
+		if o.reasoningOnly && maskParkedReasoning() {
+			secretOpen = false
+			return false, true
+		}
 		switch {
 		case !o.open:
 			return false, true
@@ -410,10 +576,41 @@ func (s *passthroughStream) run() {
 		case queueBytes > streamSecretMaxHeld && o.pem:
 			return false, secretBound(bounded.Bytes, fmt.Sprintf("over %d reply stream bytes held behind an open secret", streamSecretMaxHeld))
 		case queueBytes > streamSecretMaxHeld:
-			// Only a token or a digit run is open (GAP-1265): what is held
-			// goes out once the check has read it, with no verdict, and
-			// what comes next is held behind it again.
-			return false, true
+			// Only a token or a digit run is open (GAP-1265): the bound
+			// decides it once (runHeldBound, GAP-1767), then the events
+			// before the one with the run's first byte go out once the
+			// check has read them and the run stays held (GAP-1306). When
+			// the events from the run's first byte are over the bound
+			// themselves, the run goes out once decided. When only reasoning runs parked
+			// by the switch to the answer are open (o.answerParkedOnly,
+			// GAP-2170: parked until the message ends while the answer
+			// streams behind it), all go out as rel does, with no verdict: a
+			// benign answer over the bound after thinking that ends in a
+			// number is not cut. A run parked at a block end or a tool switch
+			// keeps the verdict (GAP-2218), unless it is over the bound only
+			// by the events read while it was parked that carry no model text
+			// (server tool results, an image, encrypted reasoning): those go
+			// out as rel sends them, with no verdict (rel-1-0-10:GAP-2224).
+			// Below the bound the park holds the run as before; non-text
+			// bytes never end it.
+			k := heldBeforeRun(queueText, accumulated.OpenRunFrom())
+			runBytes := queueBytes - bufferedBytes(queue[:k])
+			if k > 0 && runBytes <= streamSecretMaxHeld {
+				heldCut = k
+				// A parked run keeps the parent's release with no verdict
+				// (GAP-2170, GAP-2224).
+				if o.parkedOnly {
+					return false, true
+				}
+				return false, runHeldBound(false)
+			}
+			if o.answerParkedOnly {
+				return false, true
+			}
+			if o.parkedOnly && runBytes-sumInts(queueUntexted[k:]) <= streamSecretMaxHeld {
+				return false, true
+			}
+			return false, runHeldBound(true)
 		}
 		return true, true
 	}
@@ -447,7 +644,16 @@ func (s *passthroughStream) run() {
 			return false
 		}
 		runs := accumulated.OpenRuns()
-		masked, ok := s.maskHeld(queue, relN, runs, maskedRuns)
+		// Bedrock reasoning can be signed and must reach the client unchanged.
+		// Other Bedrock lanes still use the masked quiet release of GAP-1307.
+		if s.provider == "bedrock" {
+			for _, run := range runs {
+				if run.key.field == responseFieldReasoning {
+					return true
+				}
+			}
+		}
+		masked, ok := s.maskHeld(queue[:relN], relN, runs, maskedRuns)
 		if !ok {
 			return true // it cannot be masked: everything stays held
 		}
@@ -527,8 +733,9 @@ func (s *passthroughStream) run() {
 			}
 		}
 		if accumulated.Len() > lastScanLen {
-			initVerdict := p.inspector.InspectMidStream(ctx, "completion", accumulated.String(),
-				[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
+			checkContent := accumulated.CheckText()
+			initVerdict := p.inspector.InspectMidStream(midCtx, "completion", checkContent,
+				[]ChatMessage{{Role: "assistant", Content: checkContent}}, label, mode)
 			p.resolveConfirm(ctx, r, initVerdict, "completion", label, mode)
 			if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
 				fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-PREBLOCK severity=%s %s (blocked before any output sent to client)\n",
@@ -597,6 +804,20 @@ func (s *passthroughStream) run() {
 		}
 		queue = append(queue, ev.Raw)
 		queueAt = append(queueAt, lastRead)
+		queueText = append(queueText, accumulated.Len())
+		untexted := 0
+		if sseCalls != nil && !s.eventTyped {
+			untexted = len(ev.Raw)
+		}
+		queueUntexted = append(queueUntexted, untexted)
+		mark := noStreamMark
+		switch {
+		case s.bedrock != nil:
+			mark.bedrock = s.bedrock.maxIndex
+		case tail == streamTailAnthropic && ev.HasData:
+			mark = anthropicStreamMark(ev.Data)
+		}
+		queueMark = append(queueMark, mark)
 		queueBytes += len(ev.Raw)
 		if sseCalls != nil && mode == "action" && !holdOff {
 			if sseCalls.Open() {
@@ -791,6 +1012,7 @@ read:
 			}
 		case <-ctx.Done():
 			// The agent is gone: nothing more is sent.
+			tw.endUsage(ctx, nil)
 			stopped = true
 			break read
 		}
@@ -864,6 +1086,11 @@ read:
 			}
 		}
 		if readErr != nil {
+			if readErr != io.EOF {
+				// The upstream body broke off. When the agent's context is
+				// done, that is the cause and the call is cancelled.
+				tw.endUsage(ctx, readErr)
+			}
 			if encoded && readErr != io.EOF && ctx.Err() == nil {
 				// A corrupt or oversized encoded stream cannot be read to its end.
 				if p.uninspectableReply(ctx, label, mode, "the encoded stream could not be decoded") {
@@ -988,8 +1215,9 @@ read:
 
 		postCtx, postCancel := p.postCallContext(ctx)
 		t0 := time.Now()
-		respMessages := []ChatMessage{{Role: "assistant", Content: content}}
-		verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, label, mode)
+		checkContent := accumulated.CheckText()
+		respMessages := []ChatMessage{{Role: "assistant", Content: checkContent}}
+		verdict := p.inspector.Inspect(postCtx, "completion", checkContent, respMessages, label, mode)
 		postCancel()
 		p.resolveConfirm(ctx, r, verdict, "completion", label, mode)
 		elapsed := time.Since(t0)

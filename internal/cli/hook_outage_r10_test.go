@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookcli"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func outageR10Fixture(t *testing.T, homeName string) (root, protected, ordinary string) {
@@ -53,9 +54,7 @@ func outageR10Decision(t *testing.T, root, ordinary, command string, environment
 func TestOpenClawOutageKnownValuesFollowExecutedStatements(t *testing.T) {
 	root, protected, ordinary := outageR10Fixture(t, "home")
 	link := filepath.Join(ordinary, "config-link")
-	if err := os.Symlink(protected, link); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, protected, link)
 	cases := []struct{ name, command, out, want string }{
 		{"direct remove", "rm " + protected, "notes.txt", "protected"},
 		{"known remove", `rm "$OUT"`, protected, "protected"},

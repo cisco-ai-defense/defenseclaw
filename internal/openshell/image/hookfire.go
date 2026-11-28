@@ -191,6 +191,16 @@ var builtinMockScenarios = []mockScenario{
 	{match: "write the marker file", command: "echo dc-hookfire-allowed > " + builtinAllowSideEffect, done: "Done: the marker file was written."},
 }
 
+// CanProveHooks reports whether a built image of the harness can be
+// hook-verified with the built-in mock LLM: without one (Amp, Cursor Agent
+// and Devin CLI have no mock wiring) a build always ends with an image
+// whose hooks are not verified, so no sandbox can use it (GAP-2067).
+func CanProveHooks(harnessName string) bool {
+	_, launch := builtinMockLaunch[harnessName]
+	_, scripted := builtinScriptedMocks[harnessName]
+	return launch || scripted
+}
+
 // builtinMockLaunch points a harness at the built-in mock LLM at baseURL.
 // The keys are placeholders the mock never checks.
 var builtinMockLaunch = map[string]func(baseURL string) (map[string]string, []string){

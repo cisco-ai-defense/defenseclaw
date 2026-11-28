@@ -35,14 +35,14 @@
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 196874,
-      "sha256": "7ab0495773fa9b0c415709ffbc783dcd441907a1dabaf26bc94e315083fe7157"
+      "size": 197467,
+      "sha256": "23d9fa0efc66bf64c36faacfa086a80798382912c8553ac15a797dc7879d58a6"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 17287,
-      "sha256": "8733be056edc3874a4a63a16773bd5153bace573cc152f4b7b80171d1dce270d"
+      "size": 18048,
+      "sha256": "96e4f1c27e498b353e0382156ac66fc6b0972c645151ccbd245f0d4b1b3c1271"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",

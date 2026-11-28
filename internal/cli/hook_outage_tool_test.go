@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookcli"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestOpenClawOutageToolKeepsProtectedTargetsClosed(t *testing.T) {
@@ -26,9 +27,7 @@ func TestOpenClawOutageToolKeepsProtectedTargetsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	alias := filepath.Join(home, "config-alias")
-	if err := os.Symlink(protected, alias); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, protected, alias)
 	custom := filepath.Join(t.TempDir(), "state")
 	if err := os.MkdirAll(custom, 0o700); err != nil {
 		t.Fatal(err)
@@ -38,9 +37,7 @@ func TestOpenClawOutageToolKeepsProtectedTargetsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	customAlias := filepath.Join(home, "custom-alias")
-	if err := os.Symlink(customConfig, customAlias); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, customConfig, customAlias)
 	for _, tc := range []struct {
 		name    string
 		args    map[string]interface{}
@@ -202,9 +199,7 @@ func TestOpenClawOutageEnvLinkedTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	alias := filepath.Join(home, "state-link")
-	if err := os.Symlink(protected, alias); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, protected, alias)
 	blob, err := json.Marshal(outageToolPayload{Name: "exec", Args: map[string]interface{}{"command": "printf x >> \"$OUT\"", "env": map[string]interface{}{"OUT": alias}}, CWD: home})
 	if err != nil {
 		t.Fatal(err)
@@ -309,9 +304,7 @@ func TestOpenClawOutageKnownEnvironmentCompoundAndChildValues(t *testing.T) {
 	}
 	ordinary := t.TempDir()
 	linked := filepath.Join(ordinary, "config-link")
-	if err := os.Symlink(protected, linked); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, protected, linked)
 	cases := []struct {
 		name, command, initial, want string
 	}{

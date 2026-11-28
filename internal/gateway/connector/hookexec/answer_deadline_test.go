@@ -213,6 +213,13 @@ func TestALateAllowIsNotTakenAfterTheAnswerBudget(t *testing.T) {
 // (TestProgressReportWaitsNoLongerThanTheCeiling).
 func TestToolCallKeepsItsBudgetWhileTheGatewayWaitsOnARemoteScanner(t *testing.T) {
 	shortAnswerBudget(t, 300*time.Millisecond)
+	// A managed call's answer window counts from gateway contact, inside the process cap that counts
+	// from invocation. shortAnswerBudget makes that cap 300ms too, so the hook's own work before it asks
+	// the gateway (account, session and write-path reads) must take under 300ms, or the request is
+	// cancelled before the gateway sees it and the hook never asks for progress reports (GAP-2092, the
+	// Windows runner). Production leaves the work 500ms (3.5s budget in a 4s cap); give it 1.7s here.
+	// The budget from contact stays 300ms and the scanner still answers at 700ms, after it.
+	managedAnswerDeadlineCap = 2 * time.Second
 	var asked atomic.Bool
 	addr := gatewayAt(t, func(w http.ResponseWriter, r *http.Request) {
 		asked.Store(r.Header.Get(HookProgressHeader) == "1")

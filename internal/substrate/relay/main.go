@@ -21,22 +21,25 @@ import (
 )
 
 // NewVerifier builds the session verifier the configuration names: the
-// gateway check when verify_url is set, else the public keys. With neither,
-// it is nil and the relay refuses every attachment.
+// gateway check (verify_url), preceded by the public keys when the kit
+// carries them. Keys without verify_url are refused (GAP-0435): they check
+// the signature and the actor, not that the token's person owns the agent.
+// With neither, it is nil and the relay refuses every attachment.
 func NewVerifier(cfg kit.Config) (Verifier, error) {
 	rc := cfg.Relay
 	if err := rc.CheckSessions(); err != nil {
 		return nil, err
 	}
-	if rc.VerifyURL != "" {
-		t, err := kit.NewTransport(cfg)
-		if err != nil {
-			return nil, err
-		}
-		return &GatewayVerifier{URL: rc.VerifyURL, Client: t.Client()}, nil
-	}
-	if len(rc.SessionKeys) == 0 {
+	if rc.VerifyURL == "" {
 		return nil, nil
+	}
+	t, err := kit.NewTransport(cfg)
+	if err != nil {
+		return nil, err
+	}
+	gw := &GatewayVerifier{URL: rc.VerifyURL, Client: t.Client()}
+	if len(rc.SessionKeys) == 0 {
+		return gw, nil
 	}
 	keys := map[string]crypto.PublicKey{}
 	for kid, path := range rc.SessionKeys {
@@ -46,8 +49,8 @@ func NewVerifier(cfg kit.Config) (Verifier, error) {
 		}
 		keys[kid] = k
 	}
-	return &KeyVerifier{Keys: keys, Audience: rc.SessionAudience, Issuer: rc.SessionIssuer,
-		Self: IdentityFiles(rc.IdentityDir)}, nil
+	return &CheckedVerifier{Keys: &KeyVerifier{Keys: keys, Audience: rc.SessionAudience, Issuer: rc.SessionIssuer,
+		Self: IdentityFiles(rc.IdentityDir)}, Gateway: gw}, nil
 }
 
 // Main is the defenseclaw-actor-relay entrypoint.
@@ -67,12 +70,19 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	switch args[0] {
+	case "mcp-stdio":
+		// The agent's side of a laptop MCP bridge (B3.3, mcp.go).
+		if fs.NArg() != 1 {
+			fmt.Fprintln(stderr, "usage: defenseclaw-actor-relay mcp-stdio NAME")
+			return 2
+		}
+		return MCPStdio(fs.Arg(0), os.Stdin, stdout, stderr)
 	case "version", "--version":
 		fmt.Fprintf(stdout, "defenseclaw-actor-relay %s (%s)\n", kit.Version, Version)
 		return 0
 	case "serve", "task":
 	default:
-		fmt.Fprintf(stderr, "defenseclaw-actor-relay: unknown command %q (serve, task, version)\n", args[0])
+		fmt.Fprintf(stderr, "defenseclaw-actor-relay: unknown command %q (serve, task, mcp-stdio, version)\n", args[0])
 		return 2
 	}
 	cfg, err := kit.LoadConfig(kit.ConfigPath)
@@ -132,9 +142,25 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "defenseclaw-actor-relay:", err)
 		return 1
 	}
-	srv := &http.Server{Handler: NewServer(Options{Config: cfg, Verifier: v, sep: sep,
-		Log: slog.New(slog.NewJSONHandler(stderr, nil))}).Handler(), ReadHeaderTimeout: 10 * time.Second}
-	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	log := slog.New(slog.NewJSONHandler(stderr, nil))
+	var certs *CertSource
+	if cfg.Relay.ServesTLS() {
+		t, err := kit.NewTransport(cfg)
+		if err != nil {
+			fmt.Fprintln(stderr, "defenseclaw-actor-relay:", err)
+			return 1
+		}
+		certs = &CertSource{URL: cfg.Relay.CertURL(), Client: t.Client(), Self: IdentityFiles(cfg.Relay.IdentityDir)}
+		// Best effort: in a template snapshot the actor has no egress yet,
+		// and the first handshake asks again.
+		go func() {
+			if err := certs.Warm(context.Background()); err != nil {
+				log.Info("relay.tls_cert", "state", "deferred", "reason", err.Error())
+			}
+		}()
+	}
+	h := NewServer(Options{Config: cfg, Verifier: v, sep: sep, Log: log, Certs: certs}).Handler()
+	if err := serveListeners(ln, h, certs); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fmt.Fprintln(stderr, "defenseclaw-actor-relay:", err)
 		return 1
 	}

@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/textlower"
 )
 
 const (
@@ -1500,6 +1501,28 @@ func sshPrivateKeyMutationPrerequisite(facts actionfacts.Facts) bool {
 	return false
 }
 
+// trustedKeyWriteFindingWithoutClaim reports whether
+// appendTrustedHomeResolvedSSHKeyWriteFinding makes its key write finding
+// for a call without the existing-link write a Substrate kit claim holds: a
+// call it returns early for (an ordinary variable target, a command that
+// names no authorized keys file) gets none, and any other gets one only
+// from a key write proof of its own (substrate-1 GAP-0549).
+func trustedKeyWriteFindingWithoutClaim(request trustedActionRequest, input actionfacts.Input, facts actionfacts.Facts, commandText string) bool {
+	if !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
+		(request.Connector == "claudecode" || request.Connector == "codex") &&
+		hookpaths.ProvedOrdinaryVariableTargets(input.Command, input.CWD, facts.ActiveHome) {
+		return false
+	}
+	if commandText != "" && !strings.Contains(commandText, "authorized_k") &&
+		!strings.Contains(commandText, "administrators_authorized") &&
+		!strings.Contains(commandText, "base64") &&
+		!trustedWindowsLocationAuthorizedKeysWriteWith(input, request.targetMemo) {
+		return false
+	}
+	return trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) ||
+		trustedSandboxGuestAuthorizedKeysWrite(request)
+}
+
 // appendTrustedHomeResolvedSSHKeyWriteFinding adds the authorized-keys write
 // check when a bounded positive proof can recover the active path from a
 // partial tool call. It also retains PATH-SSH-DIR's alert for a home-resolved
@@ -1528,7 +1551,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		}
 		return kept
 	}
-	commandText := strings.ToLower(input.Command)
+	commandText := textlower.Lower(input.Command)
 	overBudget, unresolved, resolvedTarget, nonWriteMention, unknownMention := false, false, false, false, false
 	var unprovenTarget unprovenWrite
 	evidence := request
@@ -1538,6 +1561,11 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	evidence.unresolvedTarget = &unresolved
 	evidence.resolvedTarget = &resolvedTarget
 	evidence.unprovenTarget = &unprovenTarget
+	claimOnly, byNameOnly := false, false
+	if request.guestClaimHomePlaces != nil {
+		evidence.guestWriteClaimOnly = &claimOnly
+	}
+	evidence.guestByNameOnly = &byNameOnly
 	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(evidence, facts)
 	if !symlinkWrite && !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
 		(request.Connector == "claudecode" || request.Connector == "codex") &&
@@ -1567,15 +1595,36 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			generation, request, input,
 		)
 	}
-	for _, finding := range findings {
+	// The rule name comes from the write's target (DESIGN D4): a write the
+	// link walk held only because it could not read every link operation
+	// of the call, whose every written name reaches the DefenseClaw state
+	// tree, is named by the state rule, not the SSH keys rule
+	// (rel-1-0-10:GAP-1568). The keys target is still a MAYBE (a link step
+	// went unread), and a MAYBE keeps the 1.0.10 verdict: the finding keeps
+	// the keys hold's severity and enforcement in every tier (DET111 ruling
+	// 2026-11-22T03:20Z).
+	heldStateOnly := symlinkWrite && !resolvedTarget && heldWriteReachesOnlyState(request, input, facts, unprovenTarget) &&
+		!trustedAuthorizedKeysSymlinkWrite(input) &&
+		!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
+		!trustedSandboxGuestAuthorizedKeysWrite(request)
+	for index, finding := range findings {
 		if finding.RuleID == "persistence.ssh_authorized_keys_command" &&
 			finding.contributesToEnforcement() {
+			findings[index].linkHeld = findings[index].linkHeld || heldStateOnly
 			return findings
 		}
 	}
+	// The proof without the link write and the guest's proof are each asked
+	// for up to three times below with the same arguments: each is made
+	// once, when first asked (both are lexical answers of this call, and
+	// the order of the asks is unchanged; GAP-2215).
+	plainProof := onceBool(func() bool {
+		return trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo)
+	})
+	guestProof := onceBool(func() bool { return trustedSandboxGuestAuthorizedKeysWrite(request) })
 	if request.EnforcementCapable &&
-		(trustedAuthorizedKeysWriteProofWith(input, facts, symlinkWrite, clientGlobFacts(request), request.targetMemo) ||
-			trustedSandboxGuestAuthorizedKeysWrite(request)) {
+		(symlinkWrite && trustedAuthorizedKeysWriteProofWith(input, facts, true, clientGlobFacts(request), request.targetMemo) ||
+			!symlinkWrite && plainProof() || guestProof()) {
 		_, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command")
 		if ok {
 			// A file tool write whose every target is a sudoers file keeps
@@ -1588,6 +1637,12 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 					named = sudoers
 				}
 			}
+			// Whether a finding this one replaces blocks, read before the
+			// filter below reuses the slice.
+			replacesBlock := slices.ContainsFunc(findings, func(finding RuleFinding) bool {
+				return (finding.RuleID == "PATH-SSH-DIR" || finding.RuleID == "persistence.ssh_authorized_keys_command" ||
+					finding.RuleID == named.ID) && finding.contributesToEnforcement()
+			})
 			kept := findings[:0]
 			for _, finding := range findings {
 				if finding.RuleID != "PATH-SSH-DIR" &&
@@ -1597,17 +1652,16 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				}
 			}
 			title := named.Title
-			enforcement := findingEnforcementAllowed
+			enforcement := enforcingProof
 			// A write the link walk held only because it could not resolve
 			// the target is not a known key write: outside the strict and
 			// managed tiers it warns (rel-1-0-10:GAP-0013, GAP-0004).
 			unprovenOnly := symlinkWrite && unprovenTarget.class != "" && named.ID == rule.ID &&
 				unprovenKeyWriteMayWarn(request, commandText, facts.ActiveHome, unprovenTarget) &&
 				!trustedAuthorizedKeysSymlinkWrite(input) &&
-				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
-				!trustedSandboxGuestAuthorizedKeysWrite(request)
+				!plainProof() && !guestProof()
 			if unprovenOnly {
-				enforcement = findingEnforcementAlertOnly
+				enforcement = advisoryProof
 			}
 			// A command held as a key write only because words of statements
 			// that read the keys file name it, in a per-user default or
@@ -1619,15 +1673,36 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			// pack (rel-1-0-10:GAP-0843).
 			readsOnly := (nonWriteMention || unknownMention) && !unprovenOnly && named.ID == rule.ID
 			if readsOnly {
-				enforcement = findingEnforcementAlertOnly
+				enforcement = advisoryProof
 			}
 			// A copy of the user's own SSH folder content to a private place of the
 			// same home, with nothing else written, alerts in every pack: it is
 			// no mutation of the keys the user's ssh reads (rel-1-0-10:GAP-0018).
+			// In a Substrate actor whose kit alone found the write, only the
+			// kit sees whether the copy's destination is private: its places
+			// decide (substrate-1 GAP-0549). Only for a finding this gateway
+			// does not make without the kit's claim, replacing none that
+			// blocks: the kit's places never lower a finding the gateway
+			// reaches on its own.
+			copyRequest := request
+			if claimOnly && !replacesBlock && copyRequest.guestHomePlaces == nil &&
+				!trustedKeyWriteFindingWithoutClaim(request, input, facts, commandText) {
+				copyRequest.guestHomePlaces = request.guestClaimHomePlaces
+			}
+			// A write that only the by-name reading of a copy-mode actor's
+			// call in its guest folder found (no kit facts, substrate-1
+			// GAP-0922): this gateway cannot see who may reach the copy's
+			// destination in the actor, so an own SSH folder copy to a place
+			// of the home outside its SSH folder alerts as on the laptop
+			// (homePlaceSet.byName). It replaces no finding that blocks: the
+			// gateway allowed such a call before the by-name reading.
+			if byNameOnly && !replacesBlock && copyRequest.guestHomePlaces == nil {
+				copyRequest.guestHomePlaces = &homePlaceSet{byName: true}
+			}
 			ownFolderCopy := !unprovenOnly && !readsOnly && named.ID == rule.ID &&
-				trustedActionOwnSSHFolderCopy(request, input)
+				trustedActionOwnSSHFolderCopy(copyRequest, input)
 			if ownFolderCopy {
-				enforcement = findingEnforcementAlertOnly
+				enforcement = advisoryProof
 			}
 			if ownFolderCopy {
 				title = ownSSHFolderCopyTitle
@@ -1637,9 +1712,18 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				title = archiveBeforeWriteTitle
 			} else if unprovenOnly && !unresolved {
 				title = hookpaths.UnprovenWriteTitle(unprovenTarget.class) + unprovenWriteGuidance
+			} else if symlinkWrite && named.ID == rule.ID && request.SkipLocalFilesystemResolution && !request.ProtectedHomeHook &&
+				unprovenTarget.class == hookpaths.UnprovenTargetUnresolved && !unresolved &&
+				!plainProof() && !guestProof() {
+				// A copy-mode sandbox's write whose target the call builds at
+				// run time (cd /abs && eval '... > $x'): this gateway cannot
+				// read the sandbox's files to place it, so it keeps the block
+				// (a known limit of 1.0.10, substrate-1 GAP-0389) and says
+				// why, with a form it can place, instead of naming a key
+				// write the call does not make.
+				title = sandboxRuntimeWriteTargetTitle
 			} else if symlinkWrite && unresolved && named.ID == rule.ID &&
-				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
-				!trustedSandboxGuestAuthorizedKeysWrite(request) {
+				!plainProof() && !guestProof() {
 				// The only write found is one the hook client and this
 				// gateway could not resolve: it still fails closed, named as
 				// what it is, not as a key write (rel-1-0-2:GAP-0690).
@@ -1649,8 +1733,9 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				RuleID: named.ID, Title: title, Severity: rule.Severity,
 				Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
 				Tags: append([]string(nil), named.Tags...), LineNumber: 1,
-				enforcement: enforcement,
+				Proof: enforcement,
 			})
+			finding.linkHeld = heldStateOnly && named.ID == rule.ID
 			if named.ID == rule.ID &&
 				(trustedAuthorizedKeysSymlinkWrite(input) || resolvedTarget && !overBudget && !unresolved) {
 				finding = finding.withTrustedActionProof(newResolvedTargetFindingProof(named.ID, true))
@@ -1692,7 +1777,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 // files, so it keeps the block (owner rule: self-protection blocks whenever
 // an effect can plausibly reach the protected file).
 func unprovenKeyWriteMayWarn(request trustedActionRequest, commandText, home string, held unprovenWrite) bool {
-	if request.StrictPolicy || request.ManagedInstall || request.ProtectedHomeHook ||
+	if request.tierEnforces(tierGateManaged) || request.ProtectedHomeHook ||
 		!trustedShellCommandInput(request.Input) {
 		return false
 	}
@@ -1730,6 +1815,107 @@ func unprovenKeyWriteMayWarn(request trustedActionRequest, commandText, home str
 // hookpaths.UnprovenWriteTitle class and the operand at fault, if one was.
 type unprovenWrite struct {
 	class, operand string
+}
+
+// linkHeldStateWriteNote follows the state rule title on a state write the
+// link walk held (GAP-1568): why the call keeps the keys hold's verdict.
+const linkHeldStateWriteNote = " (held: the call makes a link whose every step could not be read, so the write may reach other protected files)"
+
+// withLinkHeldStateWrites names a link-held keys hold by its target
+// (GAP-1568): the enforcing keys finding marked linkHeld becomes the state
+// rule's finding with the keys hold's severity, enforcement and evidence
+// (the keys target is still a MAYBE, and a MAYBE keeps the 1.0.10 verdict:
+// DET111 ruling 2026-11-22T03:20Z), and the call's other state, keys and ssh
+// folder findings go. It runs once, on the outermost call, after every
+// reading, so no later reading renames or re-grades it.
+func withLinkHeldStateWrites(findings []RuleFinding) []RuleFinding {
+	held := slices.IndexFunc(findings, func(f RuleFinding) bool {
+		return f.linkHeld && f.RuleID == "persistence.ssh_authorized_keys_command" && f.contributesToEnforcement()
+	})
+	if held < 0 {
+		return findings
+	}
+	finding := findings[held]
+	finding.RuleID, finding.Title = stateWriteRuleID, "DefenseClaw security state mutation"+linkHeldStateWriteNote
+	finding.Tags = []string{"cognitive-tampering", "tampering", "security-state"}
+	kept := findings[:0]
+	for i, f := range findings {
+		switch {
+		case i == held:
+			kept = append(kept, finding)
+		case f.RuleID == stateWriteRuleID, f.RuleID == "persistence.ssh_authorized_keys_command", f.RuleID == "PATH-SSH-DIR":
+		default:
+			kept = append(kept, f)
+		}
+	}
+	return kept
+}
+
+// heldWriteReachesOnlyState reports a link-unread hold (an unreadable link
+// operation of the call can affect the held operand) where the held operand
+// and every name the call writes, read through the links the call makes
+// (hookpaths.Links.AliasTargets), lie in the active home's DefenseClaw state
+// tree: ln -s ~/.defenseclaw hc; mv a.txt hc/config.yaml, or env -C ~
+// ln -sf project/a.txt .defenseclaw/config.yaml. A written name outside the
+// state tree that no read link leads into it (an ordinary file, an
+// unread link, a keys file) keeps the hold.
+func heldWriteReachesOnlyState(request trustedActionRequest, input actionfacts.Input, facts actionfacts.Facts, held unprovenWrite) bool {
+	home := facts.ActiveHome
+	if held.class != hookpaths.UnprovenLinkUnread || held.operand == "" || input.Command == "" ||
+		home == "" || !filepath.IsAbs(home) {
+		return false
+	}
+	root := filepath.Join(filepath.Clean(home), ".defenseclaw")
+	inState := func(name string) bool { return cleanPathWithin(name, root) }
+	links := hookpaths.CommandLinksWithFacts(input.Tool, input.Command, input.CWD, home, request.ResolvedWriteTargets)
+	reachesState := func(name string) bool {
+		if !filepath.IsAbs(name) {
+			return false
+		}
+		if inState(name) {
+			return true
+		}
+		reached := links.AliasTargets(name, false)
+		for _, target := range reached {
+			if !inState(target) {
+				return false
+			}
+		}
+		return len(reached) != 0
+	}
+	if !reachesState(held.operand) {
+		return false
+	}
+	ssh := filepath.Join(filepath.Clean(home), ".ssh")
+	for _, path := range facts.Paths {
+		switch path.Access {
+		case actionfacts.PathAccessDelete:
+			// Removing a name never writes through a link (mv's source), so
+			// an unread link step cannot make it a keys write; a name in the
+			// ssh folder, or one a link of the call leads from, keeps the hold.
+			if reachesState(path.Resolved) {
+				continue
+			}
+			if !filepath.IsAbs(path.Resolved) || len(links.AliasTargets(path.Resolved, false)) != 0 ||
+				cleanPathWithin(path.Resolved, ssh) {
+				return false
+			}
+		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessMetadata:
+			if !reachesState(path.Resolved) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// cleanPathWithin reports name at or under dir, without case on Windows.
+func cleanPathWithin(name, dir string) bool {
+	name, dir = filepath.Clean(name), filepath.Clean(dir)
+	if runtime.GOOS == "windows" {
+		name, dir = strings.ToLower(name), strings.ToLower(dir)
+	}
+	return name == dir || strings.HasPrefix(name, dir+string(filepath.Separator))
 }
 
 // unprovenOperandNearProtected reports an operand at or under the active
@@ -1880,6 +2066,13 @@ func trustedAuthorizedKeysWriteProofWith(input actionfacts.Input, facts actionfa
 	if trustedNoDereferenceTouchSafe(input.Command, input.CWD, facts.ActiveHome, globFacts, globFacts != nil, memo.ShellStartup()) {
 		return false
 	}
+	if symlinkWrite {
+		// The link walk already found the write: every reading below only
+		// adds to an answer that is already yes, so none is made. The title
+		// branches of appendTrustedHomeResolvedSSHKeyWriteFinding ask for the
+		// proof without the link write; that one runs in full (GAP-2215).
+		return true
+	}
 	if input.Command != "" &&
 		memo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) == "protected-target" {
 		return true
@@ -2011,6 +2204,16 @@ const (
 	unknownKeyMentionReason = "key_mention_unknown_program"
 )
 
+// sandboxRuntimeWriteTargetTitle is the title of the authorized-keys block of
+// a copy-mode sandbox write whose target the call builds at run time (an eval
+// or a variable), which the gateway cannot place without the sandbox's files
+// (substrate-1 GAP-0389). Like the other ship-authored titles it holds no
+// "; " or ", ", so it reaches the agent as written (trustedBuiltInFindingLabel,
+// sandboxVerdictRules).
+const sandboxRuntimeWriteTargetTitle = "DefenseClaw cannot see the files of this cloud sandbox and so cannot tell " +
+	"where a write lands when eval or a variable builds its target at run time. " +
+	"Use a relative path or a direct write instead of eval"
+
 // unresolvedWriteTargetTitle is the title of the authorized-keys block of a
 // write whose target neither the managed hook client nor the gateway could
 // resolve (rel-1-0-2:GAP-0690).
@@ -2039,13 +2242,25 @@ func trustedSandboxGuestAuthorizedKeysWrite(request trustedActionRequest) bool {
 	}
 	input := request.Input
 	input.CWD = guestCWD
-	facts := actionfacts.Analyze(input)
+	facts := request.guestMemo.analyze(input)
 	if input.Command == "" {
 		if command, ok := trustedBashCommandInput(input); ok {
 			input.Command = command
 		}
 	}
 	return trustedAuthorizedKeysWriteProof(input, facts, false, nil)
+}
+
+// onceBool returns a function that calls answer on its first call and gives
+// that answer on every call.
+func onceBool(answer func() bool) func() bool {
+	asked, value := false, false
+	return func() bool {
+		if !asked {
+			asked, value = true, answer()
+		}
+		return value
+	}
 }
 
 func appendTrustedSSHPrivateKeyWriteFinding(
@@ -2067,19 +2282,19 @@ func appendTrustedSSHPrivateKeyWriteFinding(
 	if !ok {
 		return findings
 	}
-	enforcement := findingEnforcementAlertOnly
+	enforcement := advisoryProof
 	if !request.EnforcementCapable {
-		enforcement = findingEnforcementDetectionOnly
+		enforcement = recordProof
 	}
 	return append(findings, adjustConfidence(input.Tool, RuleFinding{
-		RuleID:      rule.ID,
-		Title:       rule.Title,
-		Severity:    rule.Severity,
-		Confidence:  rule.Confidence,
-		Evidence:    trustedActionInputText(input, ""),
-		Tags:        append([]string(nil), rule.Tags...),
-		LineNumber:  1,
-		enforcement: enforcement,
+		RuleID:     rule.ID,
+		Title:      rule.Title,
+		Severity:   rule.Severity,
+		Confidence: rule.Confidence,
+		Evidence:   trustedActionInputText(input, ""),
+		Tags:       append([]string(nil), rule.Tags...),
+		LineNumber: 1,
+		Proof:      enforcement,
 	}))
 }
 

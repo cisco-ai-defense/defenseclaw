@@ -93,7 +93,11 @@ func refusalHint(v Verdict) string {
 		return "Tell the user DefenseClaw blocked sending data off the cluster after a secret was read in this session." + dont
 	case CategoryMCPToolBlocked:
 		return "Tell the user DefenseClaw's tool rules refused this MCP tool call." + dont
-	case CategoryUnattributed, CategoryActorNotLive, CategoryCalloutError, CategoryChainUnchecked:
+	case CategoryPushRedirect:
+		return "Tell the user this push was refused: while pull --push-branch pushes this actor's work, git pushes go only to the repository they approved." + dont
+	case CategoryRateLimited:
+		return "Slow down: wait a second, then send fewer requests at a time; DefenseClaw limits how fast one actor can send."
+	case CategoryUnattributed, CategoryActorNotLive, CategoryCalloutError, CategoryChainUnchecked, CategoryPushUnchecked:
 		return "DefenseClaw could not check this request. Retry in a moment; if it keeps failing, tell the user."
 	case CategoryBodyUninspected, CategoryPathAmbiguous:
 		return "Tell the user DefenseClaw could not read this request the way the server will, so it was not sent; send it in a plain form (no unusual encoding)." + dont

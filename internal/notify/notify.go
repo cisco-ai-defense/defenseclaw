@@ -94,6 +94,11 @@ func DesktopCapability() DesktopNotificationCapability {
 	return DesktopCapabilityForGOOS(runtime.GOOS)
 }
 
+// DesktopToolCheck is nil when the tool native delivery runs (notify-send on
+// Linux, osascript on macOS) is available, and the lookup error when it is
+// missing: callers say so in plain words instead of failing a send.
+func DesktopToolCheck() error { return toolCheck() }
+
 // Notification is a structured, multi-line desktop notification.
 // All fields are optional; empty Title/Subtitle/Body are skipped by
 // the platform back-ends so callers do not need to gate empty values.

@@ -30,12 +30,29 @@ func setAccessListForTest(t *testing.T, path, sddl string) {
 	}
 }
 
+// currentUserAccessEntry is a full-access entry for the user the test runs
+// as. The access lists below name only administrators, and a Limited token is
+// in none of those groups: a file's owner has READ_CONTROL and WRITE_DAC
+// without an entry but not the read of attributes that ReadPathMetadata asks
+// for, so without this entry the test itself was refused the file it had just
+// created ("Access is denied" on the replaced file) before it reached the
+// product. The entry names no ordinary-users group, so it grants none of the
+// read these tests check for.
+func currentUserAccessEntry(t *testing.T) string {
+	t.Helper()
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		t.Fatalf("current token user: %v", err)
+	}
+	return "(A;;FA;;;" + user.User.Sid.String() + ")"
+}
+
 // ProtectReadableByUsers keeps the replaced file's access list and adds only
 // the Users read to it, falls back to the protection when a deny entry still
 // refuses the read, protects a new file, and fails when even the protection
 // leaves ordinary users without the read.
 func TestProtectReadableByUsers(t *testing.T) {
-	const adminOnly = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BO)"
+	adminOnly := "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BO)" + currentUserAccessEntry(t)
 	const protection = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)"
 	for _, test := range []struct {
 		name string
@@ -85,6 +102,12 @@ func TestProtectReadableByUsers(t *testing.T) {
 			if test.wantErr {
 				if err == nil {
 					t.Fatal("a protection that leaves ordinary users without the read was accepted")
+				}
+				// The refusal must come from the check that ordinary users
+				// can read the protected file, not from the test token
+				// being denied it.
+				if !strings.Contains(err.Error(), "ordinary users cannot read") {
+					t.Fatalf("refused for another reason: %v", err)
 				}
 				return
 			}

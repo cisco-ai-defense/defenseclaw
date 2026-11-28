@@ -20,6 +20,7 @@ Watch the live feed, answer asks, unblock sites, and stop, pull or undo a sandbo
 | Answer an ask | `sandbox approve NAME ID` | `a`, `A`, `x` in **Asks** | **Approve**, **Always…**, **Reject** |
 | Bring back a copy | `sandbox pull NAME --apply` | `P` | **Pull to branch** |
 | Undo | `sandbox undo NAME` | `U` | **Undo…** |
+| Manage vault secrets (Preview) | `sandbox vault list` | **Vault** tab (`K`) | **Vault (Preview)** card |
 
 ## The TUI Sandboxes panel
 
@@ -158,6 +159,23 @@ The [macOS app](/docs/macos-app) shows sandboxes in the Sandboxes view (under **
 ### Sandbox details and actions
 
 Each selected sandbox offers **Stop…**, **Copy pull command**, **Pull to branch**, **Review changes**, **Undo…** and **Copy connect command**. The app has no launch dialog: start runs in Terminal.
+
+### The Vault card (Preview)
+
+<Callout type="info" title="Preview">
+The Vault card is a preview feature.
+</Callout>
+
+When sandboxes are set up, the Sandboxes view has a **Vault (Preview)** card for your [credential vault](/docs/sandboxes/vault). It lists each secret with its host, status (**ready**, **unconfirmed**, **needs a host** or **exposed: rotate**), source, last use and use count, never a value. Select a secret for its details and actions:
+
+- **Add…** stores a new secret with the one host it may be sent to (`defenseclaw sandbox vault add`).
+- **Replace value…** gives a secret a new value, for example after you rotate it (`replace`).
+- **Set host…** changes the one host the secret may be sent to (`bind`).
+- **Rename…** changes the name a sandbox sees it under (`rename`).
+- **Remove…** deletes it from the vault after asking (`remove --yes`). Sandboxes created with it keep it until you delete them.
+- **Confirm…** marks a secret captured from a sandbox, which starts **unconfirmed**, as your own (`confirm --yes`). The dialog says where it came from, its kind and host (or that it needs a host before a sandbox can use it), and that an agent in a sandbox can make a call that looks like your prompt, so confirm only a secret you gave it. To see the last 4 characters of the value first, run `defenseclaw sandbox vault confirm NAME` in Terminal.
+
+Each change runs the `defenseclaw sandbox vault` command shown and appears in Activity with its exit status; the app does not show or keep the output of vault commands. A value is typed in a hidden field and goes to the command on standard input, never on its command line; the app does not keep it after the command starts. The changes are unavailable while the installation is read-only. If the command refuses, the card says why; on a managed computer it also says that your organization may not allow the vault there and that `defenseclaw sandbox vault list` in Terminal shows the reason ([Managed command availability](/docs/enterprise/managed-commands)).
 
 ### Menu bar and notifications
 
