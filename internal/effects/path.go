@@ -331,10 +331,14 @@ func placeWindows(spelling string, o Options) (string, bool, ReasonCode) {
 	// A leading ~ is the home in PowerShell (its FileSystem provider) and a
 	// literal folder name in cmd (GAP-1191): under PowerShell ~ and ~\x are
 	// placed in the home; in a dialect only guessed the spelling has no known
-	// target.
+	// target. Under Git Bash (POSIX) a ~ that reaches the placer is one the
+	// word walk did not expand (an option argument such as --log-file=~/x, a
+	// sed w file): it is placed in the home, as placePOSIX places it on a
+	// POSIX host and as the walk expands a leading ~ word (isTilde) on this
+	// host (rel-1-0-10:GAP-2306).
 	if s == "~" || strings.HasPrefix(s, `~\`) {
 		switch o.Dialect {
-		case DialectPowerShell:
+		case DialectPowerShell, DialectPOSIX:
 			if !windowsShapedHome(o.Home) {
 				return "", false, ReasonDynamicExpansion
 			}
