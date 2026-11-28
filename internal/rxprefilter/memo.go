@@ -23,12 +23,12 @@ import (
 // the checks of one text "role" (the reply, its normalized form, ...) and
 // compute only what the new part can change, so every answer equals the one
 // the whole text gives; none is a window. Each memo compares the new text
-// with the last one (CommonPrefixLen) and goes back to the last point
+// with the last one (commonPrefixLen) and goes back to the last point
 // before the first changed byte, so a text that is not an extension (a lane
 // grew before the last one) is exact too, only slower.
 
-// CommonPrefixLen is the length of the longest common prefix of a and b.
-func CommonPrefixLen(a, b string) int {
+// commonPrefixLen is the length of the longest common prefix of a and b.
+func commonPrefixLen(a, b string) int {
 	n := min(len(a), len(b))
 	i := 0
 	for i+4096 <= n && a[i:i+4096] == b[i:i+4096] {
@@ -67,7 +67,7 @@ func (m *SplitMemo) Apply(s string, f func(string) string, split func(s string, 
 	keep := len(m.cuts)
 	if keep > 0 {
 		if last := m.cuts[keep-1].at; last >= len(s) || s[:last+1] != m.text[:last+1] {
-			common := CommonPrefixLen(s, m.text)
+			common := commonPrefixLen(s, m.text)
 			for keep > 0 && m.cuts[keep-1].at >= common {
 				keep--
 			}
@@ -135,7 +135,7 @@ func (p *Presence) View(hay string) *PresenceView {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.gen++
-	common := CommonPrefixLen(hay, p.cur)
+	common := commonPrefixLen(hay, p.cur)
 	p.cur = hay
 	return &PresenceView{p: p, hay: hay, gen: p.gen, common: common}
 }
@@ -198,7 +198,7 @@ func NewTextMemo(text string, m *Memo) *Text {
 	}
 	m.mu.Lock()
 	m.gen++
-	common := CommonPrefixLen(text, m.cur)
+	common := commonPrefixLen(text, m.cur)
 	m.cur = text
 	gen := m.gen
 	m.mu.Unlock()
@@ -393,7 +393,7 @@ func (t *Text) memoMatches(re *regexp.Regexp, firstOnly bool) ([][]int, bool) {
 	default:
 		common := t.memoCommon
 		if c.gen != t.memoGen-1 {
-			common = CommonPrefixLen(t.text, c.text)
+			common = commonPrefixLen(t.text, c.text)
 		}
 		c.move(t.text, re, plan, common)
 		c.gen = t.memoGen

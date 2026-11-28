@@ -22,7 +22,9 @@ several lines of the same shard, one go test run each.
 refreshed by scripts/update_test_timings.py). Test mode takes it more than
 once: the package's tests weigh the times of the first file that records
 that package, so the macOS gateway parts use go-darwin.json once a refresh
-has recorded them there and the Linux times until then. A slow test that
+has recorded them there and the Linux times until then, and a plain (no
+-race) gateway run passes go-linux-plain.json before go-linux.json (its
+-race times do not rank the plain tests, substrate-1 GAP-1107). A slow test that
 file does not name yet weighs its time in a later file, scaled to the first
 file (package_test_seconds), so a new slow test does not weigh the small
 "*" until the next refresh. Tests stay together by file

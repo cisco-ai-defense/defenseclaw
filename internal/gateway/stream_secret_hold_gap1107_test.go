@@ -8,9 +8,15 @@ package gateway
 
 import (
 	"math/rand"
+	"regexp"
 	"strings"
 	"testing"
 )
+
+// streamTokenOpen is the alternatives of streamTokenOpenAlts joined into one
+// end-anchored expression: the reference streamTokenOpenStart must equal. The
+// stream paths do not run it (substrate-1:GAP-1107).
+var streamTokenOpen = regexp.MustCompile(`(?:` + strings.Join(streamTokenOpenAlts(), "|") + `)$`)
 
 // substrate-1:GAP-1107: the start of the open token or digit run that
 // streamTokenOpenStart finds, alternative by alternative behind their

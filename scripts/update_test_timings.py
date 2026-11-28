@@ -15,6 +15,13 @@ weighs an estimate. Refresh after a large test change:
            gh run download <run> --pattern 'go-test-timings-*' --dir t
            scripts/update_test_timings.py go t/*/*.json
          A local run works too (go test -race ... -json ./... > go.json).
+         go-linux-plain.json holds the plain (no -race) times of
+         internal/gateway, which plain shard gates pass before go-linux.json:
+         a -race time does not rank the plain tests, some of which run
+         larger plain-only tables (substrate-1 GAP-1107). Refresh it from
+         one plain run of every gateway test on a build box, a go test -json
+         stream per shard piped to go_test_report.py --timings t<n>.json:
+           scripts/update_test_timings.py go t*.json --out scripts/test-timings/go-linux-plain.json
          The darwin connector and gateway parts of Unix Standalone
          Lifecycle upload go-test-timings-darwin-connector-* and
          go-test-timings-darwin-gateway-* (the gateway's unix and darwin
