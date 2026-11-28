@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -145,6 +146,49 @@ func TestGAP1652RgIgnoreFileWhitelistReadsTheHiddenFile(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestGAP1652RgManyFoldersFromADeepFolderKeepsTheRead: rg names many
+// folders from a deep folder, then a folder with a credentials file. The
+// ignore files of every folder above each searched folder are read once per
+// call, on a bound of their own, so they never spend the lookups budget:
+// the read and its chain are rel's at every count, and the lone call gains
+// no truncation (rel-1-0-10:GAP-1652, CHK-TSECRET1 B1). grep -r is the
+// control.
+func TestGAP1652RgManyFoldersFromADeepFolderKeepsTheRead(t *testing.T) {
+	cloud := filepath.Join(t.TempDir(), "."+"a"+"ws")
+	if err := os.MkdirAll(cloud, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cloud, "cred"+"entials"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deep := t.TempDir()
+	for i := range 18 {
+		deep = filepath.Join(deep, fmt.Sprintf("l%d", i))
+	}
+	var rows []tsecretReadRow
+	for _, n := range []int{10, 40, 160} {
+		var folders []string
+		for i := range n {
+			name := fmt.Sprintf("f%d", i)
+			if err := os.MkdirAll(filepath.Join(deep, name), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			folders = append(folders, name)
+		}
+		named := strings.Join(folders, " ") + " " + cloud
+		rows = append(rows,
+			tsecretReadRow{fmt.Sprintf("rg-%d-folders", n), "rg KEY " + named, true},
+			tsecretReadRow{fmt.Sprintf("grep-r-%d-folders", n), "grep -r KEY " + named, true})
+	}
+	for _, r := range rows {
+		facts := actionfacts.Analyze(actionfacts.Input{Tool: "exec", Command: r.command, CWD: deep, ActiveHome: t.TempDir()})
+		if facts.CredentialPathReadCaps(context.Background()).Any() {
+			t.Errorf("%s: the resolve is truncated, want it whole as at rel", r.id)
+		}
+	}
+	tsecretCheckReads(t, "gap1652-many", deep, rows)
 }
 
 // TestGAP1653PrintVerbNameBoundToAReadIsARead: inline code that binds a
