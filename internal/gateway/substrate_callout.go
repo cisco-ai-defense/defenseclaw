@@ -120,6 +120,10 @@ func (a *APIServer) substrateCalloutVerdict(st *substrateState) http.Handler {
 // substrateMCPVerdict runs the hook path's MCP evaluation for the call.
 func (a *APIServer) substrateMCPVerdict(ctx context.Context, reg registry.Registration, req substrateCalloutRequest) SubstrateCalloutVerdict {
 	ctx = a.substrateEvaluationContext(ctx, reg, sandboxauth.RouteHook)
+	// substrateMCPBoundedVerdict judges the projections of over-bound
+	// arguments within the bridge's budgets and floors them; the shared
+	// reading does not judge them again (overBoundToolArgsFindings).
+	ctx = withToolArgsProjected(ctx)
 	connectorName := sandboxauth.CanonicalConnector(reg.Connector)
 	server := strings.TrimSpace(req.MCP.Server)
 	tool := strings.TrimSpace(req.MCP.Tool)
@@ -140,15 +144,22 @@ func (a *APIServer) substrateMCPVerdict(ctx context.Context, reg registry.Regist
 	// rulesOnly keeps a reading off the LLM judge and AID: a projection
 	// (another reading of the same call), and a bridged argument reading
 	// whose call's whole params go to them (substrateMCPReading, RV-0841b F6).
-	judge := func(args json.RawMessage, rulesOnly bool) SubstrateCalloutVerdict {
+	judge := func(ctx context.Context, args json.RawMessage, rulesOnly bool) SubstrateCalloutVerdict {
 		return a.substrateMCPToolVerdict(ctx, reg, ToolInspectRequest{
 			Tool: hookTool, Args: args, SessionID: req.SessionID, Connector: connectorName, MCPServerName: server,
 			skipJudge: rulesOnly, skipAID: rulesOnly,
 		})
 	}
-	full := judge(req.Args, substrateMCPReadingOf(ctx).rulesOnly)
+	rules := func(ctx context.Context, p json.RawMessage) SubstrateCalloutVerdict { return judge(ctx, p, true) }
+	rd := substrateMCPReadingOf(ctx)
+	// A bridge reading's hidden actions start beside its full reading
+	// (substrateMCPHiddenReadings, GAP-1157); a deny before they are folded
+	// stops them, and none outlives the call.
+	hidden := startSubstrateMCPHiddenReadings(ctx, rd, rules)
+	defer hidden.stop()
+	full := judge(ctx, req.Args, rd.rulesOnly)
 	return a.substrateMCPBoundedVerdict(ctx, reg, connectorName, req.Args, full,
-		func(p json.RawMessage) SubstrateCalloutVerdict { return judge(p, true) })
+		func(p json.RawMessage) SubstrateCalloutVerdict { return rules(ctx, p) }, hidden)
 }
 
 // substrateMCPToolVerdict is the tool-rule verdict of one reading of a call.

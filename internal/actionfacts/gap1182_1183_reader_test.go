@@ -114,21 +114,17 @@ func TestGAP1183EmptyHereDocBodyReadsNothing(t *testing.T) {
 	}
 }
 
+// The chroot root and nsenter --wd folders are POSIX paths, read with the
+// rules of the cd walk on every gateway host, Windows included
+// (rel-1-0-10:GAP-1881: chroot / joined "/" under the current folder there).
 func TestGAP1241NestedWrapperChildFolder(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		// The chroot root and nsenter --wd folders are read with native
-		// path rules on Windows (chroot / joins "/" under the current
-		// folder), not the POSIX rules the cd walk uses: a product fix,
-		// rel-1-0-10:GAP-1881. The other POSIX directory rows of this
-		// package run on Windows.
-		t.Skip("POSIX directory rows (GAP-1038); chroot and nsenter --wd use native path rules on Windows (GAP-1881)")
-	}
 	for _, row := range []struct {
 		name, command, cwd string
 		unknown            bool
 	}{
 		{"chroot root", "chroot / sh -c ': >> home/u/.defenseclaw/config.yaml'", "/", false},
 		{"chroot named root", "chroot /srv/root sh -c ': >> home/u/.defenseclaw/config.yaml'", "/srv/root", false},
+		{"chroot relative root", "chroot srv sh -c ': >> .defenseclaw/config.yaml'", "/home/u/srv", false},
 		{"chroot skip chdir", "chroot --skip-chdir / sh -c ': >> .defenseclaw/config.yaml'", "/home/u", false},
 		{"nsenter wd", "nsenter --target=1 --wd=/ sh -c ': >> home/u/.defenseclaw/config.yaml'", "/", false},
 		{"nsenter relative parent", "nsenter --target=1 --wd=.. sh -c ': >> u/.defenseclaw/config.yaml'", "/home", false},
@@ -136,6 +132,12 @@ func TestGAP1241NestedWrapperChildFolder(t *testing.T) {
 		{"nsenter target root", "nsenter --target=1 --root sh -c ': >> .defenseclaw/config.yaml'", "", true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
+			if row.name == "nsenter relative parent" && runtime.GOOS == "windows" {
+				// A relative --wd keeps its native meaning on a Windows
+				// host, where the gateway cannot place it: the child folder
+				// is unknown (staticNSEnterWorkDir, rel-1-0-10:GAP-1881).
+				row.cwd, row.unknown = "", true
+			}
 			input := Input{Tool: "Bash", Command: row.command, CWD: "/home/u", ActiveHome: "/home/u", DialectHint: DialectPOSIX}
 			got := SimpleCommands(input, Analyze(input))
 			if !slices.ContainsFunc(got, func(s SimpleCommand) bool {

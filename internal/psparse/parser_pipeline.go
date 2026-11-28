@@ -178,6 +178,7 @@ func (p *parser) parseCommand(invokeOp string) *Command {
 		cmd.Name = p.parseCommandName()
 	}
 	guard := 0
+	positional := false // a -- ended the parameters
 	for guard < 1<<16 {
 		guard++
 		switch p.kind() {
@@ -207,7 +208,28 @@ func (p *parser) parseCommand(invokeOp string) *Command {
 		case TokRedir:
 			cmd.Redirs = append(cmd.Redirs, p.parseRedirection())
 		case TokParameter:
+			if positional {
+				// after -- every word is an argument: Get-Item -- -x reads
+				// the path -x (rel-1-0-10:GAP-1854)
+				tk := p.advance()
+				cmd.Elements = append(cmd.Elements, &Arg{span: span{tk.Start, tk.End}, Value: &StringLit{span: span{tk.Start, tk.End}, Kind: StrBare, Value: tk.Raw, Static: true, Bare: true, Raw: tk.Raw}})
+				continue
+			}
 			cmd.Elements = append(cmd.Elements, p.parseParameter())
+		case TokOperator:
+			if t := p.cur(); !positional && t.Raw == "--" && p.endsWord(t) {
+				// a standalone -- is the parameter "-" that ends the
+				// parameters, as pwsh reads it (rel-1-0-10:GAP-1854)
+				p.advance()
+				cmd.Elements = append(cmd.Elements, &Parameter{span: span{t.Start, t.End}, Name: "-", Raw: t.Raw})
+				positional = true
+				continue
+			}
+			a := p.parseCommandArg()
+			if a == nil {
+				goto done
+			}
+			cmd.Elements = append(cmd.Elements, a)
 		case TokComment:
 			// a comment inside a command is whitespace; it does not end it (F13)
 			p.advance()
@@ -226,6 +248,16 @@ func (p *parser) parseCommand(invokeOp string) *Command {
 done:
 	cmd.start, cmd.end = start, p.prevEnd()
 	return cmd
+}
+
+// endsWord reports a token followed by whitespace or the end of the input:
+// nothing is glued to it.
+func (p *parser) endsWord(t Token) bool {
+	if p.i+1 >= len(p.toks) {
+		return true
+	}
+	next := p.toks[p.i+1]
+	return next.Kind == TokEOF || next.Start != t.End
 }
 
 // parseCommandName reads the command name: a bareword, a quoted string, a
@@ -372,13 +404,29 @@ func (p *parser) parseCommandName() Expr {
 
 func (p *parser) parseParameter() CommandElement {
 	t := p.advance()
-	raw := t.Raw
-	if t.HasColon && len(raw) > 0 && raw[len(raw)-1] == ':' {
+	name, end, hasColon := t.Value, t.End, t.HasColon
+	// pwsh scans a parameter name up to whitespace, a colon or a separator: a
+	// glued - or / is part of the name, so -nop-ExecutionPolicy and -ep/c are
+	// one parameter each, not two (rel-1-0-10:GAP-1854).
+	if !hasColon {
+		name, end, hasColon = p.gluedParameterName(name, end)
+	}
+	raw := p.src[t.Start:end]
+	if hasColon && len(raw) > 0 && raw[len(raw)-1] == ':' {
 		raw = raw[:len(raw)-1]
 	}
-	par := &Parameter{span: span{t.Start, t.End}, Name: t.Value, Raw: raw, HasColon: t.HasColon}
-	if t.HasColon {
-		adjacent := !p.at(TokNewline) && !p.at(TokEOF) && p.cur().Start == t.End
+	// A quote glued to a parameter makes the whole word a generic token:
+	// -Version'2' is the word -Version2 and -ep' x' is "-ep x", not a
+	// parameter and a string (rel-1-0-10:GAP-1854).
+	if !hasColon && p.at(TokString) && p.cur().Start == end {
+		lead := &StringLit{span: span{t.Start, end}, Kind: StrBare, Value: "-" + name, Static: true, Bare: true, Raw: p.src[t.Start:end]}
+		e := p.fuseAfter(lead)
+		s0, s1 := e.Span()
+		return &Arg{span: span{s0, s1}, Value: e}
+	}
+	par := &Parameter{span: span{t.Start, end}, Name: name, Raw: raw, HasColon: hasColon}
+	if hasColon {
+		adjacent := !p.at(TokNewline) && !p.at(TokEOF) && p.cur().Start == end
 		// -Name:value (adjacent) or -Name: value (the next value across
 		// whitespace, unless it is another parameter or a terminator).
 		if p.at(TokParameter) {
@@ -399,6 +447,55 @@ func (p *parser) parseParameter() CommandElement {
 		}
 	}
 	return par
+}
+
+// gluedParameterName extends a parameter name over the tokens glued to it
+// that pwsh scans as name text: a word made only of ASCII name characters,
+// - and / that starts with - or / or follows a - or / (-nop-ExecutionPolicy,
+// -ep/c, -a-1). A glued -b: ends the name with its colon. Anything else (a
+// quote, a variable, a dot, a colon inside a word) ends the name where it is.
+func (p *parser) gluedParameterName(name string, end int) (string, int, bool) {
+	for !p.at(TokEOF) {
+		t := p.cur()
+		if t.Start != end {
+			break
+		}
+		text, colon := t.Raw, false
+		switch t.Kind {
+		case TokParameter:
+			if t.HasColon && strings.HasSuffix(text, ":") {
+				text, colon = text[:len(text)-1], true
+			}
+		case TokOperator, TokGeneric, TokNumber:
+		default:
+			return name, end, false
+		}
+		if text == "" || !parameterNameText(text) {
+			return name, end, false
+		}
+		if first := text[0]; first != '-' && first != '/' && !strings.HasSuffix(name, "-") && !strings.HasSuffix(name, "/") {
+			return name, end, false
+		}
+		p.advance()
+		name += text
+		end = t.End
+		if colon {
+			return name, end, true
+		}
+	}
+	return name, end, false
+}
+
+// parameterNameText reports text made only of ASCII letters, digits, _, -
+// and /: the glued text gluedParameterName adds to a parameter name.
+func parameterNameText(text string) bool {
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if c != '-' && c != '/' && c != '_' && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // colonValueFollows reports whether a value token (not a parameter, separator
@@ -461,6 +558,12 @@ func (p *parser) parseFusedArg() Expr {
 	if !fusableLead(lead) {
 		return lead
 	}
+	return p.fuseAfter(lead)
+}
+
+// fuseAfter composes lead with the atoms glued to it (no whitespace) into
+// one argument value.
+func (p *parser) fuseAfter(lead Expr) Expr {
 	atoms := []Expr{lead}
 	_, end := lead.Span()
 	for !p.at(TokEOF) {
@@ -555,9 +658,13 @@ func (p *parser) composeAtoms(atoms []Expr, s0, end int) Expr {
 		// the processed source span (quote delimiters dropped, backtick escapes
 		// decoded, $(...) kept literal) -- not the per-atom values, so a glued
 		// number keeps its source text (0x10-1 stays "0x10-1", not "16-1").
+		// A quoted piece keeps its own value: its delimiters are dropped, but
+		// a quote of the other kind inside it and a doubled quote are text
+		// (--command:'say "hi"' is --command:say "hi"; rel-1-0-10:GAP-1854).
 		val, amb := "", false
 		if s0 >= 0 && end <= len(p.src) && end >= s0 {
-			val, amb = p.decodeBacktick(p.src[s0:end], true)
+			_, amb = p.decodeBacktick(p.src[s0:end], true)
+			val = p.fusedLiteralValue(atoms, s0, end)
 		}
 		if amb {
 			p.diag(s0, end, ReasonDialectAmbiguous, "backtick escape differs between PS 5.1 and 7")
@@ -569,6 +676,33 @@ func (p *parser) composeAtoms(atoms []Expr, s0, end int) Expr {
 		parts = append(parts, StringPart{Expr: a})
 	}
 	return &StringLit{span: span{s0, end}, Kind: StrDouble, Static: false, Parts: parts}
+}
+
+// fusedLiteralValue is the value of a fused all-literal argument: the
+// source text of its unquoted pieces (backtick escapes decoded, so a glued
+// number keeps its source text) and the value of each quoted piece.
+func (p *parser) fusedLiteralValue(atoms []Expr, s0, end int) string {
+	var b strings.Builder
+	pos := s0
+	for _, a := range atoms {
+		as, ae := a.Span()
+		if as < pos || ae < as || ae > end {
+			v, _ := p.decodeBacktick(p.src[s0:end], true)
+			return v
+		}
+		if sl, ok := a.(*StringLit); ok && !sl.Bare && sl.Kind != StrBare {
+			gap, _ := p.decodeBacktick(p.src[pos:as], true)
+			b.WriteString(gap)
+			b.WriteString(sl.Value)
+		} else {
+			v, _ := p.decodeBacktick(p.src[pos:ae], true)
+			b.WriteString(v)
+		}
+		pos = ae
+	}
+	rest, _ := p.decodeBacktick(p.src[pos:end], true)
+	b.WriteString(rest)
+	return b.String()
 }
 
 // adjacentFusable reports whether a token with no preceding whitespace extends

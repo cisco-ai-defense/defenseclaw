@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func startSandboxImageProbe(t *testing.T) (int, string) {
@@ -160,9 +161,7 @@ func TestInstalledSandboxDaemonCopyRequiresContentAddressedFile(t *testing.T) {
 	if err := os.Remove(copyPath); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(canonical, copyPath); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, canonical, copyPath)
 	if installedSandboxDaemonCopy(canonical, copyPath) {
 		t.Fatal("symlinked copy was accepted")
 	}
@@ -194,9 +193,7 @@ func TestInstalledSandboxDaemonCopyResolvesLauncher(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(launcher), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(canonical, launcher); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, canonical, launcher)
 	if !installedSandboxDaemonCopy(canonical, copyPath) {
 		t.Fatal("direct gateway file was not recognized")
 	}
@@ -213,9 +210,7 @@ func TestInstalledSandboxDaemonCopyResolvesLauncher(t *testing.T) {
 	if err := os.Remove(launcher); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(other, launcher); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, other, launcher)
 	if installedSandboxDaemonCopy(launcher, copyPath) {
 		t.Fatal("launcher pointing outside the installed gateway directory was recognized")
 	}

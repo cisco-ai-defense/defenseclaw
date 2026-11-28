@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"errors"
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"io"
 	"os"
 	"path/filepath"
@@ -792,18 +793,35 @@ func processLinkPrefix(path string) string {
 	return path
 }
 
+// entryWalkPath is the path whose folder an entry-only proof (touch -h, the
+// replace verbs) walks on this host. A word through the command's own
+// working-directory link names the entry below the folder the command runs
+// in (actionfacts.ProcessCWDLinkSpelling). Any other process link names a
+// folder of a process the host cannot walk for the agent: the walk would
+// follow the gateway's own process link, so ok is false and the proof does
+// not hold (rel-1-0-10:GAP-2265).
+func entryWalkPath(path, cwd string) (string, bool) {
+	if placed, ok := actionfacts.ProcessCWDLinkSpelling(path, cwd); ok {
+		return placed, true
+	}
+	return path, !throughProcessLink(path)
+}
+
 // processLinkWrites keeps the write operands whose placed path passes
 // through a process-dependent link (processLinkHead): the writes that only
 // the process-link proof reads (GAP-2227, GAP-2237, GAP-2275). A call placed
 // in a folder below such a link keeps every operand, as a host that cleans
-// a relative dot-dot it cannot probe may have dropped the link from it.
-func processLinkWrites(names []string, cwd string) []string {
+// a relative dot-dot it cannot probe may have dropped the link from it. An
+// operand that steps out of a link, or passes a link the command makes to a
+// process link (madeLinks.linkBeforeStep), is kept too: its place is known
+// only once those links are resolved (rel-1-0-10:GAP-2287).
+func processLinkWrites(names []string, cwd string, made madeLinks) []string {
 	if throughProcessLink(cwd) {
 		return names
 	}
 	kept := names[:0]
 	for _, name := range names {
-		if throughProcessLink(name) {
+		if throughProcessLink(name) || made.linkBeforeStep(name) {
 			kept = append(kept, name)
 		}
 	}

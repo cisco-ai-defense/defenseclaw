@@ -458,6 +458,11 @@ func archiveCallExtractions(words []string, static []bool, cwd string, read *arc
 		if !filepath.IsAbs(folder) {
 			folder = filepath.Join(cwd, folder)
 		}
+		// The command's own cwd link names a folder below the one it runs
+		// in, not the lexical /proc/self/... (rel-1-0-10:GAP-2265).
+		if placed, ok := actionfacts.ProcessCWDLinkSpelling(folder, cwd); ok {
+			folder = placed
+		}
 		folder = filepath.Clean(folder)
 		read.paths = append(read.paths, folder)
 		if unknown {

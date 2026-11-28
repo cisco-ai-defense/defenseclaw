@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"golang.org/x/sys/windows"
 )
 
@@ -538,6 +539,7 @@ func TestStandaloneTrustGatesEveryDriftTolerantWalk(t *testing.T) {
 // gate falls back to the strict service check, which allows the gateway
 // service as a writer, instead of the tolerant walk, which does not.
 func TestStandaloneServiceRuntimeFileKeepsGatewayWriter(t *testing.T) {
+	requireElevatedTrustFixture(t, "the token file and its folder grant only SYSTEM, Administrators and the gateway service")
 	t.Setenv(TrustStrictAncestorsEnv, "")
 	pinTrustProfileForTest(t, true)
 	const account = `NT SERVICE\DefenseClawGatewayG561`
@@ -568,12 +570,26 @@ func TestStandaloneServiceRuntimeFileKeepsGatewayWriter(t *testing.T) {
 	}
 }
 
+// requireElevatedTrustFixture skips a trust test whose fixture only an
+// elevated token can hold (rel-1-0-10:GAP-2088). A standard user owns every
+// object it creates, and the trust walk refuses that owner, so the test
+// cannot reach the rule it checks; and once the fixture's DACL grants only
+// SYSTEM and Administrators that user cannot remove the temp folder either.
+// The elevated native leg and the Windows CI runners run these tests.
+func requireElevatedTrustFixture(t *testing.T, fixture string) {
+	t.Helper()
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("needs an elevated token: a standard user owns what it creates, which the trust walk refuses, and " + fixture)
+	}
+}
+
 // inheritedCreateChildDirForTest returns a folder whose only extra entry is
 // the container-only BUILTIN\Users create-child grant it inherits from its
 // parent, the shape a folder takes after its protection is reset to inherit
 // from C:\ProgramData.
 func inheritedCreateChildDirForTest(t *testing.T) string {
 	t.Helper()
+	requireElevatedTrustFixture(t, "the folder and its parent grant only SYSTEM and Administrators full control")
 	t.Setenv(TrustStrictAncestorsEnv, "")
 	parent := filepath.Join(t.TempDir(), "parent")
 	if err := os.Mkdir(parent, 0o700); err != nil {
@@ -593,6 +609,9 @@ func inheritedCreateChildDirForTest(t *testing.T) string {
 // the folder is refused there.
 func TestStandaloneTrustRefusesInheritedCreateChild(t *testing.T) {
 	t.Run("secure client accepts", func(t *testing.T) {
+		// Secure Client accepts only an administrator-owned folder; a standard
+		// user owns the test folder, which is untrusted by design (GAP-1099).
+		testenv.RequireElevated(t, "the accepted folder must be owned by an administrator, and a standard user owns the temp folder")
 		dir := inheritedCreateChildDirForTest(t)
 		pinTrustProfileForTest(t, false)
 		previousHost, previousPath := SecureClientHostVerified, SecureClientProcessPathVerified

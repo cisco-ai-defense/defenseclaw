@@ -138,6 +138,13 @@ func TestRunBenchmarkRejectsBinaryProvenanceBeforeLoadingCorpus(t *testing.T) {
 func stubRunBinaryProvenance(t *testing.T, repoRoot string) {
 	t.Helper()
 	commit, _ := gitState(repoRoot)
+	if !fullGitCommitPattern.MatchString(commit) {
+		// A source tree without git metadata (the exported tree the native
+		// Windows test hosts run): the stub stands in for both sides of the
+		// provenance check anyway, so any full commit serves
+		// (rel-1-0-10:GAP-2192).
+		commit = strings.Repeat("0123456789", 4)
+	}
 	clean := false
 	previousGitState := gitStateForRun
 	previousBinaryVCS := runningBinaryVCSForRun
@@ -478,6 +485,15 @@ func TestDTapMigrationOutputLoadsEndToEnd(t *testing.T) {
 	}
 	migratedPath := filepath.Join(dir, "migrated.jsonl")
 	migratedManifestPath := filepath.Join(dir, "migrated.manifest.json")
+	if err := exec.Command("python3", "-c", "").Run(); err != nil {
+		// The migration is a Python script; the Linux test legs, which have
+		// python3, run this test (rel-1-0-10:GAP-2192: the native Windows
+		// test hosts have no python3, and a standard user there finds the
+		// Microsoft Store "python3" alias on PATH, which only prints
+		// "Python was not found" and exits 9009, so a PATH lookup is not
+		// enough: the interpreter has to run).
+		t.Skipf("needs a python3 that runs: the DTap migration is a Python script (%v)", err)
+	}
 	command := exec.Command("python3", filepath.Join(repoRoot, "benchmarks", "scripts", "benchmark_normalize_dtap.py"),
 		"--migrate-existing-corpus", corpusPath, "--legacy-manifest", legacyManifestPath,
 		"--output", migratedPath, "--manifest", migratedManifestPath)

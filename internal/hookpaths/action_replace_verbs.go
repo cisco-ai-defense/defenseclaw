@@ -70,7 +70,10 @@ func replaceVerbSafeIn(command, cwd, home string, startup ShellStartup) bool {
 	ssh := filepath.Join(home, ".ssh")
 	memo := NewTargetMemo()
 	for _, operand := range operands {
-		path := OperandPath(operand, cwd)
+		path, walkable := entryWalkPath(OperandPath(operand, cwd), cwd)
+		if !walkable {
+			return false
+		}
 		parent, known := memo.resolveWriteTarget(filepath.Dir(path))
 		if !known {
 			return false

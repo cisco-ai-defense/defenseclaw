@@ -21,16 +21,20 @@ func directoryEnterable(path string) bool {
 	if err != nil || !info.IsDir() {
 		return false
 	}
-	name, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return false
-	}
-	handle, err := windows.CreateFile(name, fileTraverse|windows.SYNCHRONIZE,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
-		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
-	if err != nil {
-		return false
-	}
-	_ = windows.CloseHandle(handle)
-	return true
+	// The open is made as readGated makes a read (rel-1-0-10:GAP-1264).
+	_, err = readGatedValue("open", path, func(read string) (struct{}, error) {
+		name, err := windows.UTF16PtrFromString(read)
+		if err != nil {
+			return struct{}{}, err
+		}
+		handle, err := windows.CreateFile(name, fileTraverse|windows.SYNCHRONIZE,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+			windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+		if err != nil {
+			return struct{}{}, err
+		}
+		_ = windows.CloseHandle(handle)
+		return struct{}{}, nil
+	})
+	return err == nil
 }

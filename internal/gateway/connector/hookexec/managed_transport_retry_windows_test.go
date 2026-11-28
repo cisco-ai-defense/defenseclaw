@@ -258,11 +258,11 @@ func TestManagedEnterpriseRunEndpointBuildFailureFollowsFailMode(t *testing.T) {
 }
 
 func TestManagedHookDecisionRecordSourceUsesProtectedServiceName(t *testing.T) {
-	if got := managedHookDecisionRecordSource("DefenseClawGatewayCert"); got != "DefenseClawGatewayCert" {
+	if got := ManagedHookDecisionRecordSource("DefenseClawGatewayCert"); got != "DefenseClawGatewayCert" {
 		t.Fatalf("source = %q", got)
 	}
 	for _, invalid := range []string{"", " padded", `a\b`, "a/b"} {
-		if got := managedHookDecisionRecordSource(invalid); got != managedHookDecisionRecordDefaultSource {
+		if got := ManagedHookDecisionRecordSource(invalid); got != managedHookDecisionRecordDefaultSource {
 			t.Fatalf("source(%q) = %q", invalid, got)
 		}
 	}

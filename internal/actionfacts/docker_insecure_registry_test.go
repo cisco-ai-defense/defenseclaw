@@ -144,7 +144,7 @@ func FuzzExactDockerInsecureRegistryWriteFailsClosed(f *testing.F) {
 		if !matched {
 			return
 		}
-		if len(nativeFileWrites(tool, input.Args)) == 0 {
+		if len(nativeFileWrites(tool, input.Args, "")) == 0 {
 			t.Fatalf("unsupported tool matched: %q", tool)
 		}
 		if !facts.Authoritative() || !facts.EnforcementEligible() ||

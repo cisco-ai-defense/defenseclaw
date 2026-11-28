@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
 )
 
 // The open-secret hold of a streamed reply (rel-1-0-10:GAP-0429).
@@ -28,7 +29,7 @@ import (
 //     another label, an END line of any label, or a line that no PEM body
 //     has ends it (GAP-0428), and the search goes on after that BEGIN line,
 //     so a decoy header before a key does not hide the key;
-//   - the prefix of a token rule of the secret rules (streamTokenOpen) with
+//   - the prefix of a token rule of the secret rules (streamTokenOpenEach) with
 //     at least one byte of the token, the token still running at the end of
 //     the lane;
 //   - a digit run that can still become a card number or an SSN the
@@ -155,9 +156,20 @@ const streamPIISep = `[\s\p{Zs}\-\x{2010}-\x{2015}\x{2212}]`
 // hold (secretLane.pem).
 var streamSecretExempt = map[string]bool{"SEC-ENV-DUMP-REQUEST": true, "SEC-PRIVKEY": true}
 
-// streamTokenOpen matches a token, or a card or SSN digit run, still running
-// at the end of a text.
-var streamTokenOpen = func() *regexp.Regexp {
+// streamTokenOpenEach match a token, or a card or SSN digit run, still
+// running at the end of a text: one expression per alternative of
+// streamTokenOpenAlts, each anchored at the end on its own
+// (streamTokenOpenStart).
+var streamTokenOpenEach = func() []*regexp.Regexp {
+	alts := streamTokenOpenAlts()
+	out := make([]*regexp.Regexp, len(alts))
+	for i, alt := range alts {
+		out[i] = regexp.MustCompile(`(?:` + alt + `)$`)
+	}
+	return out
+}()
+
+func streamTokenOpenAlts() []string {
 	alts := make([]string, 0, len(streamTokenRules)+len(streamPIIRules))
 	for _, r := range streamTokenRules {
 		alts = append(alts, r.open)
@@ -165,8 +177,31 @@ var streamTokenOpen = func() *regexp.Regexp {
 	for _, r := range streamPIIRules {
 		alts = append(alts, r.open)
 	}
-	return regexp.MustCompile(`(?:` + strings.Join(alts, "|") + `)$`)
-}()
+	return alts
+}
+
+// streamTokenOpenStart is the start of the match in tail of the
+// alternatives joined into one end-anchored expression, -1 for none (the
+// tests hold that expression, streamTokenOpen, as the reference). The joined
+// expression matches at the leftmost offset where one of its alternatives
+// matches up to the end, so the start is the least start of the
+// alternatives' matches. An alternative whose required literals the
+// tail lacks (rxprefilter) cannot match and is not run: the one automaton of
+// every alternative read the whole tail at each piece of a stream, the
+// largest cost of a streamed reply after GAP-0515 (substrate-1:GAP-1107).
+func streamTokenOpenStart(tail string) int {
+	text := rxprefilter.NewText(tail)
+	best := -1
+	for _, re := range streamTokenOpenEach {
+		if !text.HoldsLiterals(re) {
+			continue
+		}
+		if loc := re.FindStringIndex(tail); loc != nil && (best < 0 || loc[0] < best) {
+			best = loc[0]
+		}
+	}
+	return best
+}
 
 // secretLane is the open-secret state of one lane of reply text. The lane
 // only grows; the state is advanced over the new text when asked.
@@ -206,7 +241,9 @@ func (s *secretLane) mark(at, n int) {
 }
 
 // textAt is the reply text offset of lane byte off, which is in the kept
-// tail (mark keeps every segment from len-streamSecretTail on).
+// tail (mark keeps every segment from len-streamSecretTail on). A byte
+// before the kept tail (a boundary line run in reasoning that has resumed
+// since, GAP-2219) is placed at 0: no held piece goes out before it.
 func (s *secretLane) textAt(off int) int {
 	if len(s.segs) == 0 {
 		return off
@@ -214,6 +251,9 @@ func (s *secretLane) textAt(off int) int {
 	i := len(s.segs) - 1
 	for i > 0 && s.segs[i].at > off {
 		i--
+	}
+	if s.segs[i].at > off {
+		return 0
 	}
 	return max(s.segs[i].n+off-s.segs[i].at, 0)
 }
@@ -292,11 +332,11 @@ func (s *secretLane) token(t string) bool { return s.tokenStart(t) >= 0 }
 // end of t, -1 for none.
 func (s *secretLane) tokenStart(t string) int {
 	from := max(len(t)-streamSecretTail, 0)
-	loc := streamTokenOpen.FindStringIndex(t[from:])
-	if loc == nil {
+	at := streamTokenOpenStart(t[from:])
+	if at < 0 {
 		return -1
 	}
-	start := from + loc[0]
+	start := from + at
 	if start < s.tokenFrom || len(t)-start >= streamSecretMaxToken {
 		return -1
 	}
@@ -482,7 +522,9 @@ func (r *responseText) OpenSecret() openSecret {
 }
 
 // OpenRunFrom is the reply text offset (Len) of the first byte of the oldest
-// open token or digit run, -1 for none (GAP-1306).
+// open token or digit run, -1 for none (GAP-1306): of a lane, or of a
+// reasoning-to-answer boundary line OpenSecret holds for (GAP-2166), which
+// can start before every lane run (rel-1-0-10:GAP-2219).
 func (r *responseText) OpenRunFrom() int {
 	from := -1
 	for i, l := range r.lanes {
@@ -490,6 +532,11 @@ func (r *responseText) OpenRunFrom() int {
 			if at := r.secret[i].textAt(st); from < 0 || at < from {
 				from = at
 			}
+		}
+	}
+	for i := range r.boundaries {
+		if at := r.boundaryRunFrom(&r.boundaries[i]); at >= 0 && (from < 0 || at < from) {
+			from = at
 		}
 	}
 	return from

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 type registrationRunner struct{ calls []Command }
@@ -177,9 +179,7 @@ func TestAHomebrewCoreOpenShellIsNamedForRemovalNotReinstalled(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := os.Symlink(filepath.Join("..", "Cellar", "openshell", "0.1.5"), filepath.Join(brew, "opt", "openshell")); err != nil {
-				t.Fatal(err)
-			}
+			testenv.Symlink(t, filepath.Join("..", "Cellar", "openshell", "0.1.5"), filepath.Join(brew, "opt", "openshell"))
 			if tc.tap != "" {
 				receipt := `{"installed_on_request":true,"source":{"spec":"stable","tap":"` + tc.tap + `"}}`
 				if err := os.WriteFile(filepath.Join(keg, "INSTALL_RECEIPT.json"), []byte(receipt), 0o644); err != nil {

@@ -23,6 +23,7 @@ func TestPerUserCopilotHookFailModeIsTheInstalledOne(t *testing.T) {
 	if outage.PerUserClosed != OutageBlocks || outage.StrictAvailability != StrictAvailabilityRead {
 		t.Fatalf("HookOutage does not say what the per-user Copilot hook does (closed denies, strict availability read): %+v", outage)
 	}
+	warmNativeGatewayForHookTests(t)
 	for _, tc := range []struct {
 		installed, env, strict, tier string
 		deny                         bool
@@ -34,6 +35,7 @@ func TestPerUserCopilotHookFailModeIsTheInstalledOne(t *testing.T) {
 		{installed: "open", env: "", strict: "1", tier: "default", deny: true},
 	} {
 		t.Run("installed="+tc.installed+"/env="+tc.env+"/strict="+tc.strict, func(t *testing.T) {
+			parallelHookCase(t)
 			home := t.TempDir()
 			hookDir := filepath.Join(home, "hooks")
 			opts := SetupOpts{DataDir: home, APIAddr: "127.0.0.1:1", APIToken: "scoped-test-token", HookFailMode: tc.installed}

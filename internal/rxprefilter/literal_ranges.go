@@ -420,7 +420,13 @@ func (t *Text) foldAligned() (string, bool) {
 		t.aligned, t.alignDone = aligned, true
 	}
 	if !t.done {
-		t.folded, t.done = foldCanonical(t.text), true
+		if t.memo != nil {
+			// A text of a memo folds only what is new since the last one
+			// (memo.go): the fold of each mid-stream check is not redone.
+			t.folded, t.done = t.memo.fold.Apply(t.text, foldCanonical, SplitBeforeASCII), true
+		} else {
+			t.folded, t.done = foldCanonical(t.text), true
+		}
 	}
 	return t.folded, t.aligned
 }

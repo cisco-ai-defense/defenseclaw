@@ -84,7 +84,9 @@ func TestPerlSpecCorpusTableCounts(t *testing.T) {
 			lower++
 		}
 	}
-	if len(rows) != 190 || raise != 97 || equal != 93 || lower != 0 {
+	// U24 (perl5.38) is a raise since substrate-1 GAP-1097 reads a
+	// versioned perl binary as perl.
+	if len(rows) != 190 || raise != 98 || equal != 92 || lower != 0 {
 		t.Fatalf("ids=%d raise=%d equal=%d lower=%d", len(rows), raise, equal, lower)
 	}
 }

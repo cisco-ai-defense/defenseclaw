@@ -18,6 +18,7 @@ package connector
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -635,6 +636,22 @@ func PinNativeHookExecutableForTest(path string) func() {
 		defenseclawHookBinaryOverride = previous
 		defenseclawHookBinaryOverrideMu.Unlock()
 	}
+}
+
+// PinCodexPolicyInspectorForTest makes Codex setup read an unrestricted
+// effective policy named source instead of starting the selected Codex binary,
+// and returns a restore function. Cross-package tests use it on Windows, where
+// an unmanaged Codex Setup otherwise needs a selection receipt and a runnable
+// codex.exe app-server. It panics unless the process is a test binary.
+func PinCodexPolicyInspectorForTest(source string) func() {
+	if flag.Lookup("test.v") == nil {
+		panic("connector: PinCodexPolicyInspectorForTest is test-only")
+	}
+	previous := codexPolicyInspector
+	codexPolicyInspector = func(context.Context, SetupOpts) (codexEffectivePolicy, error) {
+		return codexEffectivePolicy{Source: source}, nil
+	}
+	return func() { codexPolicyInspector = previous }
 }
 
 type nativeWindowsInstallState struct {

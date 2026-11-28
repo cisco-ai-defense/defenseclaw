@@ -89,7 +89,8 @@ func TestGAP2147ManagedFollowsTheProbe(t *testing.T) {
 // neither the group nor others may write it. A file others may write, or one
 // a user owns, makes the skill the user's, as on Windows. The test's own user
 // stands for root (skillAdminUID), so it runs the same as a normal user and as
-// root.
+// root. It pins that the rule is the owner and the mode bits only, so a macOS
+// extended access list is not read (documented limit, rel-1-0-10:GAP-2165).
 func TestGAP2147UnixEntryOthersMayChangeClearsManaged(t *testing.T) {
 	admin := skillAdminUID
 	skillAdminUID = uint32(os.Geteuid())

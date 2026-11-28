@@ -198,9 +198,8 @@ func (l rgCommandLine) patternOptions() (bool, []string) {
 // rgArgvWords(command), cwd the folder it runs in (rgWorkingFolder; ""
 // when it is not known exactly: every glob is then unsure, see below, and
 // types and the hidden rule, which read only a name, stay exact). Its documented default
-// skips hidden (dot-named) files and folders (and .gitignore'd paths,
-// which are not modelled: a non-hidden file counts as read). The filter
-// reads what rg reads:
+// skips hidden (dot-named) files and folders and what its ignore files
+// skip (read after the walk, rg_ignore.go). The filter reads what rg reads:
 //   - --hidden (-.), until a later --no-hidden; and the second
 //     --unrestricted (-uu), which turns --hidden on where it stands;
 //   - the --glob globs, then the --iglob globs (rg adds every -g glob
@@ -218,7 +217,12 @@ func (l rgCommandLine) patternOptions() (bool, []string) {
 //   - an --ignore-file, unless --no-ignore-files: its "!" lines can
 //     whitelist a hidden file or folder past the hidden rule (never past an
 //     override glob or a type; its contents are not read here), so hidden
-//     counts as on.
+//     counts as on;
+//   - which ignore files rg reads (ignore): --no-ignore and the first -u
+//     turn every kind off and --ignore every kind on, then --no-ignore-dot,
+//     --no-ignore-vcs, --no-ignore-parent and --no-require-git (and their
+//     positive forms) each change one, in argv order, and
+//     --ignore-file-case-insensitive folds their globs.
 //
 // Count when unsure: the filter that reads every file (hidden on, no glob,
 // no type) when a word known only when it runs may be an option word
@@ -252,7 +256,7 @@ func rgSearchFilterOf(command CommandFact, argv []string, cwd string) *rgFilter 
 		argument := command.Arguments[option.word]
 		return argument.Expands && argument.StaticGlob == ""
 	}
-	f := &rgFilter{}
+	f := &rgFilter{ignore: rgIgnoreRead{dot: true, vcs: true, parents: true, requireGit: true}}
 	unrestricted, fold := 0, false
 	ignoreFile, ignoreFiles := false, true
 	var globs, iglobs []rgOption
@@ -268,16 +272,27 @@ func rgSearchFilterOf(command CommandFact, argv []string, cwd string) *rgFilter 
 			f.hidden = true
 		case "no-hidden":
 			f.hidden = false
-		case "no-ignore":
-			f.noIgnore = true
-		case "ignore":
-			f.noIgnore = false
 		case "unrestricted":
 			unrestricted++
-			f.noIgnore = true
-			if unrestricted == 2 {
+			switch unrestricted {
+			case 1:
+				f.ignore.dot, f.ignore.vcs, f.ignore.parents = false, false, false
+			case 2:
 				f.hidden = true
 			}
+		case "no-ignore", "ignore":
+			on := option.name == "ignore"
+			f.ignore.dot, f.ignore.vcs, f.ignore.parents = on, on, on
+		case "no-ignore-dot", "ignore-dot":
+			f.ignore.dot = option.name == "ignore-dot"
+		case "no-ignore-vcs", "ignore-vcs":
+			f.ignore.vcs = option.name == "ignore-vcs"
+		case "no-ignore-parent", "ignore-parent":
+			f.ignore.parents = option.name == "ignore-parent"
+		case "no-require-git", "require-git":
+			f.ignore.requireGit = option.name == "require-git"
+		case "ignore-file-case-insensitive", "no-ignore-file-case-insensitive":
+			f.ignore.fold = option.name == "ignore-file-case-insensitive"
 		case "glob":
 			globs = append(globs, option)
 		case "iglob":

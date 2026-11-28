@@ -19,6 +19,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"path"
@@ -525,6 +526,16 @@ type SubstrateExtprocConfig struct {
 	Ask             SubstrateExtprocAskConfig   `mapstructure:"ask"   yaml:"ask,omitempty"`
 	Judge           SubstrateExtprocJudgeConfig `mapstructure:"judge" yaml:"judge,omitempty"`
 	DLP             SubstrateExtprocDLPConfig   `mapstructure:"dlp"   yaml:"dlp,omitempty"`
+	// RateLimits holds each actor's requests through the callout to a rate
+	// (GAP-0635); the callout applies its default when unset.
+	RateLimits SubstrateExtprocRateLimitsConfig `mapstructure:"rate_limits" yaml:"rate_limits,omitempty"`
+}
+
+// SubstrateExtprocRateLimitsConfig is the callout's per-actor request rate,
+// across its replicas (extproc.RateLimitsConfig; 0 is the callout's
+// default, 200).
+type SubstrateExtprocRateLimitsConfig struct {
+	PerActorRPS float64 `mapstructure:"per_actor_rps" yaml:"per_actor_rps,omitempty"`
 }
 
 // SubstrateExtprocUIDConfig is the live-UID cache (Go durations; defaults
@@ -1393,6 +1404,9 @@ func (s *SubstrateConfig) Validate() error {
 	case SubstrateBodyAuto, SubstrateBodyOn, SubstrateBodyOff:
 	default:
 		bad("extproc.body_inspection", "%q must be auto, on or off", s.Extproc.BodyInspection)
+	}
+	if n := s.Extproc.RateLimits.PerActorRPS; math.IsNaN(n) || n < 0 || n > 1e6 {
+		bad("extproc.rate_limits.per_actor_rps", "%v is outside 0-1000000 (0 is the callout's default)", n)
 	}
 	if n := s.Extproc.BodyMaxBytes; n < 0 || n > DefaultSubstrateBodyMaxBytes {
 		bad("extproc.body_max_bytes", "%d is outside 0-%d (D9 caps bodies at 1 MiB)", n, DefaultSubstrateBodyMaxBytes)

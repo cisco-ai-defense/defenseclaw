@@ -70,6 +70,32 @@ func (c *Client) SpendKeys(ctx context.Context, epoch string, since time.Time, k
 	return rows, err
 }
 
+var _ routingadmin.UnknownRPC = (*Client)(nil)
+
+// SpendUnknown sends this replica's unknown-cost marks and reads every
+// replica's (substrate-1:GAP-1118). A leader of a release without the method
+// answers unknown_method, and the caller keeps its own marks.
+func (c *Client) SpendUnknown(ctx context.Context, epoch string, marks []routingadmin.UnknownMark) ([]routingadmin.UnknownMark, error) {
+	if len(marks) > maxUnknownMarks {
+		marks = marks[:maxUnknownMarks]
+	}
+	in := SpendUnknownRequest{Epoch: epoch}
+	for _, m := range marks {
+		if markKey(m.Key) {
+			in.Marks = append(in.Marks, SpendMark{Key: m.Key, At: m.At.Unix()})
+		}
+	}
+	var out SpendUnknownAnswer
+	if err := c.call(ctx, MethodSpendUnknown, in, &out); err != nil {
+		return nil, err
+	}
+	got := make([]routingadmin.UnknownMark, 0, len(out.Marks))
+	for _, m := range out.Marks {
+		got = append(got, routingadmin.UnknownMark{Key: m.Key, At: time.Unix(m.At, 0)})
+	}
+	return got, nil
+}
+
 // SpendSums reads the per-budget sums of every epoch (GAP-0894).
 func (c *Client) SpendSums(ctx context.Context, epoch string, q []routingadmin.SumQuery) ([]routingadmin.PrefixSum, error) {
 	in := SpendSumsRequest{Epoch: epoch}

@@ -54,9 +54,10 @@ func TestGAP0674WalkReadsOneFolderTheSameInEveryFormOfItsPath(t *testing.T) {
 			}
 		}
 	}
-	// The resolve keys the folders it has walked by the folder as typed
-	// (credentialWalkKey), so two forms of one folder in one call are two
-	// walks: both are read, both within the call's one walk budget.
+	// The resolve keys the folders it has walked by the cleaned folder
+	// (credentialWalkKey, rel-1-0-10:GAP-1668), so two forms of one folder
+	// in one call are one walk: its files are read once, within the call's
+	// one walk budget.
 	slash := filepath.ToSlash(root)
 	facts := Analyze(Input{Tool: "exec", Command: "grep -r KEY " + slash + " " + slash + "/./", CWD: root, ActiveHome: t.TempDir()})
 	if caps := facts.CredentialPathReadCaps(context.Background()); caps.Any() {

@@ -65,6 +65,10 @@ func substrateLifecyclePhase(event string) (phase, trigger string, ok bool) {
 		return "creating", "fork", true
 	case chainstate.LifecycleReverted:
 		return "reverting", "watch", true
+	case chainstate.LifecycleUndone:
+		// The owner put the actor's folder back to a checkpoint
+		// (defenseclaw substrate undo, GAP-0476).
+		return "reverting", "undo", true
 	case chainstate.LifecycleCrashed:
 		return "crashed", "watch", true
 	case chainstate.LifecycleDeleted:

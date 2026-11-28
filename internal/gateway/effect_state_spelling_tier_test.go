@@ -6,6 +6,7 @@
 package gateway
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -17,7 +18,11 @@ import (
 // lane as shipped. The a64bfdb931 lane-on block in every tier (GAP-1239,
 // GAP-1274 lane-on rows) predates those rulings (DET111 ruling
 // 2026-11-24T21:57Z). The benign twins, the same call with its folder in
-// /tmp, keep that cell too.
+// /tmp, write no state member: the sudo -D/--chdir child is read in its own
+// folder (rel-1-0-10:GAP-1274), so they get the cell of any sudo call (allow,
+// and the sudo alert of the strict tiers), never the state tier. Before, the
+// child was read again in the caller's folder and the twins took the owner
+// tier of a proven state write.
 func TestProvenStateWriteSpellingsShareTheOwnerTier(t *testing.T) {
 	home := r2Home(t)
 	rows := det111R2Rows(t, home,
@@ -42,7 +47,13 @@ func TestProvenStateWriteSpellingsShareTheOwnerTier(t *testing.T) {
 	} {
 		rows = append(rows, r2Row{id: id, cmd: cmd, cwd: home})
 	}
-	r2Cells(t, rows, func(_, tier string) string {
+	r2Cells(t, rows, func(id, tier string) string {
+		if strings.HasSuffix(id, "-benign/twin") {
+			if r2Strict(tier) {
+				return "alert"
+			}
+			return "allow"
+		}
 		if r2Strict(tier) {
 			return "block"
 		}

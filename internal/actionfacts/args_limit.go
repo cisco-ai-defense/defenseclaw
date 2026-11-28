@@ -24,15 +24,80 @@ const (
 // MaxJSONDepth), else "". Arguments past a bound give the structured readers
 // no facts at all, so a caller can judge a bounded projection of them as
 // well (substrate-1:GAP-1094). It reads only; the analysis is unchanged.
+//
+// Most calls are far inside the bounds: a scan of the bytes that allocates
+// nothing proves that (argsInsideLimits) and skips the decode. The hook
+// routes ask this of every MCP and app tool call (substrate-1:GAP-1096).
 func ArgsLimitIssue(raw json.RawMessage) IssueCode {
 	if len(raw) > maxArgsJSONBytes {
 		return IssueInputLimit
 	}
+	if argsInsideLimits(raw) {
+		return ""
+	}
+	return argsLimitIssueDecoded(raw)
+}
+
+// argsLimitIssueDecoded is ArgsLimitIssue by the reading's own decode.
+func argsLimitIssueDecoded(raw json.RawMessage) IssueCode {
 	switch issue := validateJSONWithStringLimit(raw, maxCommandBytes); issue {
 	case IssueInputLimit, IssueDepthLimit:
 		return issue
 	}
 	return ""
+}
+
+// argsInsideLimits reports raw that no bound of validateJSONWithStringLimit
+// can stop, in one pass over the bytes with no allocation: no string, key or
+// value, that may decode longer than maxScalarBytes (an escape never decodes
+// longer than it is written, a byte of 0x80 or more may decode to the three
+// bytes of U+FFFD), at most maxJSONMembers commas and openings (every member
+// but the first of a container follows a comma, so they bound the members),
+// no nesting deeper than maxJSONDepth and no unterminated string. False only
+// means the decode must decide.
+func argsInsideLimits(raw []byte) bool {
+	depth, items, run := 0, 0, 0
+	inString, escaped := false, false
+	for _, c := range raw {
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+				continue
+			}
+			if c >= 0x80 {
+				run += 3
+			} else {
+				run++
+			}
+			if run > maxScalarBytes {
+				return false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString, run = true, 0
+		case '{', '[':
+			depth++
+			items++
+			if depth > maxJSONDepth {
+				return false
+			}
+		case '}', ']':
+			depth--
+		case ',':
+			items++
+		}
+		if items > maxJSONMembers {
+			return false
+		}
+	}
+	return !inString
 }
 
 // ReadArgumentField returns the canonical field read for an argument

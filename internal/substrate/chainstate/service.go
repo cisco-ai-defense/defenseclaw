@@ -305,6 +305,10 @@ type actorState struct {
 	// Forked is set once the child's clock started from its parent's; a
 	// later or repeated fork event copies missing windows only (GAP-0142).
 	Forked bool `json:"forked,omitempty"`
+	// Checkpoints marks the workspace checkpoints the owner reported, the
+	// newest last (at most maxCheckpointMarks): an undo to one forgets the
+	// facts recorded after it about the files it put back (GAP-0476).
+	Checkpoints []checkpointMark `json:"checkpoints,omitempty"`
 	// Task is the launcher-registered --task text.
 	Task string `json:"task,omitempty"`
 	// UnrecordedUnixNano is the actor's running time of its last tool step
@@ -1493,6 +1497,10 @@ func (s *Service) Lifecycle(ctx context.Context, in LifecycleEvent) (LifecycleRe
 		return s.copyFork(ctx, e, st, instance, *in.Parent, at)
 	case LifecycleReverted:
 		return s.revert(ctx, e, at)
+	case LifecycleCheckpointed:
+		return s.checkpointed(e, in)
+	case LifecycleUndone:
+		return s.undone(ctx, e, in)
 	}
 	return LifecycleResult{}, bad(fmt.Errorf("chainstate: unknown lifecycle event %q", in.Event))
 }
@@ -1563,6 +1571,126 @@ func (s *Service) revert(ctx context.Context, e *actorEntry, at time.Time) (Life
 	}
 	s.syncMemo(ctx, st, e)
 	return LifecycleResult{Barriers: n}, nil
+}
+
+// checkpointMark is a workspace checkpoint's place in the actor's running
+// time: the leader's stamp when the owner reported it, never a time the
+// caller gives, so every chain event recorded before the report is at or
+// before it.
+type checkpointMark struct {
+	Commit          string `json:"commit"`
+	RunningUnixNano int64  `json:"running_unix_nano"`
+}
+
+const maxCheckpointMarks = 64
+
+// checkpointed records the mark of a workspace checkpoint (GAP-0476). A
+// report that comes late only moves the mark later: facts recorded between
+// the checkpoint and its report count as from before it and stay.
+func (s *Service) checkpointed(e *actorEntry, in LifecycleEvent) (LifecycleResult, error) {
+	if !validCommit(in.Checkpoint) {
+		return LifecycleResult{}, bad(errors.New("chainstate: a checkpoint names its commit"))
+	}
+	defer s.lock(e.actor)()
+	mark := s.stamp(e, s.opts.Now())
+	st := s.stateOf(e)
+	marks := make([]checkpointMark, 0, len(st.Checkpoints)+1)
+	for _, c := range st.Checkpoints {
+		if c.Commit != in.Checkpoint {
+			marks = append(marks, c)
+		}
+	}
+	marks = append(marks, checkpointMark{Commit: in.Checkpoint, RunningUnixNano: mark.UnixNano()})
+	if len(marks) > maxCheckpointMarks {
+		marks = marks[len(marks)-maxCheckpointMarks:]
+	}
+	st.Checkpoints = marks
+	return LifecycleResult{}, s.setState(e, st)
+}
+
+// undone takes the facts about the files a workspace undo reverted out of
+// the actor's artifact chains (download then run, decode, sensitive-egress
+// artifact; GAP-0476): the facts recorded after the checkpoint about the
+// files it removed or put back. Without the checkpoint's mark (taken
+// before this version, or its report failed) every fact about a removed
+// file goes, since the file did not exist at the checkpoint and is gone
+// now, and the facts about the files put back stay. Facts about files
+// outside the folder, and every other step, stay: a barrier like a
+// revert's would forget a download outside the folder that still exists.
+func (s *Service) undone(ctx context.Context, e *actorEntry, in LifecycleEvent) (LifecycleResult, error) {
+	if in.Checkpoint != "" && !validCommit(in.Checkpoint) {
+		return LifecycleResult{}, bad(errors.New("chainstate: invalid checkpoint commit"))
+	}
+	removed, err := digestSet(in.Removed)
+	if err != nil {
+		return LifecycleResult{}, bad(err)
+	}
+	restored, err := digestSet(in.Restored)
+	if err != nil {
+		return LifecycleResult{}, bad(err)
+	}
+	st, instance, err := s.storeOf(ctx, e)
+	if err != nil {
+		return LifecycleResult{}, err
+	}
+	defer s.lock(e.actor)()
+	var mark int64
+	known := false
+	for _, c := range s.stateOf(e).Checkpoints {
+		if in.Checkpoint != "" && c.Commit == in.Checkpoint {
+			mark, known = c.RunningUnixNano, true
+		}
+	}
+	res := LifecycleResult{CheckpointUnknown: !known}
+	if len(removed)+len(restored) == 0 {
+		return res, nil
+	}
+	upto := s.stamp(e, s.opts.Now()).UnixNano()
+	res.Forgotten, err = st.ForgetToolChainArtifacts(ctx, instance, func(digest string, received time.Time) bool {
+		return undoForgets(removed[digest], restored[digest], known, mark, upto, received.UnixNano())
+	})
+	return res, err
+}
+
+// undoForgets says whether an undo forgets a stored fact about one file
+// recorded at received (running time): a removed file's facts after the
+// checkpoint's mark (all of them without a mark), a put-back file's only
+// after the mark, and never a fact the leader recorded after it received
+// the undo report (upto, its own stamp), such as a download of the same
+// path after the undo.
+func undoForgets(isRemoved, isRestored, known bool, mark, upto, received int64) bool {
+	if received > upto {
+		return false
+	}
+	after := known && received > mark
+	return (isRemoved && (after || !known)) || (isRestored && after)
+}
+
+func validCommit(c string) bool {
+	return (len(c) == 40 || len(c) == 64) && isLowerHex(c)
+}
+
+func digestSet(digests []string) (map[string]bool, error) {
+	if len(digests) > MaxUndoFiles {
+		return nil, fmt.Errorf("chainstate: an undo names at most %d files of each kind", MaxUndoFiles)
+	}
+	out := make(map[string]bool, len(digests))
+	for _, d := range digests {
+		if len(d) != 64 || !isLowerHex(d) {
+			return nil, errors.New("chainstate: invalid path digest")
+		}
+		out[d] = true
+	}
+	return out, nil
+}
+
+func isLowerHex(v string) bool {
+	for _, r := range v {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // Egress serves ChainEgress: the callout's synchronous chain check. It

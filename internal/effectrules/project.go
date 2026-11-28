@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/effects"
@@ -28,8 +29,15 @@ type Env struct {
 	AccountHomes []string
 	// Resolve follows a write path through links; nil falls back to
 	// hookpaths.ResolveWriteTarget for the host's own path flavor and to the
-	// placed path for the other flavor (resolverFor).
+	// placed path for the other flavor (resolverForWith).
 	Resolve func(string) (string, bool)
+	// HostResolve, when Resolve is nil, replaces hookpaths.ResolveWriteTarget
+	// as the resolver of the host's own path flavor (resolverForWith): the
+	// gateway passes the hook call's target memo, so a target graded against
+	// every set and its hard link identity is walked once per call, with the
+	// answers the readers of the call already hold. Nil reads the disk
+	// (rel-1-0-10:GAP-2302).
+	HostResolve func(string) (string, bool)
 	// Identity reads a file's device and inode to find a hard link of a
 	// protected member (one stat per resolved target); nil reads the disk
 	// (DiskIdentity). Tests pass a HardLinkFixture.
@@ -63,7 +71,7 @@ func Project(res effects.Result, env Env) []*semanticpb.EffectFact {
 	}
 	rsv := env.Resolve
 	if rsv == nil {
-		rsv = resolverFor(flavor)
+		rsv = resolverForWith(flavor, env.HostResolve)
 	}
 	sets := buildSets(env.Home, flavor)
 	if len(env.AccountHomes) > 0 {
@@ -289,10 +297,15 @@ func holdKnownOnNameMaybe(facts []*semanticpb.EffectFact) {
 		uncertainEffect := fact.GetTargetState() != string(effects.TargetStateKnown) ||
 			fact.GetRoleState() != string(effects.RoleStateKnown) ||
 			fact.GetKind() == string(effects.KindOpaque)
+		namedMutation := EnvInputNamedMutation(fact)
 		for _, match := range target.GetProtected() {
 			// An inode match is direct resolver evidence for the physical file;
-			// retain it when command role or placement remains uncertain.
-			if uncertainEffect && match.GetState() == string(gradeKnown) && match.GetReason() != "inode" {
+			// retain it when command role or placement remains uncertain. So
+			// is the exact member a named mutation writes when only an env
+			// input of its program is unaccounted (EnvInputNamedMutation).
+			keep := match.GetReason() == "inode" ||
+				namedMutation && (match.GetReason() == "exact" || match.GetReason() == "other_home")
+			if uncertainEffect && match.GetState() == string(gradeKnown) && !keep {
 				match.State = string(gradeUnknown)
 				match.Reason = "call_maybe"
 			}
@@ -423,6 +436,36 @@ func projectSources(in []effects.Source) []*semanticpb.EffectSource {
 		})
 	}
 	return out
+}
+
+// envInputReasons are the reasons of a path effect the call names whose
+// only unknown is an env input of its program the allow list does not
+// account for (effects.ReasonEnvInput, always beside unknown_flag).
+var envInputReasons = []string{
+	string(effects.ScopeRole) + ":" + string(effects.ReasonUnknownFlag),
+	string(effects.ScopeRole) + ":" + string(effects.ReasonEnvInput),
+}
+
+// EnvInput reports a fact whose role the call words decide but for an
+// unaccounted env input of its program (a NAME= prefix, env or sudo NAME=,
+// an export, PATH, or a changed HOME: sudo, doas, env -i): the program may
+// read config of its own, so the fact is not fully known, but the target and
+// role it names are (rel-1-0-10:GAP-1478).
+func EnvInput(fact *semanticpb.EffectFact) bool {
+	return fact.GetTargetState() == string(effects.TargetStateKnown) &&
+		slices.Equal(fact.GetReasons(), envInputReasons)
+}
+
+// EnvInputNamedMutation reports an EnvInput write, append or delete: sudo
+// rsync --log-file=MEMBER or FOO=1 rsync --log-file=MEMBER writes MEMBER as
+// the unwrapped spelling does, so its exact protected match stays known
+// (GAP-1478).
+func EnvInputNamedMutation(fact *semanticpb.EffectFact) bool {
+	switch effects.Kind(fact.GetKind()) {
+	case effects.KindWrite, effects.KindAppend, effects.KindDelete:
+		return EnvInput(fact)
+	}
+	return false
 }
 
 func reasonStrings(in []effects.Reason) []string {

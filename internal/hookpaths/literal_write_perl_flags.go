@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -101,49 +102,161 @@ func perlImportHasName(tokens []perlToken, start, end int, name string) bool {
 	return false
 }
 
-func perlVisibilityAt(tokens []perlToken, call perlCall, name string) perlFlagVisibility {
-	var visibility perlFlagVisibility
-	for i := 0; i+1 < len(tokens) && tokens[i].start < call.start; i++ {
-		word := tokens[i].text
+// perlVisibilityAt is what a call sees of the flag modules and of name: a
+// use of the module before the call (loaded, and imported when its import
+// list names name), a require of the module in a BEGIN-like block other than
+// the call's (loaded), and a straight-line require in the call's own block
+// after its last branch word (runtime). Each question read the whole token
+// prefix of the call, the square of dense code (rel-1-0-10:GAP-2230); it is
+// now answered from the program's index (perlVisIndex).
+func perlVisibilityAt(s1 *perlS1Lazy, tokens []perlToken, call perlCall, name string) perlFlagVisibility {
+	return s1.visibility(tokens).at(tokens, call, name)
+}
+
+// perlVisIndex holds what perlVisibilityAt needs of one program, from one
+// pass over its tokens.
+type perlVisIndex struct {
+	// branches are the ascending indexes of sub and the loop and
+	// conditional words.
+	branches []int
+	// uses are the use statements of a flag module, in source order; end is
+	// the first ; at or after the import list (len(tokens) when none), so
+	// ends only grow.
+	uses []perlVisUse
+	// loadedUse[m] is the first use of Fcntl (0) or POSIX (1),
+	// len(tokens) when none.
+	loadedUse [2]int
+	// begin[m] are the first require of module m in a BEGIN-like block and
+	// the first one after it in another block.
+	begin [2][]perlVisRequire
+	// requires maps a block and a module to the ascending indexes of the
+	// module's requires in that block when it is not a sub or loop block.
+	requires map[[2]int][]int
+	// imports maps a name to, per module, the first use (an index of uses)
+	// whose whole import list names it; len(uses) when none.
+	imports map[string][3]int
+}
+
+type perlVisUse struct{ at, module, end int }
+
+type perlVisRequire struct{ at, block int }
+
+func (lazy *perlS1Lazy) visibility(tokens []perlToken) *perlVisIndex {
+	if lazy == nil {
+		return newPerlVisIndex(tokens)
+	}
+	if lazy.vis == nil {
+		lazy.vis = newPerlVisIndex(tokens)
+	}
+	return lazy.vis
+}
+
+func newPerlVisIndex(tokens []perlToken) *perlVisIndex {
+	n := len(tokens)
+	index := &perlVisIndex{loadedUse: [2]int{n, n}, requires: map[[2]int][]int{}, imports: map[string][3]int{}}
+	nextSemi := make([]int, n+1)
+	nextSemi[n] = n
+	for i := n - 1; i >= 0; i-- {
+		nextSemi[i] = nextSemi[i+1]
+		if tokens[i].text == ";" {
+			nextSemi[i] = i
+		}
+	}
+	for i := range tokens {
+		switch tokens[i].text {
+		case "sub", "for", "foreach", "while", "until", "if", "unless":
+			index.branches = append(index.branches, i)
+		}
+		if i+1 >= n {
+			continue
+		}
 		module := perlFlagModule(tokens[i+1].text)
 		if module < 0 {
 			continue
 		}
-		if word == "use" {
-			if module < 2 {
-				visibility.loaded[module] = true
+		switch tokens[i].text {
+		case "use":
+			if module < 2 && index.loadedUse[module] == n {
+				index.loadedUse[module] = i
 			}
-			end := i + 2
-			for end < len(tokens) && tokens[end].text != ";" && tokens[end].start < call.start {
-				end++
+			index.uses = append(index.uses, perlVisUse{at: i, module: module, end: nextSemi[i+2]})
+		case "require":
+			if module >= 2 {
+				continue
 			}
-			if perlImportHasName(tokens, i+2, end, name) {
-				visibility.imported[module] = true
+			block, kind := tokens[i].block, tokens[i].blockKind
+			if kind != "sub" && kind != "loop" {
+				key := [2]int{block, module}
+				index.requires[key] = append(index.requires[key], i)
+			}
+			if kind == "BEGIN" || kind == "UNITCHECK" || kind == "CHECK" || kind == "INIT" {
+				if first := index.begin[module]; len(first) == 0 || len(first) == 1 && first[0].block != block {
+					index.begin[module] = append(first, perlVisRequire{at: i, block: block})
+				}
 			}
 		}
-		if word == "require" && module < 2 {
-			if tokens[i].block == call.block && tokens[i].blockKind != "sub" &&
-				tokens[i].blockKind != "loop" {
-				straight := true
-				for j := i + 2; j < len(tokens) && tokens[j].start < call.start; j++ {
-					switch tokens[j].text {
-					case "sub", "for", "foreach", "while", "until", "if", "unless":
-						straight = false
-					}
-				}
-				if straight {
-					visibility.runtime[module] = true
-				}
-			} else if tokens[i].blockKind == "BEGIN" || tokens[i].blockKind == "UNITCHECK" ||
-				tokens[i].blockKind == "CHECK" || tokens[i].blockKind == "INIT" {
-				visibility.loaded[module] = true
+	}
+	return index
+}
+
+func (index *perlVisIndex) at(tokens []perlToken, call perlCall, name string) perlFlagVisibility {
+	var visibility perlFlagVisibility
+	callAt := sort.Search(len(tokens), func(i int) bool { return tokens[i].start >= call.start })
+	lastBranch := -1
+	if k := sort.SearchInts(index.branches, callAt) - 1; k >= 0 {
+		lastBranch = index.branches[k]
+	}
+	for module := range 2 {
+		loaded := index.loadedUse[module] < callAt
+		if first := index.begin[module]; !loaded && len(first) > 0 {
+			if first[0].block != call.block {
+				loaded = first[0].at < callAt
+			} else if len(first) > 1 {
+				loaded = first[1].at < callAt
 			}
+		}
+		visibility.loaded[module] = loaded
+		requires := index.requires[[2]int{call.block, module}]
+		k := sort.SearchInts(requires, lastBranch-1)
+		visibility.runtime[module] = k < len(requires) && requires[k] < callAt
+	}
+	// The uses before the call whose statement ends after it read their
+	// import list only up to the call; they are the last uses before it
+	// (ends only grow). The others read their whole list.
+	before := sort.Search(len(index.uses), func(k int) bool { return index.uses[k].at >= callAt })
+	whole := before
+	for whole > 0 && index.uses[whole-1].end > callAt {
+		whole--
+	}
+	imports := index.importsOf(tokens, name)
+	for module := range 3 {
+		visibility.imported[module] = imports[module] < whole
+	}
+	for _, use := range index.uses[whole:before] {
+		if !visibility.imported[use.module] &&
+			perlImportHasName(tokens, use.at+2, max(use.at+2, min(use.end, callAt)), name) {
+			visibility.imported[use.module] = true
 		}
 	}
 	return visibility
 }
 
-func perlFlagVisible(tokens []perlToken, call perlCall, spelling string, callForm bool) (string, bool) {
+func (index *perlVisIndex) importsOf(tokens []perlToken, name string) [3]int {
+	if first, known := index.imports[name]; known {
+		return first
+	}
+	none := len(index.uses)
+	first := [3]int{none, none, none}
+	for k, use := range index.uses {
+		if first[use.module] == none && perlImportHasName(tokens, use.at+2, use.end, name) {
+			first[use.module] = k
+		}
+	}
+	index.imports[name] = first
+	return first
+}
+
+func perlFlagVisible(s1 *perlS1Lazy, tokens []perlToken, call perlCall, spelling string, callForm bool) (string, bool) {
 	module := -1
 	name := spelling
 	if strings.HasPrefix(spelling, "Fcntl::") {
@@ -158,18 +271,18 @@ func perlFlagVisible(tokens []perlToken, call perlCall, spelling string, callFor
 	if _, known := perlFlagNumber(name); !known {
 		return "", false
 	}
-	v := perlVisibilityAt(tokens, call, name)
+	v := perlVisibilityAt(s1, tokens, call, name)
 	if module < 0 {
 		return name, v.imported[0] || v.imported[1] || v.imported[2]
 	}
 	return name, v.loaded[module] || callForm && v.runtime[module]
 }
 
-func perlFlagExpression(tokens []perlToken, call perlCall, span [2]int, defs map[string]perlDef) (uint64, bool) {
-	return perlFlagExpressionDepth(tokens, call, span, defs, 0)
+func perlFlagExpression(s1 *perlS1Lazy, tokens []perlToken, call perlCall, span [2]int, defs map[string]perlDef) (uint64, bool) {
+	return perlFlagExpressionDepth(s1, tokens, call, span, defs, 0)
 }
 
-func perlFlagExpressionDepth(tokens []perlToken, call perlCall, span [2]int, defs map[string]perlDef, depth int) (uint64, bool) {
+func perlFlagExpressionDepth(s1 *perlS1Lazy, tokens []perlToken, call perlCall, span [2]int, defs map[string]perlDef, depth int) (uint64, bool) {
 	if depth > 1 {
 		return 0, false
 	}
@@ -193,12 +306,12 @@ func perlFlagExpressionDepth(tokens []perlToken, call perlCall, span [2]int, def
 				return 0, false
 			}
 			at = next
-			valueSpan, proven := perlS1ValueSpan(tokens, call, name)
+			valueSpan, proven := perlS1ValueSpan(s1, tokens, call, name)
 			if !proven {
 				return 0, false
 			}
 			source := perlCall{start: valueSpan[0], block: call.block}
-			return perlFlagExpressionDepth(tokens, source, valueSpan, defs, depth+1)
+			return perlFlagExpressionDepth(s1, tokens, source, valueSpan, defs, depth+1)
 		}
 		if tok.text == "(" {
 			at++
@@ -235,7 +348,7 @@ func perlFlagExpressionDepth(tokens []perlToken, call perlCall, span [2]int, def
 				return def.value, def.known
 			}
 		}
-		name, visible := perlFlagVisible(tokens, call, tok.text, callForm)
+		name, visible := perlFlagVisible(s1, tokens, call, tok.text, callForm)
 		if !visible {
 			return 0, false
 		}
@@ -268,11 +381,10 @@ func perlFlagExpressionDepth(tokens []perlToken, call perlCall, span [2]int, def
 	return value, ok && at == len(expr)
 }
 
-func perlSysopenWrites(tokens []perlToken, calls []perlCall, definitions []perlDef, skip map[int]bool) []string {
+func perlSysopenWrites(s1 *perlS1Lazy, tokens []perlToken, calls []perlCall, definitions []perlDef, skip map[int]bool) []string {
 	var paths []string
 	defs := make(map[string]perlDef)
 	next := 0
-	const accmode = 3
 	for _, call := range calls {
 		if skip[call.start] {
 			continue
@@ -293,13 +405,20 @@ func perlSysopenWrites(tokens []perlToken, calls []perlCall, definitions []perlD
 		if !fixed {
 			continue
 		}
-		flags, known := perlFlagExpression(tokens, call, call.args[2], defs)
+		flags, known := perlFlagExpression(s1, tokens, call, call.args[2], defs)
 		if !known {
 			continue
 		}
-		if flags&accmode != 0 || flags&uint64(os.O_CREATE|os.O_TRUNC|os.O_APPEND) != 0 {
+		if perlFlagsWrite(flags, perlPlatformWriteBits) {
 			paths = append(paths, path)
 		}
 	}
 	return paths
+}
+
+// perlFlagsWrite reports whether sysopen flags ask for a change to the path:
+// an access mode other than read only, or one of the write bits of the
+// platform (perlPlatformWriteBits).
+func perlFlagsWrite(flags, writeBits uint64) bool {
+	return flags&3 != 0 || flags&writeBits != 0
 }

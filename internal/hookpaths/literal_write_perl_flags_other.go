@@ -5,4 +5,10 @@
 
 package hookpaths
 
+import "os"
+
 var perlPlatformFlags = [...]perlFlagConstant{}
+
+// perlPlatformWriteBits are the open flag bits beyond the access mode that
+// change the path.
+const perlPlatformWriteBits = uint64(os.O_CREATE | os.O_TRUNC | os.O_APPEND)

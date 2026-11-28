@@ -733,6 +733,10 @@ func dispatchTrustedActionOnceIn(
 				return snapshotRulePackGenerationFor(parent, request.Connector)
 			}
 			defer func() {
+				// The lane reads links through the target memo the readers
+				// of the call fill (made below, after this copy), not the disk
+				// again for every set (effectShadowFacts, rel-1-0-10:GAP-2302).
+				effectRequest.targetMemo = request.targetMemo
 				findings = joinEffectFindings(withFloorRaiseOnlyMark(effectRequest, findings, 0),
 					effectLiveFindings(effectRequest, mode, effectsRulesTierFor(), generation))
 			}()
@@ -854,8 +858,11 @@ func dispatchTrustedActionOnceIn(
 		// is a possible write to it, which blocks in every mode and
 		// profile, as the readers' proof of a state write did before the
 		// budget refused to read the call (GAP-0254, GAP-0255, GAP-0281).
+		// The kit whole-command proofs of a Substrate actor still decide
+		// (substrate-1 GAP-1156).
 		return withPowerShellCapPieces(parent, request,
-			withBudgetStateBlock(request, trustedActionBudgetFindings(request.EnforcementCapable)))
+			withOverBudgetKitProofs(parent, request, nil,
+				withBudgetStateBlock(request, trustedActionBudgetFindings(request.EnforcementCapable))))
 	}
 	if bound == shellReadingTooDeep || bound == shellReadingNestedBodies {
 		// Past the reading bounds: no reader below parses it, and the call
@@ -953,11 +960,14 @@ func dispatchTrustedActionOnceIn(
 			// (GAP-0382); the finding is the same one. The statements at the start
 			// and the end of a PowerShell call are also judged alone: a protected
 			// write beside the padding that put the call past the budget keeps its
-			// block (GAP-0693).
+			// block (GAP-0693). The kit whole-command proofs of a Substrate
+			// actor still decide: its links are not this gateway to follow
+			// (substrate-1 GAP-1156).
 			return withPowerShellCapPieces(parent, request,
-				withOverBudgetStateMutation(parent, request, facts,
-					withBoundedTruncation(trustedActionLimitFindings(request.EnforcementCapable),
-						posixParseTruncation(request, facts), request)))
+				withOverBudgetKitProofs(parent, request, &facts,
+					withOverBudgetStateMutation(parent, request, facts,
+						withBoundedTruncation(trustedActionLimitFindings(request.EnforcementCapable),
+							posixParseTruncation(request, facts), request))))
 		}
 		if awkCommandDynamic(facts) && !awkDynamicBoundBySimpleCommands(request, facts) {
 			// An awk command built at run time has no text to judge
@@ -1226,7 +1236,7 @@ func dispatchTrustedActionOnceIn(
 	// prove stays a block (rel-1-0-10:GAP-1055). The same envelope fed to
 	// apply_patch by a shell here-document is judged as the tool's is
 	// (rel-1-0-10:GAP-1077).
-	if actionfacts.PatchNamesUnplacedTarget(request.Input.Tool, request.Input.Args) ||
+	if actionfacts.PatchNamesUnplacedTarget(request.Input) ||
 		actionfacts.CommandPatchNamesUnplacedTarget(facts) {
 		defer func() {
 			findings = withUnknownFinding(findings, unknownReasonFinding(unplacedPatchTargetTitle,
@@ -1727,7 +1737,7 @@ func dispatchTrustedActionWith(
 				// the call budget, like its parent.
 				child.generation, child.budget = generation, budget
 				childFindings := dispatchTrustedAction(ctx, child)
-				if simple.UnresolvedFolder {
+				if simple.UnresolvedFolder && !guestWalkPlacesStatement(request, facts, simple) {
 					// The walk does not know the folder this statement runs
 					// in (cd "$X", cd "$(...)"): the unknown tier when an
 					// operand may be a named protected file there
@@ -8299,7 +8309,11 @@ func trustedRuleScanText(request trustedActionRequest, facts actionfacts.Facts) 
 		text = neutralizeKnownFixtureDataLiterals(text)
 	}
 	text = neutralizeTrustedSecretStoreValue(request.Input, text)
-	return relativeHomeWritesAsTilde(activeHomeAsTilde(text, request.Input.ActiveHome), facts)
+	command := request.Input.Command
+	if command == "" {
+		command, _ = trustedBashCommandInput(request.Input)
+	}
+	return relativeHomeWritesAsTilde(activeHomeAsTilde(text, request.Input.ActiveHome), command, facts)
 }
 
 // dispatchTrustedFallback judges a call with the legacy scan and the
@@ -11215,11 +11229,17 @@ func runTimeShellTwinRequest(request trustedActionRequest) (twin trustedActionRe
 	if !known {
 		return trustedActionRequest{}, false, caps, false
 	}
-	rewritten, ok, caps, unread := actionfacts.RunTimeShellTwin(command)
+	rewritten, ok, caps, unread, rootWrapper := actionfacts.RunTimeShellTwinReading(command)
 	if !ok || rewritten == command {
 		return trustedActionRequest{}, false, caps, unread
 	}
-	return bashReadingRequest(request, command, rewritten), true, caps, unread
+	twin = bashReadingRequest(request, command, rewritten)
+	// A twin read through chroot or nsenter is a reading 1.0.10 did not
+	// have: it raises the call and takes no effect finding of it
+	// (foldTargetsFor), so chroot / sh <<E keeps the CRITICAL its effect
+	// finding gives (rel-1-0-10:GAP-2132, GAP-1984).
+	twin.Input.FloorRaiseOnly = twin.Input.FloorRaiseOnly || rootWrapper
+	return twin, true, caps, unread
 }
 
 // stateGlobTwinRequest returns the request for actionfacts.StateGlobTwin of
@@ -12132,15 +12152,12 @@ func decodeTrustedTopLevelCommandField(raw json.RawMessage) (string, bool, bool)
 	return command, found, true
 }
 
+// trustedCommandFieldName is whether the reader reads name as the command:
+// the reader decides, so its aliases cannot drift from this check
+// (substrate-1:GAP-1132, the GAP-1128 class).
 func trustedCommandFieldName(name string) bool {
-	switch name {
-	case "command", "cmd", "script", "rawcommand", "raw_command",
-		"raw-command", "shellcommand", "shell_command", "shell-command",
-		"commandline", "command_line", "command-line":
-		return true
-	default:
-		return false
-	}
+	field, known := actionfacts.ReadArgumentField(name)
+	return known && field == "command"
 }
 
 func appendTrustedBashFallbackFindings(

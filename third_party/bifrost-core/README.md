@@ -21,4 +21,13 @@ after that point (the timeout error is named from the provider and model read
 before the hand-off, and no fallback decision is made on an ended context).
 `TestGAP0359TimedOutModelCallKeepsItsRequestUntilTheWorkerIsDone` (run it with
 `-race`) covers it.
+`bifrost.go` also sets `BifrostContextKeyProviderAccepted` (a new key in
+`schemas/bifrost.go`) when a provider returns a stream, that is, after its
+HTTP status check passed. It is never cleared for retries or fallbacks, so
+the DefenseClaw gateway can tell a call that a provider accepted (and may
+bill) from one every provider refused with an error status, even when the
+stream then fails with a status of its own or a later attempt is refused.
+`providers/replicate/replicate.go` sets the same key once a stream's
+prediction is created, before its stream URL is read.
+`TestTranslatedChatStreamAcceptedRequestIsUnknownCost` covers it.
 The copied Go sources are formatted with the pinned toolchain.

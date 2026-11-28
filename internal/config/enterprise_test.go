@@ -896,27 +896,11 @@ func TestEnterpriseUnverifiedVersions(t *testing.T) {
 // from the protected config, also while a rollback restores the previous
 // deployment under a new config whose rule pack the gateway service cannot
 // read. Refusing that config there failed the rollback and left every
-// service stopped (GAP-1291). Root-only: managed config trust needs a
-// root-owned path.
+// service stopped (GAP-1291). Linux needs root (managed config trust needs a root-owned
+// path); Windows needs an elevated token (an administrator-owned path).
 func TestLoadManagedFileForLifecycleRecoverySkipsPolicyInputChecks(t *testing.T) {
-	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
-		t.Skip("needs root on Linux: a managed config must sit on a root-owned path")
-	}
-	root, err := os.MkdirTemp("/var/lib", "dc-config-recovery-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	if err := os.Chmod(root, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	pack := filepath.Join(root, "pack")
-	if err := os.Mkdir(pack, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chown(pack, 65534, 65534); err != nil {
-		t.Fatal(err)
-	}
+	root := managedRecoveryRoot(t)
+	pack := untrustedRulePackDir(t, root)
 	path := filepath.Join(root, "config.yaml")
 	body := fmt.Sprintf("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\ndata_dir: %s\nguardrail:\n  rule_pack_dir: %s\n", root, pack)
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
@@ -938,17 +922,7 @@ func TestLoadManagedFileForLifecycleRecoverySkipsPolicyInputChecks(t *testing.T)
 // recovers it, read the protected config while it still held an api_bind
 // the gateway refuses; the refusal kept the transaction pending.
 func TestLoadManagedFileForLifecycleRecoverySkipsListenerBindCheck(t *testing.T) {
-	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
-		t.Skip("needs root on Linux: a managed config must sit on a root-owned path")
-	}
-	root, err := os.MkdirTemp("/var/lib", "dc-config-recovery-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	if err := os.Chmod(root, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	root := managedRecoveryRoot(t)
 	path := filepath.Join(root, "config.yaml")
 	body := fmt.Sprintf("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\ndata_dir: %s\ngateway:\n  api_bind: 0.0.0.0\n  api_port: 18971\n", root)
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {

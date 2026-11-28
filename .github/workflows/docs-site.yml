@@ -126,6 +126,11 @@ jobs:
       - name: Unit tests (policy creator)
         # Gate the deploy on the share/highlighter/cmdk-filter tests so
         # silent regressions in the policy creator can't ship to Pages.
+        # CI_REQUIRE_OPA: the admission/guardrail replays in test:docs-w4 skip
+        # on a machine without the built opa modules; here a missing module
+        # is a failure, so the replays cannot be skipped in CI.
+        env:
+          CI_REQUIRE_OPA: '1'
         run: |
           npm run test:policy-creator
           npm run test:docs-w4

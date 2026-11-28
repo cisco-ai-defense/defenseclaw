@@ -121,6 +121,17 @@ const (
 	// what the rest of the shell runs, or the statement sits behind a provably
 	// false `&&` / true `||` (rel-1-0-10 GAP-0218).
 	ReasonExecutionState ReasonCode = "execution_state"
+	// ReasonEnvInput marks a path effect the call names in its own words (an
+	// operand or an option argument) that was fully known until the one
+	// unaccounted input of its command turned out to be an env input the
+	// allow list does not account for (a NAME= prefix, env or sudo NAME=, an
+	// export, a changed PATH, or a changed HOME: sudo, doas, env -i). The
+	// program may then read config of its own, or the word may name another
+	// program, so the effect also carries unknown_flag and the call is never
+	// fully known; but the write, append or delete it names on an exact member
+	// is still that mutation (rel-1-0-10:GAP-1478, gateway
+	// knownProtectedMutationProofs). It is only ever added beside unknown_flag.
+	ReasonEnvInput ReasonCode = "env_input"
 )
 
 // reasonPrecedence orders reasons so a composite unknown reports the most
@@ -149,6 +160,7 @@ var reasonPrecedence = map[ReasonCode]int{
 	ReasonDestMayBeDir:       12,
 	ReasonVirtualRoot:        10,
 	ReasonExecutionState:     6,
+	ReasonEnvInput:           18,
 }
 
 // Reason is one closed reason with its scope.

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path"
 	"strings"
@@ -89,6 +90,8 @@ type Config struct {
 	Ask   AskConfig   `yaml:"ask"`
 	Judge JudgeConfig `yaml:"judge"`
 	DLP   DLPConfig   `yaml:"dlp"`
+	// RateLimits holds every actor to a request rate (GAP-0635).
+	RateLimits RateLimitsConfig `yaml:"rate_limits"`
 
 	// Secrets are the substrate.secrets bindings: which header carries a
 	// secret's value on which hosts, and its placeholder. Values are never
@@ -159,6 +162,19 @@ type JudgeConfig struct {
 	TokenFile string        `yaml:"token_file"`
 	CAFile    string        `yaml:"ca_file"`
 	Timeout   time.Duration `yaml:"timeout"`
+}
+
+// DefaultEgressPerActorRPS is the callout's default request rate of one
+// actor (burst twice that), shared by the callout replicas through the
+// leader. It is generous on purpose: package installs fetch in bursts, and
+// the limit is there for floods (GAP-0567 saw one actor at ~370 a second).
+const DefaultEgressPerActorRPS = 200
+
+// RateLimitsConfig is the callout's per-actor request limit (GAP-0635).
+type RateLimitsConfig struct {
+	// PerActorRPS is one actor's requests a second through the callout,
+	// across its replicas; 0 is DefaultEgressPerActorRPS.
+	PerActorRPS float64 `yaml:"per_actor_rps"`
 }
 
 // DLPConfig tunes the header scans.
@@ -313,6 +329,12 @@ func (c *Config) normalize() error {
 		// D9: the cap is 1 MiB; a larger buffer is a memory lever an actor
 		// could pull on every replica.
 		return bad("body_max_bytes %d (1 to %d)", c.BodyMaxBytes, DefaultBodyMaxBytes)
+	}
+	switch rps := c.RateLimits.PerActorRPS; {
+	case rps == 0:
+		c.RateLimits.PerActorRPS = DefaultEgressPerActorRPS
+	case rps < 0 || math.IsNaN(rps) || rps > 1e6:
+		return bad("rate_limits.per_actor_rps %v (0 for the default, at most 1000000)", rps)
 	}
 	switch c.DLP.CredentialHeaders = strings.ToLower(strings.TrimSpace(c.DLP.CredentialHeaders)); c.DLP.CredentialHeaders {
 	case "":

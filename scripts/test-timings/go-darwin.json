@@ -155,7 +155,7 @@
    "TestGAP1091StreamedPIIHeldRawForward": 70.2,
    "TestGAP1214PowerShellToolPOSIXHomeWritesFiveTiers": 65.6,
    "TestGAP1243LinkOperandPositionsFollowTheLinkFiveTiers": 9.2,
-   "TestGAP1265NumericTableIsNotCutAtHeldBound": 208.1,
+   "TestGAP1265NumericTableOverHeldBoundIsTruncated": 208.1,
    "TestGAP1265OpenRunIdleIsNotTruncated": 45.7,
    "TestHealthCountsALookupTheDirectoryDoesNotAnswer": 2.0,
    "TestHeredocPipedToAShellIsJudgedAsTheScriptItCarries": 18.9,

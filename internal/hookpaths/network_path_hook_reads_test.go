@@ -29,15 +29,17 @@ var hookPathRawReads = map[string][]string{
 	"os":           {"Stat", "Lstat", "Open", "OpenFile", "ReadFile", "ReadDir", "Readlink", "OpenRoot", "OpenInRoot", "DirFS"},
 	"ioutil":       {"ReadFile", "ReadDir"},
 	"filepath":     {"EvalSymlinks", "WalkDir", "Walk", "Glob"},
-	"pathidentity": {"StatPinned"},
+	"pathidentity": {"StatPinned", "LstatPinned", "HoldUnlinked"},
 }
 
 // hookPathRawHandles open a path through the Windows API. A function may
-// call one only after it read the same path through the bounded readers or
-// took it from gatedPath (or asked networkPathUnanswered, for a call that
-// opens no last link).
+// call one only inside a read of readGated or readGatedValue, which hands
+// it the path the share gate read under the hold of its last component and
+// discards the answer when the hold saw it change. Asking the share gate
+// or a stat first and then opening the name again is a second lookup of the
+// name after the share decision; it is no gate (rel-1-0-10:GAP-1264).
 var hookPathRawHandles = map[string][]string{
-	"windows": {"CreateFile", "GetLongPathName", "GetNamedSecurityInfo"},
+	"windows": {"CreateFile", "GetLongPathName", "GetNamedSecurityInfo", "FindFirstFile"},
 	"syscall": {"CreateFile"},
 }
 
@@ -79,6 +81,141 @@ func TestHookPathReadsAreShareBounded(t *testing.T) {
 	if len(found) != 0 {
 		t.Fatalf("hook path reads that bypass the network share bound (use pathStat, pathLstat, pathWalkDir, ... here, hookpaths.Stat or hookpaths.Lstat in the gateway):\n%s", strings.Join(found, "\n"))
 	}
+}
+
+// rel-1-0-10:GAP-1264 (CHK-RF-WINPATH-R2 F1): the share gate's own readers
+// (network_path*.go), which TestHookPathReadsAreShareBounded leaves out,
+// read only the path the gate read. A raw read there is either the read a
+// readGated or readGatedValue call makes (the function it is handed), or a
+// read of gate.read, the path the share walk resolved; the share walk itself
+// (shareGateOwnReads) is the gate. pathReadDirLimit asked the gate and then
+// opened the name again (os.Open(name)), a second lookup after the share
+// decision that this test now refuses.
+func TestShareGateReadersReadTheGatedPath(t *testing.T) {
+	files, err := filepath.Glob("network_path*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sources []string
+	for _, name := range files {
+		if !strings.HasSuffix(name, "_test.go") {
+			sources = append(sources, name)
+		}
+	}
+	if len(sources) < 4 {
+		t.Fatalf("read %d share gate sources (%v); the scan no longer finds network_path.go", len(sources), sources)
+	}
+	var found []string
+	fset := token.NewFileSet()
+	for _, name := range sources {
+		file, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range file.Decls {
+			found = append(found, shareGateNameReads(fset, decl)...)
+		}
+	}
+	sort.Strings(found)
+	if len(found) != 0 {
+		t.Fatalf("share gate readers that read a name, not the path the gate read (hand the read to readGated, or read gate.read):\n%s", strings.Join(found, "\n"))
+	}
+}
+
+// shareGateOwnReads are the declarations of network_path*.go that are the
+// share gate: they read the name to make the share decision, or hold what
+// the decision read.
+var shareGateOwnReads = map[string]string{
+	"readGated":         "holds the gated path for the read it is handed",
+	"walkShareLinks":    "the share walk: reads each component once",
+	"probeNetworkShare": "asks a share root (on this machine) whether it answers",
+	"walkLstat":         "the share walk's read of one component",
+	"openDirectory":     "the read pathOpenDirectory hands to readGated",
+}
+
+// shareGateNameReads lists the raw reads of decl that read neither inside
+// the read handed to readGated or readGatedValue nor gate.read.
+func shareGateNameReads(fset *token.FileSet, decl ast.Decl) []string {
+	switch decl := decl.(type) {
+	case *ast.FuncDecl:
+		if _, ok := shareGateOwnReads[decl.Name.Name]; ok {
+			return nil
+		}
+	case *ast.GenDecl:
+		// A var block: each value is looked at alone.
+		var found []string
+		for _, spec := range decl.Specs {
+			value, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range value.Names {
+				if _, ok := shareGateOwnReads[name.Name]; ok || i >= len(value.Values) {
+					continue
+				}
+				found = append(found, shareGateNameReadsIn(fset, value.Values[i])...)
+			}
+		}
+		return found
+	}
+	return shareGateNameReadsIn(fset, decl)
+}
+
+func shareGateNameReadsIn(fset *token.FileSet, root ast.Node) []string {
+	type span struct{ from, to token.Pos }
+	var handed []span
+	gatedPath := map[*ast.SelectorExpr]bool{}
+	readsGateRead := func(node ast.Node) bool {
+		found := false
+		ast.Inspect(node, func(node ast.Node) bool {
+			if selector, ok := node.(*ast.SelectorExpr); ok && selector.Sel.Name == "read" {
+				if ident, ok := selector.X.(*ast.Ident); ok && ident.Name == "gate" {
+					found = true
+				}
+			}
+			return !found
+		})
+		return found
+	}
+	ast.Inspect(root, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if ident, ok := call.Fun.(*ast.Ident); ok && (ident.Name == "readGated" || ident.Name == "readGatedValue") && len(call.Args) >= 3 {
+			handed = append(handed, span{call.Args[2].Pos(), call.Args[2].End()})
+		}
+		if selector, ok := call.Fun.(*ast.SelectorExpr); ok && len(call.Args) > 0 && readsGateRead(call.Args[0]) {
+			gatedPath[selector] = true
+		}
+		return true
+	})
+	var found []string
+	ast.Inspect(root, func(node ast.Node) bool {
+		selector, ok := node.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		pkg, ok := selector.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		raw := false
+		for _, name := range append(append([]string(nil), hookPathRawReads[pkg.Name]...), hookPathRawHandles[pkg.Name]...) {
+			raw = raw || selector.Sel.Name == name
+		}
+		if !raw || gatedPath[selector] {
+			return true
+		}
+		for _, s := range handed {
+			if selector.Pos() >= s.from && selector.End() <= s.to {
+				return true
+			}
+		}
+		found = append(found, fset.Position(selector.Pos()).String()+": "+pkg.Name+"."+selector.Sel.Name)
+		return true
+	})
+	return found
 }
 
 // rel-1-0-10:GAP-1074: the agent hook config guard, the promoted-artifact
@@ -370,7 +507,7 @@ func hookPathUnboundedReads(fset *token.FileSet, decl ast.Decl) []string {
 			}
 		case *ast.Ident:
 			switch node.Name {
-			case "networkPathUnanswered", "gatedPath", "pathStat", "pathLstat":
+			case "readGated", "readGatedValue":
 				gated = true
 			}
 		}

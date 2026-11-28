@@ -35,6 +35,12 @@ var claudeCodeSettingsRequiredGroups = sync.OnceValue(func() []claudeCodeHookGro
 			out = append(out, registry[group.eventType])
 		}
 	}
+	if len(out) == 0 {
+		// No contract, or none sharing an event: a set that requires
+		// nothing would read every document as kept. Require every event
+		// Setup can install instead, so the check fails closed (RV-SGA N3).
+		out = append(out, claudeCodeAllHookGroups...)
+	}
 	return out
 })
 
@@ -118,18 +124,27 @@ func claudeCodeSettingsHandlerServes(handler map[string]any, group claudeCodeHoo
 			return false
 		}
 	}
-	if raw, present := handler["timeout"]; present {
-		if number, ok := raw.(json.Number); ok {
-			value, err := number.Int64()
-			if err != nil {
-				return false
-			}
-			raw = value
-		}
-		seconds, ok := claudeCodeHookInteger(raw)
-		if !ok || seconds < group.timeout {
+	raw, present := handler["timeout"]
+	if !present {
+		// No timeout key: the timeout Claude Code gives a command hook
+		// without one, which can be below the 90 s Setup sets on Stop,
+		// SubagentStop and PostToolBatch (substrate-1 GAP-1161).
+		raw = claudeCodeOmittedHookTimeoutSeconds
+	}
+	if number, ok := raw.(json.Number); ok {
+		value, err := number.Int64()
+		if err != nil {
 			return false
 		}
+		raw = value
 	}
-	return true
+	seconds, ok := claudeCodeHookInteger(raw)
+	return ok && seconds >= group.timeout
 }
+
+// claudeCodeOmittedHookTimeoutSeconds is the timeout Claude Code gives a
+// command hook with no timeout key, read as the lowest across the releases
+// a sandbox image may run: 60 s in the releases that first had hooks (600 s
+// in later ones). A handler that leaves the key out keeps an event only
+// where 60 s is not below the timeout Setup sets.
+const claudeCodeOmittedHookTimeoutSeconds = 60

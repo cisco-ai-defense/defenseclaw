@@ -3702,6 +3702,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	var accumulated responseText
 	var tcAcc toolCallAccumulator
 	var bufferedTCChunks [][]byte // tool-call chunks held until post-stream inspection
+	// The mid-stream checks of this stream share what they read of the
+	// text so far (midStreamScanState, GAP-0515).
+	midCtx := withMidStreamScanState(llmCtx, newMidStreamScanState())
 	bufferedTCSize := 0
 	lastScanLen := 0
 	streamFinishReasons := []string{}
@@ -3739,7 +3742,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	// check, or (full false) the check of a hold due by age only
 	// (inspectStreamText). False: it blocked; the stream is cut.
 	scanMid := func(full bool) bool {
-		midVerdict, ranFull := p.inspectStreamText(llmCtx, accumulated.CheckText(), aliasModel, mode, full)
+		midVerdict, ranFull := p.inspectStreamText(midCtx, accumulated.CheckText(), aliasModel, mode, full)
 		p.resolveConfirm(r.Context(), r, midVerdict, "completion", aliasModel, mode)
 		if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 			fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s (%d bytes held back)\n",
@@ -3769,12 +3772,14 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	// secretBound decides an open secret at a hold bound: TRUNCATED, the
 	// unknown tier of the pack, once the full check passed the text read so
 	// far. False: it blocked; the stream is cut.
-	secretBound := func(c bounded.Cap, why string) bool {
+	streamBound := func(c bounded.Cap, why string, release bool) bool {
 		if accumulated.Len() > lastScanLen && !scanMid(true) {
 			return false
 		}
-		accumulated.ReleaseOpenSecret()
-		secretOpen, secretKey = false, false
+		if release {
+			accumulated.ReleaseOpenSecret()
+			secretOpen, secretKey = false, false
+		}
 		tv := p.streamTailTruncatedVerdict(llmCtx, c, why)
 		overlay := p.recordTelemetry(llmCtx, "completion", aliasModel, tv, 0, mode, tv.Action == "block")
 		modelTrace.AddGuardrailOverlay(overlay)
@@ -3788,17 +3793,46 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		fmt.Fprintf(os.Stderr, "[guardrail] STREAM-TRUNCATED %s: forwarded with an alert\n", logDisplayReason(tv.Reason))
 		return true
 	}
+	secretBound := func(c bounded.Cap, why string) bool { return streamBound(c, why, true) }
+	// runHeldBound decides the held bound behind an open token or digit run
+	// once per call (rel-1-0-10:GAP-1767, LEAD ruling 2026-11-26 21:00Z): past
+	// streamSecretMaxHeld the text read so far is checked and the unknown tier
+	// of the pack decides, so a reply that keeps a run open at every piece end
+	// (a numeric table, GAP-1265) gets the TRUNCATED verdict, never none.
+	// release: the pieces from the first byte of the run are over the bound
+	// themselves, so the run is given up and goes out once decided; otherwise
+	// the pieces before it go out and the run stays held for its own check
+	// (GAP-1306). A later pass of the same call is not decided again.
+	runHeldHit := false
+	runHeldBound := func(release bool) bool {
+		if runHeldHit {
+			// Not decided again, but a run given up still gets the full
+			// check of the text read so far before it goes out, as at the
+			// parent (CHK-RF-1478B N1).
+			if accumulated.Len() > lastScanLen && !scanMid(true) {
+				return false
+			}
+			if release {
+				accumulated.ReleaseOpenSecret()
+				secretOpen, secretKey = false, false
+			}
+			return true
+		}
+		runHeldHit = true
+		return streamBound(bounded.Bytes, streamRunHeldWhy, release)
+	}
 	// pastRun: the held bound behind an open token or digit run was passed;
 	// runFrom is the reply text offset of the run's first byte (GAP-1306);
 	// pastParked: only reasoning runs parked by the switch to the answer
 	// are open (GAP-2170), so the bound lets all go with no verdict, as rel
 	// does (no GAP-1767 cut; a block-end or tool-switch park keeps it,
-	// GAP-2218).
-	pastRun, pastParked, runFrom := false, false, -1
+	// GAP-2218); pastParkedAny: every open run is parked (any park), so the
+	// chunks before it go out with no verdict, as at the parent (GAP-2224).
+	pastRun, pastParked, pastParkedAny, runFrom := false, false, false, -1
 	// secretHeld reports that nothing may be sent now: the text ends inside
 	// an open secret, or a bound on it blocked.
 	secretHeld := func(held int) bool {
-		pastRun, pastParked, runFrom = false, false, -1
+		pastRun, pastParked, pastParkedAny, runFrom = false, false, false, -1
 		if !holding {
 			return false
 		}
@@ -3812,12 +3846,13 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		case held > streamSecretMaxHeld && o.pem:
 			return !secretBound(bounded.Bytes, fmt.Sprintf("over %d reply stream bytes held behind an open secret", streamSecretMaxHeld))
 		case held > streamSecretMaxHeld:
-			// Only a token or a digit run is open (GAP-1265): what is held
+			// Only a token or a digit run is open (GAP-1265): the bound
+			// decides it once (runHeldBound, GAP-1767), then what is held
 			// before the chunk with the run's first byte goes out once the
-			// check has read it, with no verdict, and the run stays held
-			// (GAP-1306). When the chunks from the run's first byte are over
-			// the bound themselves, the bound decides the run (GAP-1767).
-			pastRun, pastParked, runFrom = true, o.answerParkedOnly, accumulated.OpenRunFrom()
+			// check has read it and the run stays held (GAP-1306). When the
+			// chunks from the run's first byte are over the bound
+			// themselves, the run goes out once decided.
+			pastRun, pastParked, pastParkedAny, runFrom = true, o.answerParkedOnly, o.parkedOnly, accumulated.OpenRunFrom()
 			return false
 		}
 		return true
@@ -3832,8 +3867,11 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		cut := len(hold.buf)
 		if pastRun {
 			if k := hold.beforeRun(runFrom); runFrom >= 0 && len(hold.buf)-k <= streamSecretMaxHeld {
+				if !pastParkedAny && !runHeldBound(false) {
+					return false
+				}
 				cut = k
-			} else if !pastParked && !secretBound(bounded.Bytes, streamRunHeldWhy) {
+			} else if !pastParked && !runHeldBound(true) {
 				return false
 			}
 		}
@@ -3861,8 +3899,11 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		cut := len(initialChunkBuf)
 		if pastRun {
 			if k := heldBeforeRun(initialMarks, runFrom); runFrom >= 0 && bufferedBytes(initialChunkBuf[k:]) <= streamSecretMaxHeld {
+				if !pastParkedAny && !runHeldBound(false) {
+					return
+				}
 				cut = k
-			} else if !pastParked && !secretBound(bounded.Bytes, streamRunHeldWhy) {
+			} else if !pastParked && !runHeldBound(true) {
 				return
 			}
 		}
@@ -4061,7 +4102,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	if !initialBufFlushed && !streamBlocked && len(initialChunkBuf) > 0 {
 		if accumulated.Len() > 0 && mode == "action" {
 			checkContent := accumulated.CheckText()
-			initVerdict := p.inspector.InspectMidStream(llmCtx, "completion", checkContent,
+			initVerdict := p.inspector.InspectMidStream(midCtx, "completion", checkContent,
 				[]ChatMessage{{Role: "assistant", Content: checkContent}}, aliasModel, mode)
 			p.resolveConfirm(r.Context(), r, initVerdict, "completion", aliasModel, mode)
 			if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
@@ -4178,6 +4219,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		blockedMeta.ResponseID = firstNonEmpty(streamResponseID, stableLLMEventID("response", blockedMeta.Source, blockedMeta.SessionID, blockedMeta.RequestID, req.Model, "blocked"))
 		blockedMeta.ResponseIDReported = strings.TrimSpace(streamResponseID) != ""
 		p.emitLLMResponseEventV8(llmCtx, blockedMeta, "", "", append(streamFinishReasons, "blocked"))
+		// The gateway ended the provider's stream: without the provider's
+		// final usage the call is of unknown cost (substrate-1:GAP-1119).
+		usageStreamBlocked(w)
 		msg := blockMessage(customBlockMsg, "completion", "content blocked mid-stream by guardrail")
 		blockChunk := StreamChunk{
 			ID: "chatcmpl-blocked", Object: "chat.completion.chunk",
@@ -5926,12 +5970,13 @@ func (p *GuardrailProxy) toolCallCodeGuardFindings(ctx context.Context, action t
 	if p.toolCallSecureClient(ctx) || ManagedEnterpriseActive() {
 		return nil
 	}
-	tool, args, partial := action.Input.Tool, action.Input.Args, false
+	tool, args := action.Input.Tool, action.Input.Args
+	var shown json.RawMessage
 	if !codeGuardWriteTool(tool) {
-		// A shell here-document patch (rel-1-0-10:GAP-1635), as the hook
-		// routes read it (codeGuardWriteRequest).
+		// A shell here-document patch or file write (rel-1-0-10:GAP-1635,
+		// GAP-1640), as the hook routes read it (codeGuardWriteRequest).
 		var ok bool
-		if args, partial, ok = codeGuardShellPatchArgs(action.Input); !ok {
+		if args, shown, ok = codeGuardShellPatchArgs(action.Input); !ok {
 			return nil
 		}
 		tool = "apply_patch"
@@ -5940,9 +5985,7 @@ func (p *GuardrailProxy) toolCallCodeGuardFindings(ctx context.Context, action t
 	if cfg := proxyDecisionConfig(ctx); cfg != nil {
 		rulesDir = cfg.Scanners.CodeGuard
 	}
-	scan := codeGuardScanWriteArgs(rulesDir, tool, args)
-	scan.complete = scan.complete && !partial
-	return codeGuardRuleFindings(scan, true, action.EnforcementCapable)
+	return codeGuardRuleFindings(codeGuardScanShellView(rulesDir, tool, args, shown), true, action.EnforcementCapable)
 }
 
 // proxyBareReading is a tool call as the proxy read it before it was built
@@ -6673,6 +6716,9 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 	var accumulated responseText
 	var tcAcc toolCallAccumulator
 	var bufferedTCFrames [][]byte
+	// The mid-stream checks of this stream share what they read of the
+	// text so far (midStreamScanState, GAP-0515).
+	midCtx := withMidStreamScanState(llmCtx, newMidStreamScanState())
 	bufferedTCSize := 0
 	streamBlocked := false
 	streamResponseID := ""
@@ -6688,6 +6734,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 
 	blockStream := func(reason string) {
 		streamBlocked = true
+		usageStreamBlocked(w) // substrate-1:GAP-1119
 		sseOutcome = "blocked"
 		sseMetricOutcome = observability.OutcomeBlocked
 		msg := blockMessage(customBlockMsg, "completion", reason)
@@ -6770,8 +6817,10 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 	// secretBound decides an open secret at a hold bound: TRUNCATED, the
 	// unknown tier of the pack. Every frame's text was checked. False: it
 	// blocked.
-	secretBound := func(c bounded.Cap, why string) bool {
-		accumulated.ReleaseOpenSecret()
+	streamBound := func(c bounded.Cap, why string, release bool) bool {
+		if release {
+			accumulated.ReleaseOpenSecret()
+		}
 		tv := p.streamTailTruncatedVerdict(llmCtx, c, why)
 		overlay := p.recordTelemetry(llmCtx, "completion", req.Model, tv, 0, mode, tv.Action == "block")
 		modelTrace.AddGuardrailOverlay(overlay)
@@ -6783,6 +6832,27 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 		}
 		fmt.Fprintf(os.Stderr, "[guardrail] STREAM-TRUNCATED %s: forwarded with an alert\n", logDisplayReason(tv.Reason))
 		return true
+	}
+	secretBound := func(c bounded.Cap, why string) bool { return streamBound(c, why, true) }
+	// runHeldBound decides the held bound behind an open token or digit run
+	// once per call (rel-1-0-10:GAP-1767, LEAD ruling 2026-11-26 21:00Z): past
+	// streamSecretMaxHeld the text read so far is checked and the unknown tier
+	// of the pack decides, so a reply that keeps a run open at every piece end
+	// (a numeric table, GAP-1265) gets the TRUNCATED verdict, never none.
+	// release: the pieces from the first byte of the run are over the bound
+	// themselves, so the run is given up and goes out once decided; otherwise
+	// the pieces before it go out and the run stays held for its own check
+	// (GAP-1306). A later pass of the same call is not decided again.
+	runHeldHit := false
+	runHeldBound := func(release bool) bool {
+		if runHeldHit {
+			if release {
+				accumulated.ReleaseOpenSecret()
+			}
+			return true
+		}
+		runHeldHit = true
+		return streamBound(bounded.Bytes, streamRunHeldWhy, release)
 	}
 	// secretWait reports that the next frame (next bytes) must wait; ok is
 	// false when a bound blocked.
@@ -6813,12 +6883,12 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 		case heldSize+next > streamSecretMaxHeld && o.pem:
 			return false, secretBound(bounded.Bytes, fmt.Sprintf("over %d reply stream bytes held behind an open secret", streamSecretMaxHeld))
 		case heldSize+next > streamSecretMaxHeld:
-			// Only a token or a digit run is open (GAP-1265): the held
-			// frames before the one with the run's first byte, every one
-			// checked, go out with no verdict, and the run stays held with
-			// the next frame (GAP-1306). When the frames from the run's
-			// first byte are over the bound themselves, the bound decides
-			// the run (TRUNCATED, GAP-1767), then all go out. When only reasoning runs parked
+			// Only a token or a digit run is open (GAP-1265): the bound
+			// decides it once (runHeldBound, GAP-1767), then the held frames
+			// before the one with the run's first byte, every one checked,
+			// go out and the run stays held with the next frame (GAP-1306).
+			// When the frames from the run's first byte are over the bound
+			// themselves, the run goes out once decided. When only reasoning runs parked
 			// by the switch to the answer are open (o.answerParkedOnly,
 			// GAP-2170: parked until the message ends while the answer
 			// streams behind it), all go out as rel does, with no verdict: a
@@ -6834,7 +6904,12 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 				if o.answerParkedOnly {
 					return false, true
 				}
-				return false, secretBound(bounded.Bytes, streamRunHeldWhy)
+				return false, runHeldBound(true)
+			}
+			// A parked run keeps the parent's release with no verdict
+			// (GAP-2170, GAP-2224).
+			if !o.parkedOnly && !runHeldBound(false) {
+				return false, false
 			}
 			sendHeld(k)
 			heldAt = time.Now()
@@ -6907,7 +6982,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 
 		if mode == "action" && frameHasText {
 			content := accumulated.CheckText()
-			verdict := p.inspector.InspectMidStream(llmCtx, "completion", content,
+			verdict := p.inspector.InspectMidStream(midCtx, "completion", content,
 				[]ChatMessage{{Role: "assistant", Content: content}}, req.Model, mode)
 			p.resolveConfirm(r.Context(), r, verdict, "completion", req.Model, mode)
 			if verdict != nil && verdict.Action == "block" {

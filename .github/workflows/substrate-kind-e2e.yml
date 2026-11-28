@@ -36,6 +36,12 @@ on:
       - '**/*substrate*.go'
       - '.github/workflows/substrate-kind-e2e.yml'
   workflow_dispatch:
+    inputs:
+      skill_scanner:
+        description: 'on builds and runs the skill scanner sidecar; off installs the chart as shipped (sidecar off)'
+        type: choice
+        options: ['on', 'off']
+        default: 'on'
 
 permissions:
   contents: read
@@ -93,6 +99,7 @@ jobs:
           E2E_ARTIFACTS: ${{ github.workspace }}/_artifacts/substrate-e2e
           # The chart and the DefenseClaw phase are part of this change: a missing chart fails.
           E2E_REQUIRE_DEFENSECLAW: "1"
+          E2E_SKILL_SCANNER: ${{ inputs.skill_scanner || 'on' }}
         run: bash test/substrate-e2e/run.sh
       - name: Upload the results and diagnostics
         if: ${{ always() }}

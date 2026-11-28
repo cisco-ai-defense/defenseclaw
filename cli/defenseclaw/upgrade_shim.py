@@ -159,6 +159,7 @@ NEWER_CONFIG_KEYS = (
     ("substrate.activity", (1, 0, 11)),
     ("substrate.admin.git_push", (1, 0, 11)),
     ("substrate.egress.no_swap_hosts", (1, 0, 11)),
+    ("substrate.extproc.rate_limits", (1, 0, 11)),
     ("substrate.files", (1, 0, 11)),
     ("substrate.git", (1, 0, 11)),
     ("substrate.identity.revocation", (1, 0, 11)),

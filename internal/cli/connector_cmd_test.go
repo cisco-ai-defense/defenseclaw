@@ -1521,11 +1521,15 @@ func TestConnectorTeardownMarksConnectorInactiveBeforeRemoval(t *testing.T) {
 // GAP-1979: when Codex rewrites config.toml after Setup, teardown takes the
 // surgical path, which removes otel.environment only if it knows the value.
 func TestConnectorTeardownRemovesCodexOtelEnvironmentAfterDrift(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses the POSIX hook layout")
-	}
 	dir := testenv.PrivateTempDir(t)
 	defer withConnectorState(t, dir, "codex")()
+	if runtime.GOOS == "windows" {
+		// A Windows account registers the native launcher, not a hook script.
+		pinWindowsHookLauncherForTest(t, dir)
+		// An unmanaged Windows Codex Setup reads the effective Codex policy
+		// from the selected codex.exe app-server; this test is about teardown.
+		t.Cleanup(connector.PinCodexPolicyInspectorForTest("codex otel drift test"))
+	}
 	cfg.Environment = "windows"
 
 	codexPath := filepath.Join(testenv.PrivateTempDir(t), "config.toml")

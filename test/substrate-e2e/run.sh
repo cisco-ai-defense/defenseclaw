@@ -56,6 +56,10 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 : "${E2E_DC_LAUNCH_ATESPACE:=dc-e2e-launch}"
 : "${E2E_GATEWAY_IMAGE:=}"
 : "${E2E_SCANNER_IMAGE:=}"
+# on (default): the chart runs the skill scanner sidecar, built from this checkout. off: the chart as shipped, with the
+# sidecar off (its default), so the run proves a default install comes up with the images the release publishes and
+# runs no scanner container (GAP-1133).
+: "${E2E_SKILL_SCANNER:=on}"
 # Kubernetes context kubectl and kubectl-ate use. In create mode it is kind-<cluster>.
 : "${E2E_CONTEXT:=}"
 

@@ -82,7 +82,7 @@ func TestR104PythonStringEffectPosition(t *testing.T) {
 		{`"value"; p.write_text("marker")`, true},
 	} {
 		position := strings.Index(tc.code, "write_text")
-		if got := pythonExecutableCodePosition(tc.code, position); got != tc.want {
+		if got := newPythonCodeScanner(tc.code).at(position); got != tc.want {
 			t.Errorf("code %q: executable=%v, want %v", tc.code, got, tc.want)
 		}
 	}

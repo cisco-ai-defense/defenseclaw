@@ -152,7 +152,7 @@ The VM is a Linux VM on every host OS. The package inside it must match the VM's
 ## What you need first
 
 1. **A vendor ID from Anthropic.** Claude Desktop runs a vendor package only for a vendor that Anthropic lists, with a signature that verifies. `vendor` in the config is the lowercase identifier Anthropic assigned. A vendor that is not listed gets `refused_guest reason=vendor_unknown` at each VM start.
-2. **A signed package.** Claude Desktop installs only a package with a detached binary OpenPGP signature (`<package>.sig`) that follows Anthropic's rules: no notation, no policy URL, no key server, expiry at most 730 days after signing. DefenseClaw's `sign.sh` makes and checks such a signature. The 1.0.9 and 1.0.10 releases on GitHub list `defenseclaw-cowork-amd64.tar.gz` and `defenseclaw-cowork-arm64.tar.gz` (about 94 MB and 84 MB in 1.0.10), with their SHA-256 in `checksums.txt`, and **no `.sig` file and no signing key**. Without a signature, `host_ready` stays false (`signature_not_ready` or `package_or_signature_not_ready`). The release workflow can sign a published release's packages later, when the Cowork-only key is available. Check the release's file list for the `.sig` files before you plan a rollout.
+2. **A signed package.** Claude Desktop installs only a package with a detached binary OpenPGP signature (`<package>.sig`) that follows Anthropic's rules: no notation, no policy URL, no key server, expiry at most 730 days after signing. DefenseClaw's `sign.sh` makes and checks such a signature. The 1.0.9 and 1.0.10 releases on GitHub list `defenseclaw-cowork-amd64.tar.gz` and `defenseclaw-cowork-arm64.tar.gz` (about 94 MB and 84 MB in 1.0.10), with their SHA-256 in `checksums.txt`, and **no `.sig` file and no signing key**. Without a signature, `host_ready` stays false (`signature_not_ready` or `package_or_signature_not_ready`). The release workflow can sign a published release's packages later, when the Cowork-only key is available. Check the release's file list for the `.sig` files before you plan a rollout. Until the packages are signed, verify a downloaded package against its SHA-256 in the release's `checksums.txt`.
 3. **A collector.** An OTLP/HTTP endpoint, reachable from the VM over HTTPS, with a certificate the VM trusts.
 4. **The managed standalone profile** with `deployment_mode: managed_enterprise` and `enterprise.profile: standalone`. See [Enterprise](/docs/enterprise).
 
@@ -312,7 +312,7 @@ What to expect:
 
 ## Limits
 
-- The packages in the 1.0.9 and 1.0.10 releases are unsigned. Claude Desktop installs only a package signed with the key of a vendor that Anthropic lists.
+- The packages in the 1.0.9 and 1.0.10 releases are unsigned. Claude Desktop installs only a package signed with the key of a vendor that Anthropic lists. The Cowork VM sensor bundle (`defenseclaw-cowork-*.tar.gz`) is not signed yet; verify it with the SHA-256 checksum published with the release.
 - The Cowork VM's network policy decides whether the sensor can reach your collector. There is no relay through the computer.
 - Upgrading the sensor and removing an installed sensor from a VM are done by Claude Desktop.
 - Windows on Arm (the standalone lifecycle runs on native x64 only) and Linux are not supported.

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -27,8 +28,11 @@ import (
 
 const (
 	maxPathFacts = 32
-	maxLinkHops  = 40
-	maxWalkDepth = 4
+	// Shell calls can carry a few link places after the ordinary path cap.
+	// The original 32 facts stay byte-identical and in order.
+	maxShellLinkFacts = 8
+	maxLinkHops       = 40
+	maxWalkDepth      = 4
 	// maxProjectHookBytes bounds the project settings file the kit reads;
 	// maxProjectHookEvents and maxProjectHookEventLen bound what it reports.
 	maxProjectHookBytes    = 1 << 20
@@ -38,6 +42,10 @@ const (
 	// command the kit resolves (PlacedCommandPathWords); past it the claims
 	// are cut (substrate-1 GAP-0622).
 	maxCommandWordChecks = 2048
+	// A bounded directory snapshot filters missing padding operands after the
+	// path-fact cap without a file-system walk per word.
+	maxCommandFactDirEntries = 4096
+	maxCommandFactDirs       = 16
 	// maxDroppedPathChecks bounds the path arguments past maxPathFacts the
 	// kit still checks for a link; past it the claims are cut.
 	maxDroppedPathChecks = 4 * maxPathFacts
@@ -354,13 +362,26 @@ func addShellCommandFacts(f *Facts, connectorName, event string, payload []byte,
 		f.Proofs = append(f.Proofs, ProofPrivateKeyRead)
 	}
 	var words []hookpaths.CommandPathWord
+	// Every placed word is walked from the same working folders: one memo
+	// for this call walks each folder once, not once per word and pass. An
+	// 8 KB script of function calls made 4,200 lstat calls for its 840
+	// words without it, each a sandbox system call in the actor
+	// (substrate-1 GAP-1153). The answers are the walk's, for one call.
+	memo := hookpaths.NewTargetMemo()
+	// Past the statement budget the gateway reads no statement alone, so
+	// the words that may reach a protected file (a hard link, a place in
+	// the SSH folder) carry a claim of their own, and links to protected
+	// files go first in the late slots (substrate-1 GAP-1156). A call
+	// under the budget keeps its p47b facts.
+	overBudget := !unresolvedToolWorkdir && shellStatementsOverBudget(command)
 	// A call beyond the statement budget needs the protected-target
-	// decision only when its placed words can give the gateway a link or
-	// private-home claim. Keep the p47b placement for every word and dir.
-	if !unresolvedToolWorkdir && shellDecisionOverBudget(command) {
+	// decision only when its placed words can give the gateway a link,
+	// private-home or protected-word claim. Keep the p47b placement for
+	// every word and dir.
+	if overBudget && !overBudgetDecisionForTest.Load() {
 		words = hookpaths.PlacedCommandPathWords(command, cwd, home)
 		paths, truncated, claimsCut := len(f.Paths), f.Truncated, f.claimsCut
-		if !addPlacedCommandWordFacts(f, words, cwd, home, len(f.Proofs) > 0, true) {
+		if !addPlacedCommandWordFacts(f, words, cwd, home, len(f.Proofs) > 0, true, true, memo) {
 			return
 		}
 		f.Paths, f.Truncated, f.claimsCut = f.Paths[:paths], truncated, claimsCut
@@ -373,15 +394,26 @@ func addShellCommandFacts(f *Facts, connectorName, event string, payload []byte,
 	if words == nil {
 		words = hookpaths.PlacedCommandPathWords(command, cwd, home)
 	}
-	addPlacedCommandWordFacts(f, words, cwd, home, len(f.Proofs) > 0, false)
+	addPlacedCommandWordFacts(f, words, cwd, home, len(f.Proofs) > 0, false, overBudget, memo)
 }
 
 // addPlacedCommandWordFacts uses the p47b word and directory bound.
 // ask reports whether a visited word can carry a gateway claim even if
 // privacy has not yet been granted by the protected-write decision.
-func addPlacedCommandWordFacts(f *Facts, words []hookpaths.CommandPathWord, cwd, home string, privacy, ask bool) (claimable bool) {
+// overBudget marks a call past the statement budget: a word that may reach
+// a protected file (hookpaths.ProtectedReach) is then a fact of its own
+// (PathFact.Protected), and a late slot goes first to such a word or to a
+// link whose place may be protected, before a link to an ordinary file
+// (substrate-1 GAP-1156). memo keeps the file system answers of this hook
+// call (substrate-1 GAP-1153).
+func addPlacedCommandWordFacts(f *Facts, words []hookpaths.CommandPathWord, cwd, home string, privacy, ask, overBudget bool, memo *hookpaths.TargetMemo) bool {
 	type placed struct{ text, dir string }
 	seen := map[placed]bool{}
+	// mayProtect marks the late facts that may name a protected file.
+	var mayProtect []bool
+	dirNames := map[string]commandFactDirNames{}
+	privateHomeDirs := map[string]bool{}
+	privateHomeSeen := map[string]bool{}
 	for _, word := range words {
 		dirs := word.Dirs
 		if len(dirs) == 0 || strings.HasPrefix(word.Value, "/") {
@@ -393,27 +425,72 @@ func addPlacedCommandWordFacts(f *Facts, words []hookpaths.CommandPathWord, cwd,
 			}
 			if len(seen) == maxCommandWordChecks {
 				f.Truncated, f.claimsCut = true, true
-				return claimable
+				return false
 			}
 			seen[placed{word.Text, dir}] = true
-			fact, listed := commandWordFact(word, dir, home, privacy)
-			if ask && !claimable {
-				claimable = fact.Resolved != "" || fact.Entry != "" ||
-					hookpaths.PrivateHomePlace(hookpaths.CommandWordAbs(word, dir), home)
+			if len(f.Paths) >= maxPathFacts && !commandWordMayExist(word.Value, dir, dirNames) {
+				// A missing first component cannot reach a link. Its private
+				// home status depends on the existing directory, so check that
+				// directory once for the ask pass or the old truncation flag.
+				if ask || (privacy && !f.Truncated) {
+					abs := hookpaths.CommandWordAbs(word, dir)
+					ssh := filepath.Join(home, ".ssh")
+					if abs != ssh && !strings.HasPrefix(abs, ssh+string(filepath.Separator)) {
+						if !privateHomeSeen[dir] {
+							privateHomeDirs[dir] = hookpaths.PrivateHomePlace(dir, home)
+							privateHomeSeen[dir] = true
+						}
+						if privateHomeDirs[dir] {
+							if ask {
+								return true
+							}
+							f.Truncated, f.claimsCut = true, true
+						}
+					}
+				}
+				continue
+			}
+			fact, listed := commandWordFact(word, dir, home, privacy, overBudget, memo)
+			link := fact.Resolved != "" || fact.Entry != ""
+			if ask && (link || fact.Protected || hookpaths.PrivateHomePlace(hookpaths.CommandWordAbs(word, dir), home)) {
+				return true
 			}
 			if listed {
 				if len(f.Paths) >= maxPathFacts {
 					f.Truncated, f.claimsCut = true, true
-					return claimable
+					// Preserve the original 32 facts, then retain a bounded
+					// set of late link places for the guest command twin.
+					if !link && !fact.Protected {
+						continue
+					}
+					protected := overBudget && (fact.Protected ||
+						lateFactMayProtect(fact.Resolved, home, memo) || lateFactMayProtect(fact.Entry, home, memo))
+					if len(f.Paths) < maxPathFacts+maxShellLinkFacts {
+						f.Paths = append(f.Paths, fact)
+						mayProtect = append(mayProtect, protected)
+						continue
+					}
+					if protected {
+						if i := slices.Index(mayProtect, false); i >= 0 {
+							f.Paths[maxPathFacts+i], mayProtect[i] = fact, true
+						}
+					}
+					continue
 				}
 				f.Paths = append(f.Paths, fact)
 			}
 		}
 	}
-	return claimable
+	return false
 }
 
-// minBudgetCheckBytes is the shortest shell command shellDecisionOverBudget
+// lateFactMayProtect reports whether place, a link place of a late command
+// word fact, may be a protected file (hookpaths.ProtectedReach names it).
+func lateFactMayProtect(place, home string, memo *hookpaths.TargetMemo) bool {
+	return place != "" && hookpaths.ProtectedReach(place, home, memo) == hookpaths.GradeNamed
+}
+
+// minBudgetCheckBytes is the shortest shell command shellStatementsOverBudget
 // counts. A call over the statement budget has more than 128 statements,
 // each a word and a separator; a shorter call is never counted and gets
 // the decision, as before, so ordinary calls pay nothing for the check.
@@ -433,39 +510,95 @@ func SetOverBudgetShellProofsForTest(on bool) (restore func()) {
 	return func() { overBudgetDecisionForTest.Store(was) }
 }
 
-// shellDecisionOverBudget reports a POSIX shell command over the statement
-// budget, as the laptop hook client reads a POSIX call
+// shellStatementsOverBudget reports a POSIX shell command over the
+// statement budget, as the laptop hook client reads a POSIX call
 // (clientStatementBudgetExceeded: actionfacts.ShellStatementsOverBudget,
 // the same function), which describes no such call to its gateway
 // (rel-1-0-2:GAP-0568). The gateway refuses it at the budget before any
 // reader that reads the kit's protected-write proof of the whole command
-// runs (dispatchTrustedAction); the readers its twins and cap-floor pieces
-// run judge other text, and read only the kit's word claims, which the
-// caller keeps the decision for. Run on such a call, the decision re-read
-// each statement alone after a dynamic program and cost the actor's hook
-// 140 to 290 ms on an 8 KB script (substrate-1 GAP-1153).
-func shellDecisionOverBudget(command string) bool {
-	return len(command) >= minBudgetCheckBytes && !overBudgetDecisionForTest.Load() &&
-		actionfacts.ShellStatementsOverBudget(command)
+// runs (dispatchTrustedAction), except the budget refusal itself, which
+// reads it with a word claim (substrate-1 GAP-1156); the readers its twins
+// and cap-floor pieces run judge other text, and read only the kit's word
+// claims, which the caller keeps the decision for. Run on such a call, the
+// decision re-read each statement alone after a dynamic program and cost
+// the actor's hook 140 to 290 ms on an 8 KB script (substrate-1 GAP-1153).
+// The answer does not depend on SetOverBudgetShellProofsForTest: the facts
+// of such a call are the same whether the kit makes the decision or not.
+func shellStatementsOverBudget(command string) bool {
+	return len(command) >= minBudgetCheckBytes && actionfacts.ShellStatementsOverBudget(command)
+}
+
+// commandFactDirNames is one bounded snapshot. An incomplete or unreadable
+// directory cannot rule a word out, so its words are inspected normally.
+type commandFactDirNames struct {
+	names    map[string]bool
+	complete bool
+}
+
+// commandWordMayExist filters only a relative word whose first component is
+// absent from its known directory. Such a word cannot reach a link or hard
+// link there. This runs only after the path-fact cap: no ordinary call pays
+// for a directory snapshot, and a padded command does not walk every
+// missing operand after the cap.
+func commandWordMayExist(value, dir string, cache map[string]commandFactDirNames) bool {
+	if !filepath.IsAbs(dir) || filepath.IsAbs(value) || strings.HasPrefix(value, "~") || strings.Contains(value, "..") {
+		return true
+	}
+	for strings.HasPrefix(value, "./") {
+		value = strings.TrimPrefix(value, "./")
+	}
+	first, _, _ := strings.Cut(value, "/")
+	if first == "" || first == "." || first == ".." {
+		return true
+	}
+	listing, cached := cache[dir]
+	if !cached {
+		if len(cache) >= maxCommandFactDirs {
+			return true
+		}
+		listing = commandFactDirNames{}
+		// A moved directory can give even a missing child an Entry
+		// fact; never filter its words by the logical directory.
+		if physical, ok := hookpaths.ResolveWriteTarget(dir); !ok || physical != filepath.Clean(dir) {
+			cache[dir] = listing
+			return true
+		}
+		folder, err := os.Open(dir)
+		if err == nil {
+			names, readErr := folder.Readdirnames(maxCommandFactDirEntries + 1)
+			_ = folder.Close()
+			if (readErr == nil || readErr == io.EOF) && len(names) <= maxCommandFactDirEntries {
+				listing.complete = true
+				listing.names = make(map[string]bool, len(names))
+				for _, name := range names {
+					listing.names[name] = true
+				}
+			}
+		}
+		cache[dir] = listing
+	}
+	return !listing.complete || listing.names[first]
 }
 
 // commandWordFact is the CommandWordField fact of one command word: its place
 // with every link followed and with its last name kept, each as the kernel
-// walks it from dir (hookpaths.ResolveWriteTarget), and, when privacy is
-// asked, whether it is a private place of home. listed is false when both
-// places are the one the word spells and it is no private place.
-func commandWordFact(word hookpaths.CommandPathWord, dir, home string, privacy bool) (PathFact, bool) {
+// walks it from dir (hookpaths.ResolveWriteTarget, through memo), and, when
+// privacy is asked, whether it is a private place of home. listed is false
+// when both places are the one the word spells and it is no private place.
+// overBudget, set past the statement budget, also lists a word with no
+// other place that may reach a protected file (PathFact.Protected).
+func commandWordFact(word hookpaths.CommandPathWord, dir, home string, privacy, overBudget bool, memo *hookpaths.TargetMemo) (PathFact, bool) {
 	full := word.Value
 	if !strings.HasPrefix(full, "/") {
 		full = strings.TrimRight(dir, "/") + "/" + full
 	}
 	lexical := hookpaths.CommandWordAbs(word, dir)
 	fact := PathFact{Field: CommandWordField, Path: word.Text, Abs: lexical, UID: -1, GID: -1, Type: "missing"}
-	if followed, ok := hookpaths.ResolveWriteTarget(full); ok && followed != lexical {
+	if followed, ok := memo.ResolveWriteTarget(full); ok && followed != lexical {
 		fact.Resolved = followed
 	}
 	if dir, name := filepath.Split(strings.TrimRight(full, "/")); dir != "" && name != "" && name != "." && name != ".." {
-		if parent, ok := hookpaths.ResolveWriteTarget(dir); ok {
+		if parent, ok := memo.ResolveWriteTarget(dir); ok {
 			if entry := filepath.Join(parent, name); entry != lexical {
 				fact.Entry = entry
 			}
@@ -473,7 +606,10 @@ func commandWordFact(word hookpaths.CommandPathWord, dir, home string, privacy b
 	}
 	fact.PrivateHome = privacy && hookpaths.PrivateHomePlace(lexical, home)
 	if fact.Resolved == "" && fact.Entry == "" && !fact.PrivateHome {
-		return PathFact{}, false
+		if !overBudget || hookpaths.ProtectedReach(lexical, home, memo) != hookpaths.GradeNamed {
+			return PathFact{}, false
+		}
+		fact.Protected = true
 	}
 	if info, err := os.Stat(full); err == nil {
 		fact.Type = "other"

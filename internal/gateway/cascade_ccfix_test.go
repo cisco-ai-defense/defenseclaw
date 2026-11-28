@@ -18,17 +18,13 @@ package gateway
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
-	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -422,81 +418,6 @@ func TestCascadeIgnoredValuesAreReported(t *testing.T) {
 		t.Fatalf("explain: %+v", ex)
 	}
 }
-
-// GAP-0585 bench: the Rego final step at 100 calls/s (the hook-path target),
-// p50/p99 per decision with the documented modules. Opt-in, since it takes
-// DEFENSECLAW_CASCADE_BENCH seconds:
-//
-//	DEFENSECLAW_CASCADE_BENCH=20 go test -run TestCascadePolicyLatencyAt100PerSecond -v ./internal/gateway/
-func TestCascadePolicyLatencyAt100PerSecond(t *testing.T) {
-	seconds, _ := strconv.Atoi(os.Getenv("DEFENSECLAW_CASCADE_BENCH"))
-	if seconds <= 0 {
-		t.Skip("set DEFENSECLAW_CASCADE_BENCH=<seconds> to run the Rego latency bench")
-	}
-	modules := map[string]string{"allow-all": cascadeAllowAllModule, "test-module": cascadeTestModule, "docs-secrets": cascadeDocsSecretsModule}
-	names := make([]string, 0, len(modules))
-	for name := range modules {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		api := cascadeModuleConfig(t, "default", modules[name], "")
-		api.scannerCfg.Guardrail.Cascade.Policy.TimeoutMs = 0 // the production budget (5 ms)
-		verdict := func(i int) *ToolInspectVerdict {
-			findings := []RuleFinding{{RuleID: "SEC-AWS-KEY", Severity: "MEDIUM"}, {RuleID: "COG-CLAUDE-MD", Severity: "HIGH"},
-				{RuleID: "SHELL-EXFIL", Severity: "HIGH", Tags: []string{"exfil", "network"}}}
-			return &ToolInspectVerdict{Action: "block", Severity: "HIGH", Findings: []string{"SEC-AWS-KEY", "COG-CLAUDE-MD", "SHELL-EXFIL"},
-				DetailedFindings: findings[:1+i%3]}
-		}
-		var mu sync.Mutex
-		var lat []time.Duration
-		var errs int
-		var wg sync.WaitGroup
-		ticker := time.NewTicker(10 * time.Millisecond)
-		deadline := time.Now().Add(time.Duration(seconds) * time.Second)
-		for i := 0; time.Now().Before(deadline); i++ {
-			<-ticker.C
-			wg.Add(1)
-			go func(i int) {
-				defer wg.Done()
-				start := time.Now()
-				v := api.applyCascadeFinal(context.Background(), "claudecode", "tool_call", "PreToolUse", "Bash", verdict(i))
-				d := time.Since(start)
-				mu.Lock()
-				lat = append(lat, d)
-				if slices.Contains(v.Findings, cascadePolicyErrorID) {
-					errs++
-				}
-				mu.Unlock()
-			}(i)
-		}
-		ticker.Stop()
-		wg.Wait()
-		slices.Sort(lat)
-		pct := func(p float64) time.Duration { return lat[min(len(lat)-1, int(float64(len(lat))*p))] }
-		t.Logf("CASCADE-REGO-BENCH module=%s rate=100/s decisions=%d p50=%s p99=%s max=%s policy_errors=%d budget=%s",
-			name, len(lat), pct(0.50), pct(0.99), lat[len(lat)-1], errs, config.DefaultCascadePolicyTimeout)
-		// A decision over the budget is judged as unknown (never allow); the
-		// bench fails only when the typical (p99) decision misses it.
-		if pct(0.99) > config.DefaultCascadePolicyTimeout {
-			t.Errorf("%s: p99 %s is over the %s policy budget at 100 calls/s (%d of %d decisions went to the unknown tier)",
-				name, pct(0.99), config.DefaultCascadePolicyTimeout, errs, len(lat))
-		}
-	}
-}
-
-// The docs example module (guardrail/configure-cascade: secrets block at
-// MEDIUM).
-const cascadeDocsSecretsModule = `package defenseclaw.cascade
-import rego.v1
-
-decisions contains {"action": "block", "id": "secrets-medium", "reason": "secrets block at MEDIUM and above"} if {
-	some f in input.findings
-	f.enforceable
-	startswith(f.rule_id, "SEC-")
-	f.severity in {"MEDIUM", "HIGH", "CRITICAL"}
-}
-`
 
 // GAP-0580: cascade explain shows the mode that applies, the locked
 // top-level one, for a connector under application_protection, with and

@@ -11,9 +11,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// managedHookDecisionEventID tags managed hook decisions in the Application
+// ManagedHookDecisionEventID tags managed hook decisions in the Application
 // event log; the gateway service itself uses 1 (degraded) and 2 (log line).
-const managedHookDecisionEventID = 3
+const ManagedHookDecisionEventID = 3
 
 // writeManagedHookDecisionRecord appends line to the Windows Application
 // event log under the gateway service's existing event source. Interactive
@@ -28,16 +28,16 @@ func writeManagedHookDecisionRecord(source, marker, line string) {
 	}
 	defer events.Close()
 	if marker == managed.MarkerBoundary {
-		_ = events.Error(managedHookDecisionEventID, line)
+		_ = events.Error(ManagedHookDecisionEventID, line)
 		return
 	}
-	_ = events.Warning(managedHookDecisionEventID, line)
+	_ = events.Warning(ManagedHookDecisionEventID, line)
 }
 
-// managedHookDecisionRecordSource is the protected gateway service name when
+// ManagedHookDecisionRecordSource is the protected gateway service name when
 // the hook has one, so certification-scoped installs keep their own source,
 // and the production gateway source otherwise.
-func managedHookDecisionRecordSource(serviceName string) string {
+func ManagedHookDecisionRecordSource(serviceName string) string {
 	if validateManagedGatewayServiceName(serviceName) != nil {
 		return managedHookDecisionRecordDefaultSource
 	}

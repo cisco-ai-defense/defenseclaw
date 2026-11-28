@@ -85,6 +85,60 @@ type mcpToolInventory struct {
 	pendingRemoval              map[string]struct{}
 	observedRestoreIncomplete   bool
 	advertisedRestoreIncomplete bool
+	// parentSince is when each alias's current parent became current, and
+	// listingSourceSince when the watcher whose MCP admission scans supply
+	// the listings started (zero while none runs). Together they bound how
+	// long a parent with no listing yet keeps its advertised collection
+	// partial (rel-1-0-10:GAP-1857).
+	parentSince        map[string]time.Time
+	listingSourceSince time.Time
+	now                func() time.Time
+}
+
+// mcpToolFirstListingWindow is how long a current parent with no listing
+// keeps the advertised collection partial while a listing source runs: the
+// watcher's MCP discovery poll plus one admission scan, with room for the
+// startup rescan. After it the collection is sent as complete, as before, so
+// a server that is never scanned (admitted without a scan, or an unchanged
+// baseline with no kept listing) cannot keep a Secure Client endpoint from
+// stamping its daily bundle.
+const mcpToolFirstListingWindow = 15 * time.Minute
+
+func (m *mcpToolInventory) clock() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
+}
+
+// setListingSource records whether the watcher that lists MCP tools runs.
+func (m *mcpToolInventory) setListingSource(running bool) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.listingSourceSince = time.Time{}
+	if running {
+		m.listingSourceSince = m.clock()
+	}
+}
+
+// firstListingDueLocked reports a current parent with no recorded listing
+// whose first listing a running source may still deliver: its advertised
+// collection is not complete yet (rel-1-0-10:GAP-1857). With no listing
+// source (gateway.watcher.enabled off) nothing will list it, and it is sent
+// as before: no advertised tools in a complete collection (a documented
+// limit).
+func (m *mcpToolInventory) firstListingDueLocked(key string) bool {
+	if m.listingSourceSince.IsZero() || !m.advertisedListedAt[key].IsZero() || m.advertised[key] != nil {
+		return false
+	}
+	since := m.listingSourceSince
+	if current := m.parentSince[key]; current.After(since) {
+		since = current
+	}
+	return m.clock().Sub(since) < mcpToolFirstListingWindow
 }
 
 // refreshParents invalidates evidence when an alias starts naming a different
@@ -198,6 +252,20 @@ func (m *mcpToolInventory) refreshCompleteParents(servers []endpointInventoryCom
 		connector, _, _ := strings.Cut(key, "\x00")
 		if _, incomplete := incompleteConnectors[connector]; incomplete {
 			next[key] = old
+		}
+	}
+	if m.parentSince == nil {
+		m.parentSince = make(map[string]time.Time)
+	}
+	now := m.clock()
+	for key, parentID := range next {
+		if m.parents[key] != parentID {
+			m.parentSince[key] = now
+		}
+	}
+	for key := range m.parentSince {
+		if next[key] == "" {
+			delete(m.parentSince, key)
 		}
 	}
 	m.parents = next
@@ -962,11 +1030,12 @@ func (m *mcpToolInventory) components(servers []endpointInventoryComponent, remo
 		if includeAdvertised && m.store != nil && m.pendingAdvertised[key] != 0 {
 			partial = true
 		}
-		// A parent that has never been scanned contributes no advertised rows.
-		// A recorded listing failure is partial, while an authoritative empty
-		// listing is represented by an empty advertised slice.
+		// A parent that has never been scanned contributes no advertised rows,
+		// and is partial while its first listing is due. A recorded listing
+		// failure is partial, while an authoritative empty listing is
+		// represented by an empty advertised slice.
 		if includeAdvertised {
-			partial = partial || m.partial[key]
+			partial = partial || m.partial[key] || m.firstListingDueLocked(key)
 		}
 		if includeObserved {
 			partial = partial || m.observedPartial[key]

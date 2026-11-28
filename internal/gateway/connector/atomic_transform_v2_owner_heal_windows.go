@@ -33,9 +33,9 @@ var atomicTransformV2OwnerHealBeforeFileOpen func()
 // It runs only when the account itself cannot open the file, the process may
 // repair managed objects (elevated installer or LocalSystem guardian), the
 // effective user is an ordinary account, the folder is owned by that account
-// and carries exactly that guardian setup DACL (alone or with the gateway
-// service read grant the hook enumerator adds to every agent folder it
-// inventories, GAP-1827), and the file, a single-link regular file reached
+// and carries exactly that guardian setup DACL (alone or with this
+// deployment's gateway service read grant the hook enumerator adds to every
+// agent folder it inventories, GAP-1827, GAP-2125), and the file, a single-link regular file reached
 // without reparse points, is owned by LocalSystem, Administrators or
 // TrustedInstaller and has only the ACEs it inherited from that folder
 // (GAP-1672). The file DACL is the provenance: a file the account moved in
@@ -179,10 +179,13 @@ func healAtomicTransformV2ConfigLeftToAdmin(path string) error {
 	return nil
 }
 
-// atomicTransformV2HealGatewaySID is the service SID of the gateway, whose
-// enumerator read grant a relaxed agent folder may carry (GAP-1827).
+// atomicTransformV2HealGatewaySID is the service SID of this deployment's
+// gateway, whose enumerator read grant a relaxed agent folder may carry
+// (GAP-1827): the production gateway, or the run-scoped certification
+// gateway of a certification install (rel-1-0-10 GAP-2125), never another
+// service's grant.
 func atomicTransformV2HealGatewaySID() (*windows.SID, error) {
-	return windows.StringToSid(managed.WindowsServiceSIDString(managed.StandaloneWindowsGatewaySvc))
+	return windows.StringToSid(managed.WindowsServiceSIDString(managed.DeploymentGatewayService()))
 }
 
 // atomicTransformV2HealFolderIsExpected reports whether the held folder

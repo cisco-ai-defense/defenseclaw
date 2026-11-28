@@ -125,11 +125,13 @@ func normalizePathFactsForCommandsInShell(
 			context,
 		)
 		facts[i].unresolvedFolder = unresolved
+		others = appendProcessCWDLinkFact(others, facts[i], raw, factCWD, false)
 		for _, dir := range otherDirs {
 			other := raw
 			otherContext := pathContextForCommand(raw, dir, command, index)
 			otherContext.windowsShellCWD = windowsShellCWD
 			other.Normalized, other.Absolute, other.Resolved = derivePathWithContext(raw, dir, activeHome, otherContext)
+			others = appendProcessCWDLinkFact(others, facts[i], raw, dir, true)
 			if other.Resolved == facts[i].Resolved && other.Normalized == facts[i].Normalized {
 				continue // an absolute operand names the same file in every folder
 			}
@@ -139,6 +141,26 @@ func normalizePathFactsForCommandsInShell(
 		}
 	}
 	return append(facts, others...)
+}
+
+// appendProcessCWDLinkFact adds the file an operand spelled through the
+// command's own working-directory link reaches when the command works in dir
+// (ProcessCWDLinkSpelling). It is one more spelling of the operand, a Linked
+// fact as for any other existing link: the access and command stay, and it
+// is never a further operand. otherFolder marks the reading in a folder a cd
+// may have moved the command to.
+func appendProcessCWDLinkFact(others []PathFact, operand, raw PathFact, dir string, otherFolder bool) []PathFact {
+	if raw.Flavor == PathFlavorWindows || raw.Flavor == PathFlavorRegistry {
+		return others
+	}
+	spelling, ok := ProcessCWDLinkSpelling(raw.Value, dir)
+	if !ok || spelling == operand.Resolved {
+		return others
+	}
+	linked := LinkedPathFact(operand, spelling)
+	linked.Flavor = PathFlavorPOSIX
+	linked.otherFolder = otherFolder
+	return append(others, linked)
 }
 
 func pathContextForCommand(

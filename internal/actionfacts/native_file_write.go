@@ -52,8 +52,9 @@ var (
 // reviewed tools. A call whose arguments are not one of those shapes, or whose
 // tool is not a file-writing tool, yields nothing, so a proof built on it
 // never covers an unreviewed call.
-func nativeFileWrites(tool string, args json.RawMessage) []nativeFileWrite {
-	writes := readNativeFileWrites(tool, args)
+// cwd places drive-relative patch header names (patchView).
+func nativeFileWrites(tool string, args json.RawMessage, cwd string) []nativeFileWrite {
+	writes := readNativeFileWrites(tool, args, cwd)
 	for index := range writes {
 		writes[index].added = boundedNativeText(writes[index].added)
 		writes[index].replaced = boundedNativeText(writes[index].replaced)
@@ -170,7 +171,7 @@ func nativeCallWrites(input Input, facts Facts) ([]nativeFileWrite, Facts) {
 		if input.Command != "" {
 			return nil, facts
 		}
-		return nativeFileWrites(input.Tool, input.Args), facts
+		return nativeFileWrites(input.Tool, input.Args, patchCallCWD(input)), facts
 	}
 	view := facts
 	view.Paths = nil
@@ -182,7 +183,7 @@ func nativeCallWrites(input Input, facts Facts) ([]nativeFileWrite, Facts) {
 		if !ok {
 			continue
 		}
-		envelope := readPatchEnvelope(text, shellView)
+		envelope := readPatchEnvelope(text, patchView{shellView: shellView})
 		if envelope.status != StatusComplete {
 			continue
 		}
@@ -191,7 +192,7 @@ func nativeCallWrites(input Input, facts Facts) ([]nativeFileWrite, Facts) {
 		for _, change := range envelope.changes {
 			patchFiles[command.ID][change.path] = true
 		}
-		for _, write := range nativePatchEnvelopeWrites(envelope.canonical, shellView) {
+		for _, write := range nativePatchEnvelopeWrites(envelope.canonical, patchView{shellView: shellView}) {
 			write.added = boundedNativeText(write.added)
 			write.replaced = boundedNativeText(write.replaced)
 			writes = append(writes, write)
@@ -215,7 +216,7 @@ func nativeCallWrites(input Input, facts Facts) ([]nativeFileWrite, Facts) {
 	return writes, view
 }
 
-func readNativeFileWrites(tool string, args json.RawMessage) []nativeFileWrite {
+func readNativeFileWrites(tool string, args json.RawMessage, cwd string) []nativeFileWrite {
 	if tool == "" || strings.TrimSpace(tool) != tool {
 		return nil
 	}
@@ -239,7 +240,7 @@ func readNativeFileWrites(tool string, args json.RawMessage) []nativeFileWrite {
 		return nil
 	}
 	if patchTool {
-		return nativePatchWrites(object)
+		return nativePatchWrites(object, cwd)
 	}
 	if _, ok := object["edits"]; ok {
 		return nativeMultiEditWrites(object)
@@ -263,7 +264,7 @@ func NativeFileWriteTargets(input Input) []string {
 	if input.Command != "" || len(input.Argv) != 0 {
 		return nil
 	}
-	writes := nativeFileWrites(input.Tool, input.Args)
+	writes := nativeFileWrites(input.Tool, input.Args, patchCallCWD(input))
 	targets := make([]string, 0, len(writes))
 	for _, write := range writes {
 		if write.target != "" {
@@ -352,37 +353,38 @@ func nativeMultiEditWrites(object map[string]any) []nativeFileWrite {
 // apply_patch envelope given to the native tool, joined, and the text each hunk
 // leaves in place (an @@ line starts the next hunk). A moved file's new path
 // receives the same hunks.
-func nativePatchWrites(object map[string]any) []nativeFileWrite {
+func nativePatchWrites(object map[string]any, cwd string) []nativeFileWrite {
 	if len(object) != 1 {
 		return nil
 	}
 	text, ok := nativeStringField(object, nativePatchTextKeys)
-	envelope := parsePatchEnvelope(text)
+	view := patchView{cwd: cwd}
+	envelope := readPatchEnvelope(text, view)
 	if !ok || envelope.status != StatusComplete {
 		return nil
 	}
-	return nativePatchEnvelopeWrites(envelope.canonical, false)
+	return nativePatchEnvelopeWrites(envelope.canonical, view)
 }
 
 // nativePatchEnvelopeWrites reads the files and the added and removed lines of
-// an apply_patch envelope that parsePatchEnvelope read complete (its
+// an apply_patch envelope that readPatchEnvelope read complete (its
 // canonical form; shellView as readPatchEnvelope read it). A file no reader
 // places (patchHeaderTarget) is no write
 // the content rules can judge by its name, as it is no path fact: its lines
 // are skipped, and the file it moves to still gets them (rel-1-0-10:GAP-1055).
-func nativePatchEnvelopeWrites(text string, shellView bool) []nativeFileWrite {
+func nativePatchEnvelopeWrites(text string, view patchView) []nativeFileWrite {
 	var writes []nativeFileWrite
 	var current []int
 	for _, line := range strings.Split(text, "\n") {
 		switch {
 		case strings.HasPrefix(line, "*** Add File: "), strings.HasPrefix(line, "*** Update File: "):
 			current = nil
-			if target, placed := patchHeaderTarget(patchDirectivePath(line, line[:strings.Index(line, ": ")+2]), shellView); placed {
+			if target, placed := patchHeaderTarget(patchDirectivePath(line, line[:strings.Index(line, ": ")+2]), view); placed {
 				writes = append(writes, nativeFileWrite{target: target, whole: strings.HasPrefix(line, "*** Add File: ")})
 				current = []int{len(writes) - 1}
 			}
 		case strings.HasPrefix(line, "*** Move to: "):
-			if target, placed := patchHeaderTarget(patchDirectivePath(line, "*** Move to: "), shellView); placed {
+			if target, placed := patchHeaderTarget(patchDirectivePath(line, "*** Move to: "), view); placed {
 				writes = append(writes, nativeFileWrite{target: target})
 				current = append(current, len(writes)-1)
 			}

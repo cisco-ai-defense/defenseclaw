@@ -114,6 +114,12 @@ func TestStandaloneSetupConcurrentEnsureReportsBusy(t *testing.T) {
 // An implicit deferred install over an active deployment must be rejected by
 // Setup itself, before the lifecycle can publish an unclaimed rollback intent.
 func TestStandaloneSetupRefusesDeferredInstallOverDeployment(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		// Setup refuses a standard-user token before it reads its arguments,
+		// so the deferred-install refusal this test checks is never reached
+		// there (rel-1-0-10:GAP-2192).
+		t.Skip("the standalone Setup requires an elevated administrator token")
+	}
 	previousFlavor, previousPayload, previousDeployment := enterpriseSetupStandaloneFlavor, enterpriseSetupPayloadLoader, standaloneSetupDeployment
 	t.Cleanup(func() {
 		enterpriseSetupStandaloneFlavor, enterpriseSetupPayloadLoader, standaloneSetupDeployment = previousFlavor, previousPayload, previousDeployment

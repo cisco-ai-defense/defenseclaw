@@ -57,7 +57,8 @@ func TestWorkingFolderResolvesRelativeOperandsAfterACD(t *testing.T) {
 		{"group false and cd", "{ false && cd .git/hooks; }; echo x > pre-push", []string{top, hooks}, false},
 		{"or cd", "true || cd .git/hooks; echo x > pre-push", []string{top, hooks}, false},
 		{"cd or true", "cd .git/hooks || true; echo x > pre-push", []string{top, hooks}, false},
-		{"cd or exit", "cd .git/hooks || exit 1; echo x > pre-push", []string{top, hooks}, false},
+		// The exit ends the shell where the cd failed (substrate-1:GAP-0699).
+		{"cd or exit", "cd .git/hooks || exit 1; echo x > pre-push", []string{hooks}, false},
 		{"if body", "if true; then cd .git/hooks; fi; echo x > pre-push", []string{top, hooks}, false},
 		{"while body moving each pass", "while true; do cd sub; done; echo x > f", []string{"/work/proj/f", "/work/proj/sub/f", "/work/proj/sub/sub/f"}, true},
 		// A call of a function whose body moves leaves the shell where the
@@ -78,9 +79,11 @@ func TestWorkingFolderResolvesRelativeOperandsAfterACD(t *testing.T) {
 		{"function defined in a subshell: unresolved", "(f() { cd /srv; }); f; echo x > g", []string{"/work/proj/g"}, true},
 		// A function named cd may run instead of the builtin, at the top
 		// level and in a mover body the tracking reads (substrate-1:GAP-0684
-		// on the GAP-1144 body reading).
-		{"function named cd: a top-level cd is unresolved", "cd() { :; }; cd /srv && echo x > g", []string{"/work/proj/g"}, true},
-		{"function named cd: a cd in a mover body is unresolved", "cd() { :; }; f() { cd /srv; }; f; echo x > g", []string{"/work/proj/g"}, true},
+		// on the GAP-1144 body reading), or go where the builtin goes: the
+		// spelled folder stays a candidate beside the unresolved one
+		// (substrate-1:GAP-0686).
+		{"function named cd: a top-level cd is unresolved or the spelled folder", "cd() { :; }; cd /srv && echo x > g", []string{"/srv/g", "/work/proj/g"}, true},
+		{"function named cd: a cd in a mover body is unresolved or the spelled folder", "cd() { :; }; f() { cd /srv; }; f; echo x > g", []string{"/srv/g", "/work/proj/g"}, true},
 		{"function never called", "f() { cd /srv; }; echo x > g", []string{"/work/proj/g"}, false},
 		{"variable target: unresolved", "cd $X && echo x > pre-push", []string{top}, true},
 		{"command substitution target: unresolved", "cd \"$(cat d)\" && echo x > pre-push", []string{top}, true},

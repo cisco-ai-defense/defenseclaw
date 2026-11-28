@@ -70,7 +70,7 @@ func recordManagedHookDecision(opts Options, sp spec, reason, category, failMode
 	// logger: agents surface hook stderr, and Claude Code turns it into the
 	// block message shown to the user and the model.
 	opts.failureLog.recorder()(
-		managedHookDecisionRecordSource(opts.ManagedGatewayServiceName),
+		ManagedHookDecisionRecordSource(opts.ManagedGatewayServiceName),
 		marker,
 		managed.FormatResilienceEvent(marker, fields),
 	)
@@ -82,7 +82,7 @@ func recordManagedHookDecision(opts Options, sp spec, reason, category, failMode
 // the agent through stdout or stderr. A hook entrypoint calls it once at
 // startup, before any managed check runs.
 func InstallManagedHookDiagnosticSinks() {
-	source := managedHookDecisionRecordSource("")
+	source := ManagedHookDecisionRecordSource("")
 	managed.ReportResilienceEvent = func(marker string, fields map[string]string) {
 		managedHookDecisionRecorder(source, marker, managed.FormatResilienceEvent(marker, fields))
 	}

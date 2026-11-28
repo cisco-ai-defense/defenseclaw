@@ -37,7 +37,7 @@ dc_image() {
 }
 
 # dc_scanner_image: print the skill scanner sidecar image reference (repo:tag@digest) the chart should run
-# (gateway.skillScanner; the chart default is off, GAP-1103, so dc_install turns it on). E2E_SCANNER_IMAGE=repo:tag@sha256:... uses an image that is already in a
+# (gateway.skillScanner; the chart default is off, GAP-1103, so dc_install turns it on unless E2E_SKILL_SCANNER=off). E2E_SCANNER_IMAGE=repo:tag@sha256:... uses an image that is already in a
 # registry the cluster reads; empty builds one from this checkout like the release does
 # (scripts/release/substrate-images.sh): deploy/images/scanner/Dockerfile around this checkout's gateway,
 # defenseclaw-scanners and the scanner runtime of the managed Linux package (packaging/unix/build-scanner-runtime.sh,
@@ -65,9 +65,22 @@ dc_install() {
   if ! image=$(dc_image); then fail "build and push the DefenseClaw gateway image"; return 1; fi
   pass "the DefenseClaw gateway image is available (${image%%@*})"
   digest=${image#*@}; repo=${image%@*}; tag=${repo##*:}; repo=${repo%:*}
-  if ! simage=$(dc_scanner_image); then tail -n 20 "$E2E_ARTIFACTS/scanner-build.log" 2>/dev/null; fail "build and push the DefenseClaw skill scanner image"; return 1; fi
-  pass "the DefenseClaw skill scanner image is available (${simage%%@*})"
-  sdigest=${simage#*@}; srepo=${simage%@*}; stag=${srepo##*:}; srepo=${srepo%:*}
+  local scanner_values=""
+  if [ "$E2E_SKILL_SCANNER" = on ]; then
+    if ! simage=$(dc_scanner_image); then tail -n 20 "$E2E_ARTIFACTS/scanner-build.log" 2>/dev/null; fail "build and push the DefenseClaw skill scanner image"; return 1; fi
+    pass "the DefenseClaw skill scanner image is available (${simage%%@*})"
+    sdigest=${simage#*@}; srepo=${simage%@*}; stag=${srepo##*:}; srepo=${srepo%:*}
+    scanner_values="  skillScanner:
+    enabled: true
+    image:
+      repository: $srepo
+      tag: \"$stag\"
+      digest: $sdigest"
+  elif [ "$E2E_SKILL_SCANNER" != off ]; then
+    fail "E2E_SKILL_SCANNER is on or off (got $E2E_SKILL_SCANNER)"; return 1
+  else
+    info "E2E_SKILL_SCANNER=off: the chart's default, no skill scanner sidecar"
+  fi
   K create namespace "$ns" >/dev/null 2>&1 || true
   # ate-api-server admits clients only from namespaces with this label (its NetworkPolicy); the bootstrap Job and the
   # controller reach the API from here.
@@ -108,12 +121,7 @@ bootstrap:
   ownerTokenSecret: dc-e2e-owner
 gateway:
   hpa: {enabled: false}
-  skillScanner:
-    enabled: true
-    image:
-      repository: $srepo
-      tag: "$stag"
-      digest: $sdigest
+$scanner_values
 callout:
   hpa: {enabled: false}
 leader:
@@ -126,6 +134,19 @@ YAML
   if [ "$rc" -ne 0 ]; then tail -n 20 "$E2E_ARTIFACTS/helm-install.log"; fail "helm install of the DefenseClaw chart"; return 1; fi
   pass "helm install of the DefenseClaw chart (the OpenFGA bootstrap Job ran)"
   check "the DefenseClaw deployments are available" K -n "$ns" wait --for=condition=Available deployment --all --timeout=300s
+  if [ "$E2E_SKILL_SCANNER" = off ]; then
+    # The chart default (GAP-1133): the gateway pod carries no skill scanner container, so a skill an agent adds while
+    # it runs follows the fail mode.
+    local names
+    names=$(K -n "$ns" get deploy defenseclaw-gateway -o jsonpath='{.spec.template.spec.containers[*].name}' 2>>"$E2E_ARTIFACTS/check.log")
+    info "gateway containers: $names"
+    case " $names " in
+      *" skill-scanner "*) fail "the default chart runs no skill scanner sidecar (containers: $names)" ;;
+      *" gateway "*) pass "the default chart runs no skill scanner sidecar" ;;
+      *) fail "the gateway deployment lists its containers (got: $names)" ;;
+    esac
+    return 0
+  fi
   # The gateway asks its skill scanner sidecar at start whether skill-scanner runs (up to a minute) and logs the answer.
   if retry 120 5 bash -c "kubectl $(kctx) -n $ns logs deploy/defenseclaw-gateway -c gateway 2>/dev/null | grep -q 'substrate: skill scanner ready'"; then
     pass "the gateway's skill scanner sidecar is ready"
