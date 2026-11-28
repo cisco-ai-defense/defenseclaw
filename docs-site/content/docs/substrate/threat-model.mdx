@@ -101,3 +101,4 @@ The last column of the attacker table says what covers each row. Parts marked **
 - **Very long commands.** On very long commands the laptop may alert at its evaluation limit where a Substrate actor blocks a private-key read.
 - **Claude settings files in a sandbox without the kit.** In a sandbox without the DefenseClaw kit, edits of Claude settings files are refused; full rewrites that keep DefenseClaw hooks and new files are judged.
 - **Inline interpreter code.** Files changed by inline interpreter code (perl -pi, python -c) are judged by the interpreter rules, not by file path.
+- **Windows home files in Git Bash text.** On Windows, a home file spelled with a drive letter in Git Bash text is judged by the Windows path rules.
