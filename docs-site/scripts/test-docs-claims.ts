@@ -2038,6 +2038,8 @@ const r105Rows: DocRow[] = [
   { gap: "rel-1-0-10 GAP-1588", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["On Windows, a command joined to other statements in some list forms (a background &, a subshell, or a here-document on the same line) may be judged without the context of the other statements."] },
   // Documented limit the lead ruled (substrate-1 GAP-0260): outbound requests after a credentials read
   { gap: "substrate-1 GAP-0260", page: "substrate/threat-model.mdx", section: "Known limits", has: ["After a credentials read, the Substrate callout refuses outbound requests for the rest of the chain window, including hosts on the egress allowlist."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0636): npx MCP server programs
+  { gap: "substrate-1 GAP-0636", page: "substrate/threat-model.mdx", section: "Known limits", has: ["An npx MCP server's own programs are attested from the actor's npx cache; tools the server starts through PATH and a package's first, uncached run are not."] },
 ];
 
 function pageSection(name: string, heading?: string): string {
