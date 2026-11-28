@@ -99,13 +99,21 @@ def discover_test_files(package_dir: Path) -> list[tuple[Path, tuple[str, ...]]]
     return discovered
 
 
-def built_test_files(files: list[tuple[Path, tuple[str, ...]]], package_dir: Path) -> list[tuple[Path, tuple[str, ...]]]:
+def built_test_files(
+    files: list[tuple[Path, tuple[str, ...]]], package_dir: Path
+) -> list[tuple[Path, tuple[str, ...]]]:
     """Keep the files `go list` builds into the package's test binary on this
     GOOS/GOARCH: a guarded run (go_test_report.py --expect-run) then expects
     only tests the binary has, not those of a _windows_test.go file or of a
     //go:build line that leaves this platform out."""
     listing = subprocess.run(
-        ["go", "list", "-f", "{{range .TestGoFiles}}{{println .}}{{end}}{{range .XTestGoFiles}}{{println .}}{{end}}", "."],
+        [
+            "go",
+            "list",
+            "-f",
+            "{{range .TestGoFiles}}{{println .}}{{end}}{{range .XTestGoFiles}}{{println .}}{{end}}",
+            ".",
+        ],
         cwd=package_dir,
         check=True,
         capture_output=True,
@@ -410,7 +418,10 @@ def main() -> int:
     parser.add_argument(
         "--built-files",
         action="store_true",
-        help="test mode: keep only the test files go list builds on this GOOS/GOARCH (for go_test_report.py --expect-run)",
+        help=(
+            "test mode: keep only the test files go list builds on this GOOS/GOARCH"
+            " (for go_test_report.py --expect-run)"
+        ),
     )
     parser.add_argument("--split-tests", action="store_true", help="test mode: balance each test separately")
     parser.add_argument(
