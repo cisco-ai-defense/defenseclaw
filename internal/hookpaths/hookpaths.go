@@ -8257,7 +8257,13 @@ func programBase(word string) string {
 	if index := strings.LastIndexAny(word, `/\`); index >= 0 {
 		word = word[index+1:]
 	}
-	return strings.TrimSuffix(strings.ToLower(word), ".exe")
+	word = strings.TrimSuffix(strings.ToLower(word), ".exe")
+	// A versioned perl binary (perl5.38, perl5.38.2) is perl to every
+	// reader (GAP-1097).
+	if len(word) > len("perl") && strings.HasPrefix(word, "perl") && strings.Trim(word[len("perl"):], "0123456789.") == "" {
+		return "perl"
+	}
+	return word
 }
 
 // Long options of ln and cp that matter here, and the flags that share their
