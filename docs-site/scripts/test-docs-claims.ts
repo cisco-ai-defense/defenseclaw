@@ -2030,6 +2030,12 @@ const r105Rows: DocRow[] = [
   { gap: "rel-1-0-10 GAP-1639", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["A credentials file passed by name to a script (for example a Python or Node script) is not tracked as a read; DefenseClaw does not read the script's code."] },
   // Documented limit the lead ruled (rel-1-0-10 GAP-0898): a find -exec reader over another account's home outside the home roots is not tracked as a read.
   { gap: "rel-1-0-10 GAP-0898", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["A find -exec reader over another account's home outside /home and /Users is not raised as a read of that account's credentials; use file permissions for shared or mounted homes."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-2149): Removing hooks on Windows
+  { gap: "rel-1-0-10 GAP-2149", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["On Windows, removing DefenseClaw hooks from an agent with many configured hook entries can take up to about 30 seconds."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-1535): A Git Bash file reached through the working folder
+  { gap: "rel-1-0-10 GAP-1535", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["On Windows, a Git Bash command that reaches a file through the shell's working folder ($(pwd)/, ~+/, or a HOME set from it at run time) is not judged as that file; name the file directly."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-1588): A command joined to other statements
+  { gap: "rel-1-0-10 GAP-1588", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["On Windows, a command joined to other statements in some list forms (a background &, a subshell, or a here-document on the same line) may be judged without the context of the other statements."] },
 ];
 
 function pageSection(name: string, heading?: string): string {
