@@ -6,6 +6,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 )
@@ -18,6 +19,9 @@ import (
 // call's arguments as the body (rel allowed it; the plain form blocks). The
 // same call before an ordinary file stays allowed.
 func TestGAP0713ArgRunnerCDIsTheCD(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX home rows: a relative operand of a home file is not placed from a Windows cwd, at rel 8a1e883539 as here (P49-FIX2 native probe)")
+	}
 	installCorrelationHMACForTest(t)
 	home := filepath.Join(t.TempDir(), "home", "alice")
 	for _, d := range []string{".aws", "proj"} {

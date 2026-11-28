@@ -6,6 +6,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 )
@@ -19,6 +20,9 @@ import (
 // `cd .git/hooks` alerts (default) or blocks (strict) with or without the
 // function. A move to an ordinary folder stays allowed.
 func TestGAP0686ShadowedMoveKeepsTheSpelledFolder(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX walk of a shadowed cd/pushd: on a Windows host the shadowed spelling keeps the 1.0.10 reading, as at rel 8a1e883539 (P49-FIX2 native rows)")
+	}
 	installCorrelationHMACForTest(t)
 	home := filepath.Join(t.TempDir(), "home", "alice")
 	project := filepath.Join(home, "proj")

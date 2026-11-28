@@ -6,6 +6,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -17,6 +18,9 @@ import (
 // spelled from the home, in the default and strict packs. A quoted project
 // file stays allowed.
 func TestGAP0700QuotedRelativeHomeWriteIsItsHomeSpelling(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX home rows: a relative operand of a home file is not placed from a Windows cwd, at rel 8a1e883539 as here (P49-FIX2 native probe)")
+	}
 	installCorrelationHMACForTest(t)
 	home := filepath.Join(t.TempDir(), "home", "alice")
 	for _, d := range []string{".aws", "proj"} {

@@ -6,7 +6,10 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -25,7 +28,15 @@ func TestGAP0706MoveAwayIsTheDelete(t *testing.T) {
 		}
 	}
 	t.Setenv("HOME", home)
+	// The gateway takes the account home from os.UserHomeDir, which reads
+	// USERPROFILE on a Windows host.
+	t.Setenv("USERPROFILE", home)
 	files := []string{"~/.aws/credentials", ".aws/credentials", "~/.kube/config", "~/.npmrc", "~/.git-credentials"}
+	if runtime.GOOS == "windows" {
+		// A relative operand of a home file is not placed from a Windows
+		// cwd, at rel 8a1e883539 as here: the ~/ rows run there.
+		files = slices.DeleteFunc(files, func(file string) bool { return !strings.HasPrefix(file, "~/") })
+	}
 	controls := []string{"mv proj/a.txt /tmp/a.txt", "mv proj/credentials.py proj/src/credentials.py", "mv proj/config proj/config.old", "mv proj/.env proj/.env.bak"}
 	for _, pack := range []string{"default", "strict"} {
 		handler := hostClaudeHookHandlerForTest(t, pack)

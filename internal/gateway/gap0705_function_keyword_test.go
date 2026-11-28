@@ -24,6 +24,9 @@ func TestGAP0705FunctionKeywordIsItsPOSIXDefinition(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
+	// The gateway takes the account home from os.UserHomeDir, which reads
+	// USERPROFILE on a Windows host.
+	t.Setenv("USERPROFILE", home)
 	posix := []string{
 		`f() { cd /tmp; "$@"; }; f cd && rm ~/.aws/credentials`,
 		`f() { rm ~/.aws/credentials; }; f`,
