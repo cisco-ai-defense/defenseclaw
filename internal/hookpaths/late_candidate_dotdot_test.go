@@ -198,11 +198,23 @@ func TestOperandPathCleansDotDotOnlyWithoutALink(t *testing.T) {
 		{"/unused", real + "/a/../x", real + "/a/../x"},
 		{"/unused", missing + "/../x", missing + "/../x"},
 		{"/unused", real + "/" + strings.Repeat("../", 17) + "x", real + "/" + strings.Repeat("../", 17) + "x"},
-		{"/unused", "/..", "/"},
-		{"/unused", "/../" + strings.TrimPrefix(real, "/"), real},
 	} {
 		if got := filepath.ToSlash(OperandPath(row.name, row.cwd)); got != filepath.ToSlash(row.want) {
 			t.Errorf("OperandPath(%q, %q)=%q, want %q", row.name, row.cwd, got, row.want)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		// A "/" operand with no drive is not absolute on Windows: it keeps
+		// its spelling there, as at rel 8a1e883539.
+		return
+	}
+	for _, name := range []string{"/..", "/../" + strings.TrimPrefix(real, "/")} {
+		want := "/"
+		if name != "/.." {
+			want = real
+		}
+		if got := filepath.ToSlash(OperandPath(name, "/unused")); got != filepath.ToSlash(want) {
+			t.Errorf("OperandPath(%q, %q)=%q, want %q", name, "/unused", got, want)
 		}
 	}
 }

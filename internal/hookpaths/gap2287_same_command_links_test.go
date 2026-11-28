@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -19,6 +20,9 @@ import (
 // mv/install/rsync destination outside process links is not listed
 // (GAP-2275).
 func TestGAP2287LiteralWritesKeepSameCommandLinkSteps(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX folders and process links: Windows has no /proc and reads a dot-dot step lexically (dotDotReadsLexically)")
+	}
 	const cwd, home = "/sandbox/app", "/sandbox"
 	key := "authorized_" + "keys"
 	for _, writer := range []string{"mv /tmp/k", "install /tmp/k", "rsync /tmp/k", "cp /tmp/k"} {
@@ -73,6 +77,11 @@ func TestGAP2287LinkBeforeStep(t *testing.T) {
 	if none.linkBeforeStep("/w/L/x") {
 		t.Error("no made link and no dot-dot: no link to follow")
 	}
+	if runtime.GOOS == "windows" {
+		// The walk reads POSIX placed paths only: Windows reads a dot-dot
+		// step after a link lexically (dotDotReadsLexically).
+		return
+	}
 	dir := t.TempDir()
 	if err := os.Symlink(filepath.Join(dir, "real"), filepath.Join(dir, "disk")); err != nil {
 		t.Skip(err)
@@ -89,12 +98,17 @@ func TestGAP2288DotDotMoveDestinations(t *testing.T) {
 	cwd := filepath.Join(home, "app")
 	want := filepath.Join(cwd, ".claude", "settings.json")
 	for _, writer := range []string{"mv /tmp/s", "install /tmp/s", "rsync /tmp/s", "install -m 600 /tmp/s", "mv -t x/../.claude /tmp/settings.json"} {
-		for _, dest := range []string{" x/../.claude/settings.json", " " + cwd + "/x/../.claude/settings.json"} {
+		// The folder in the shell spelling an agent writes (C:/... on Windows).
+		for _, dest := range []string{" x/../.claude/settings.json", " " + filepath.ToSlash(cwd) + "/x/../.claude/settings.json"} {
 			command := writer + dest
 			if writer == "mv -t x/../.claude /tmp/settings.json" {
 				command = writer
 			}
-			if got := DotDotMoveDestinations(command, cwd, home); !slices.Equal(got, []string{want}) {
+			got := DotDotMoveDestinations(command, cwd, home)
+			for i := range got {
+				got[i] = filepath.FromSlash(got[i])
+			}
+			if !slices.Equal(got, []string{want}) {
 				t.Errorf("%q: %q, want [%s]", command, got, want)
 			}
 		}
@@ -118,6 +132,11 @@ func TestGAP2287LinkBeforeStepScale(t *testing.T) {
 		if allocs := testing.AllocsPerRun(3, func() { made.linkBeforeStep(path) }); allocs > 64 {
 			t.Errorf("linkBeforeStep of a %d-byte path: %.0f allocations, want a few (one pass, not one per part)", len(path), allocs)
 		}
+	}
+	if runtime.GOOS == "windows" {
+		// The command rows place POSIX folders, which a Windows host does not
+		// read (TestGAP2287LiteralWritesKeepSameCommandLinkSteps).
+		return
 	}
 	for _, row := range []struct {
 		name string
