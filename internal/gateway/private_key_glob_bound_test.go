@@ -51,7 +51,13 @@ import (
 // bar and the 200 ms deadline both fail on a loaded shared box with the
 // expansion bounded (GAP-0708: 128 ms against 100 ms at load 11-22): a
 // regression to the unbounded expansion reads thousands of entries, which
-// is CPU time whatever else runs.
+// is CPU time whatever else runs. The gap's own cells read the host's / and
+// its folders, so their CPU time is mostly the host's (rel-1-0-10:GAP-1784:
+// 15 ms on a bench box, 50-115 ms on a build box whose folders are wide, same
+// commit): the default pack's median of those rows is held to the bar plus
+// what reading the same folders up to the cap costs this host at the same
+// moment (hostRootReadCPU), so the bar still counts the route's own work and
+// a host with wide folders does not fail it.
 func TestPrivateKeyGlobOfACallWithNoFolderIsBoundedOnTheInspectRoute(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home", "alice")
@@ -142,6 +148,12 @@ func TestPrivateKeyGlobOfACallWithNoFolderIsBoundedOnTheInspectRoute(t *testing.
 	// the baseline of the same row measured at the same moment of the same box.
 	for _, row := range rows {
 		var baseline time.Duration
+		// The host's share of a row that reads the host's / (the gap's own
+		// cells), read just before the default pack answers it.
+		var hostRead time.Duration
+		if row.want == relOrUnknown && runs > 1 {
+			hostRead = hostRootReadCPU(runs)
+		}
 		for i, p := range gap0437Packs {
 			a := servers[i]
 			// The pack's own live generation is the one in force while it answers.
@@ -197,12 +209,12 @@ func TestPrivateKeyGlobOfACallWithNoFolderIsBoundedOnTheInspectRoute(t *testing.
 			if runs > 1 {
 				slices.Sort(times)
 				median := times[len(times)/2]
-				t.Logf("%s %.60q: median CPU %s of %v", p.name, row.command, median.Round(time.Millisecond), times)
+				t.Logf("%s %.60q: median CPU %s of %v (host read %s)", p.name, row.command, median.Round(time.Millisecond), times, hostRead.Round(time.Millisecond))
 				if p.name == "default" {
 					baseline = median
-					if median > bar {
-						t.Errorf("%s %q: median answer CPU time %s, want under %s (half the %s scan budget); runs %v",
-							p.name, row.command, median.Round(time.Millisecond), bar, inspectScanTimeout, times)
+					if median > bar+hostRead {
+						t.Errorf("%s %q: median answer CPU time %s, want under %s (half the %s scan budget) plus the host read %s; runs %v",
+							p.name, row.command, median.Round(time.Millisecond), bar, inspectScanTimeout, hostRead.Round(time.Millisecond), times)
 					}
 				} else if limit := baseline*packCostRatioNum/packCostRatioDen + packCostSlack; times[0] > limit {
 					// GAP-2004: the other packs are held to their own baseline, the
@@ -232,6 +244,55 @@ const (
 	packCostRatioDen = 2
 	packCostSlack    = 20 * time.Millisecond
 )
+
+// hostRootReadCap is hookpaths' actionGlobEntryCap: the directory entries
+// one pattern expansion reads at most.
+const hostRootReadCap = 4096
+
+// hostRootReadCPU is the median CPU time, of n reads, of reading this host's
+// / the way any capped expansion of a two-level pattern under it has to: /
+// and then each folder under it in name order, each read to its end, with one
+// stat for every name, until hostRootReadCap names are read
+// (rel-1-0-10:GAP-1784). It is what the host's folders cost, not the route's
+// work: wide folders (a build box's) make it tens of milliseconds where a
+// bench box reads its / in a few. A route that read past its cap, or stat-ed
+// each name more than once, costs more than this on every host.
+func hostRootReadCPU(n int) time.Duration {
+	times := make([]time.Duration, 0, n)
+	for range n {
+		start := processCPUTime()
+		readHostRootCapped(hostRootReadCap)
+		times = append(times, processCPUTime()-start)
+	}
+	slices.Sort(times)
+	return times[len(times)/2]
+}
+
+func readHostRootCapped(limit int) {
+	root := string(filepath.Separator)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	read := len(entries)
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		dir := filepath.Join(root, entry.Name())
+		names, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, name := range names {
+			if read >= limit {
+				return
+			}
+			read++
+			_, _ = os.Stat(filepath.Join(dir, name.Name()))
+		}
+	}
+}
 
 // processCPUTime is the CPU time this process has used (user plus system),
 // the work of the answers measured, not the time a loaded box made them wait.
