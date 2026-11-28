@@ -99,3 +99,4 @@ The last column of the attacker table says what covers each row. Parts marked **
 - **npx MCP server programs.** An npx MCP server's own programs are attested from the actor's npx cache; tools the server starts through PATH and a package's first, uncached run are not.
 - **Commands DefenseClaw cannot fully read.** A command that DefenseClaw cannot fully read and that touches hundreds of files takes up to about twice the time of its plainly written form.
 - **Very long commands.** On very long commands the laptop may alert at its evaluation limit where a Substrate actor blocks a private-key read.
+- **Claude settings files in a sandbox without the kit.** In a sandbox without the DefenseClaw kit, edits of Claude settings files are refused; full rewrites that keep DefenseClaw hooks and new files are judged.
