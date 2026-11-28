@@ -63,6 +63,9 @@ func gap1153Corpus(n int) []string {
 		"mv readme-link r2", "ln -sf ~/.ssh/authorized_keys ak3", "f() { cat key-link; }; f", "g() { echo k >> ak-link; }; cd /tmp; g",
 		"echo k >> ~/.ssh/authorized_keys", "cat ~/.ssh/id_ed25519", "echo x >> ~/.defenseclaw/config.yaml", "cp /tmp/x ~/.ssh/authorized_keys",
 		"tee -a ~/.ssh/authorized_keys < /dev/null", "cd ~/.ssh && echo k >> authorized_keys",
+		// A protected write that needs no link word: ak-hard is a hard link
+		// to authorized_keys in both working folders (CHK-T6-1153 nit 2).
+		"echo k >> ak-hard", "sh -c 'echo k >> ak-hard'",
 	}
 	units := []string{"$C;f{k}(){ :;};", "$C;f{k}(){ :;};f{k};", "true;", ": {k};", "x{k}=1;", "echo {k} >/dev/null;", "ls\n", "test -e f{k} && :;"}
 	// Deeply nested loops are read in time exponential in the depth by
@@ -74,6 +77,8 @@ func gap1153Corpus(n int) []string {
 		gap1153Fit("", "$C;f{k}(){ :;};", "true", 8190),
 		gap1153Fit(strings.Repeat("for i in 1; do ", 20), "$C;f{k}(){ :;};", strings.Repeat("done; ", 20)+"true", 8190),
 		gap1153Fit("for i in 1; do ", "$C;f{k}(){ :;};f{k};", "done", 8190),
+		"echo k >> ak-hard; " + gap1153Fit("", "true;", "true", 4096),
+		gap1153Fit("", "true;", "", 4096) + "echo k >> ak-hard",
 	}
 	sizes := []int{16, 60, 200, 255, 256, 300, 600, 1024, 1500, 2600, 4096, 8190, 12000, 20000, 32000}
 	for len(corpus) < n {
@@ -169,6 +174,8 @@ func TestGAP1153ActorOverBudgetVerdictIdentity(t *testing.T) {
 		// BISECT-1153 calls ran in /work: their words are no private places,
 		// so the kit makes no decision past the budget unless a link moves one.
 		open := gap1153OpenFolder(t, home)
+		gap1153HardLink(t, home, app)
+		gap1153HardLink(t, home, open)
 		apis := map[gap1153Config]*APIServer{}
 		for _, c := range gap1153Configs() {
 			apis[c] = gap1153API(t, s.connector, c)
@@ -253,6 +260,10 @@ func TestGAP1153ActorHomeCopyCornerKeepsCallAnswer(t *testing.T) {
 	s := gap0545Shapes()[0]
 	_, actor, home, app := gap0545API(t, s.connector, "default")
 	for _, command := range []string{
+		// No link word: only the private home places (the own SSH copy to
+		// ~/bak and the by-name write) make the call claimable, so this row
+		// alone checks that clause (CHK-T6-1153 nit 1).
+		gap1153NoLinkCorner,
 		"echo k >> ak-link; cp -r ~/.ssh ~/bak/sshcopy; " + gap1153Fit("", "true;", "true", 4096),
 		gap1153Fit("", "true;", "", 4096) + "cp -r ~/.ssh ~/bak/sshcopy; echo k >> ak-link",
 		"cat key-link; cp -r ~/.ssh ~/bak/sshcopy; " + gap1153Fit("for i in 1; do ", "$C;f{k}(){ :;};", "done", 8190),
@@ -263,6 +274,9 @@ func TestGAP1153ActorHomeCopyCornerKeepsCallAnswer(t *testing.T) {
 		rel, head := gap1153Facts(t, s, host, home)
 		if rel == nil || len(rel.Proofs) == 0 || !slices.ContainsFunc(rel.Paths, func(p SubstratePathFact) bool { return p.PrivateHome }) {
 			t.Fatalf("%.60q: rel facts %+v: want a proof and a private home place (the corner is not reached)", command, rel)
+		}
+		if command == gap1153NoLinkCorner && slices.ContainsFunc(rel.Paths, func(p SubstratePathFact) bool { return p.Resolved != "" || p.Entry != "" }) {
+			t.Fatalf("%.60q: rel facts %+v: the no-link corner has a link claim", command, rel)
 		}
 		if relRaw, headRaw := gap1153JSON(t, rel), gap1153JSON(t, head); !bytes.Equal(relRaw, headRaw) {
 			t.Fatalf("%.60q: head facts %s, rel %s: want rel's", command, headRaw, relRaw)
@@ -336,4 +350,16 @@ func gap1153OpenFolder(t *testing.T, home string) string {
 		}
 	}
 	return open
+}
+
+// gap1153NoLinkCorner is the GAP-0549 corner with no link word in it.
+var gap1153NoLinkCorner = "echo k >> ~/.ssh/authorized_keys; cp -r ~/.ssh ~/bak/sshcopy; " + gap1153Fit("", "true;", "true", 4096)
+
+// gap1153HardLink makes dir/ak-hard a hard link to the home's
+// authorized_keys: a protected target no symlink word reaches.
+func gap1153HardLink(t *testing.T, home, dir string) {
+	t.Helper()
+	if err := os.Link(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(dir, "ak-hard")); err != nil {
+		t.Fatal(err)
+	}
 }

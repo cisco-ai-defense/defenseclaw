@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -1442,7 +1443,7 @@ func actionPrivateKeyGlob(value, cwd, home string, mode keyReadMode) bool {
 	// The key paths are matched against the folder the pattern's dot-dot
 	// steps lead to (actionGlobPatternPlaced), not its spelling: x/../.ssh/*
 	// after cd .. names the key folder as .ssh/* does (rel-1-0-10:GAP-1020).
-	placed := actionGlobPatternPlaced(pattern)
+	placed := actionGlobPatternPlaced(pattern, home)
 	for _, name := range actionPrivateKeyNames {
 		key := filepath.Join(home, ".ssh", name)
 		if fold {
@@ -1461,15 +1462,23 @@ func actionPrivateKeyGlob(value, cwd, home string, mode keyReadMode) bool {
 // .ssh folder and its authorized keys files), which compares names and would
 // read a step as a name (rel-1-0-10:GAP-1020: x/../.ssh/* and proj/../.ssh/*
 // after cd .. matched no key and no authorized keys file, where .ssh/*
-// blocks). A step out of a folder that is there and is no link is the folder
-// above it, as the kernel opens it, so the step is applied by name and the
-// pattern keeps the spelling of the home it is matched against. A step out
-// of a link, or out of a name that is not there, stays as written: the
-// kernel leads it beside the link's target, and the shell expands nothing
-// under a missing folder. A step after a pattern component (*/../.ssh/*) is
-// applied by name, as the host expansion joins it (actionBoundedGlob). A
-// pattern with no step is returned as given.
-func actionGlobPatternPlaced(pattern string) string {
+// blocks). Each step goes where the host's own path resolution takes it, so
+// the match is never weaker and never stronger than the path that is opened:
+//   - On Windows a step is applied by name always: Win32, PowerShell and MSYS
+//     normalize the path before any open, through a junction, a symbolic link
+//     or a name that is not there (rel-1-0-10:GAP-2242).
+//   - On POSIX a step out of a folder that is there and is no link is the
+//     folder above it. A step out of a link to a folder is the folder above
+//     the link's target, as the kernel opens it, spelled through the home when
+//     it lies in the home (rel-1-0-10:GAP-2241: lp/../.ssh/* with lp a link to
+//     ~/proj names ~/.ssh). A step out of a name that is not there, a file or
+//     a link that resolves to no folder keeps the pattern as written: the
+//     shell expands nothing below it.
+//   - A step after a pattern component (*/../.ssh/*) is applied by name, as
+//     the host expansion joins it (actionBoundedGlob).
+//
+// A pattern with no step is returned as given.
+func actionGlobPatternPlaced(pattern, home string) string {
 	if !filepath.IsAbs(pattern) {
 		return pattern
 	}
@@ -1480,6 +1489,19 @@ func actionGlobPatternPlaced(pattern string) string {
 		return pattern
 	}
 	separator := string(filepath.Separator)
+	byName := runtime.GOOS == "windows"
+	// The home is resolved at most once per pattern, at the first step out
+	// of a link, however many link steps the pattern has.
+	var realHome string
+	var realHomeErr error
+	homeResolved := false
+	resolvedHome := func() (string, error) {
+		if !homeResolved {
+			realHome, realHomeErr = pathEvalSymlinks(home)
+			homeResolved = true
+		}
+		return realHome, realHomeErr
+	}
 	var kept []string
 	for _, part := range parts {
 		switch part {
@@ -1489,8 +1511,20 @@ func actionGlobPatternPlaced(pattern string) string {
 			if len(kept) == 0 {
 				continue
 			}
-			if dir := strings.Join(kept, separator); !strings.ContainsAny(dir, "*?[") {
-				if info, err := pathLstat(volume + separator + dir); err != nil || !info.IsDir() {
+			if dir := volume + separator + strings.Join(kept, separator); !byName && !strings.ContainsAny(dir, "*?[") {
+				info, err := pathLstat(dir)
+				if err != nil {
+					return pattern
+				}
+				if info.Mode()&fs.ModeSymlink != 0 {
+					above, ok := actionLinkParentPlaced(dir, home, resolvedHome)
+					if !ok || filepath.VolumeName(above) != volume {
+						return pattern
+					}
+					kept = strings.FieldsFunc(filepath.ToSlash(above[len(volume):]), func(r rune) bool { return r == '/' })
+					continue
+				}
+				if !info.IsDir() {
 					return pattern
 				}
 			}
@@ -1504,6 +1538,33 @@ func actionGlobPatternPlaced(pattern string) string {
 		placed += separator
 	}
 	return placed
+}
+
+// actionLinkParentPlaced is the folder a step out of the link at link leads
+// to on POSIX: the folder above the link's resolved target. A target inside
+// the home is spelled through home, the spelling the protected paths are
+// matched in; resolvedHome gives the home with its links followed. A link
+// that does not resolve to a folder has no step (false).
+func actionLinkParentPlaced(link, home string, resolvedHome func() (string, error)) (string, bool) {
+	target, err := pathEvalSymlinks(link)
+	if err != nil {
+		return "", false
+	}
+	if info, err := pathStat(target); err != nil || !info.IsDir() {
+		return "", false
+	}
+	above := filepath.Dir(target)
+	if home == "" {
+		return above, true
+	}
+	realHome, err := resolvedHome()
+	if err != nil {
+		return above, true
+	}
+	if rel, err := filepath.Rel(realHome, above); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return filepath.Join(home, rel), true
+	}
+	return above, true
 }
 
 // actionGlobReadsPrivateKey reports a match of an absolute pattern, expanded
@@ -1832,7 +1893,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 			return "dynamic-argument"
 		}
 	}
-	for _, target := range directLiteralProgramOperands(words, stmt, cwd, home, false) {
+	for _, target := range directLiteralProgramOperands(words, stmt, cwd, home, false, nil) {
 		if protectedReachPath(target, protected, ssh) {
 			return "dynamic-argument"
 		}

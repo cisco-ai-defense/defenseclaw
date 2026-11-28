@@ -150,7 +150,7 @@ func TestCompactPatchEnvelopeKeepsTheChanges(t *testing.T) {
 		if !ok {
 			t.Fatalf("compact %q", envelope)
 		}
-		full, reduced := parsePatchEnvelope(envelope), parsePatchEnvelope(compact)
+		full, reduced := readPatchEnvelope(envelope, patchView{}), readPatchEnvelope(compact, patchView{})
 		if full.status != reduced.status || full.issue != reduced.issue || full.hasMove != reduced.hasMove ||
 			len(full.changes) != len(reduced.changes) {
 			t.Fatalf("%q: full %+v, compact %q %+v", envelope, full, compact, reduced)
@@ -240,7 +240,7 @@ func TestOverLimitPatchEnvelopeBounded(t *testing.T) {
 	if !ok || reduced != want || len(elided) != 0 || unscoped {
 		t.Fatalf("ok=%t elided=%v unscoped=%t reduced %q", ok, elided, unscoped, reduced)
 	}
-	full, got := parsePatchEnvelope(envelope), parsePatchEnvelope(reduced)
+	full, got := readPatchEnvelope(envelope, patchView{}), readPatchEnvelope(reduced, patchView{})
 	if full.status != got.status || len(full.changes) != len(got.changes) || full.hasMove != got.hasMove {
 		t.Fatalf("full %+v, reduced %+v", full, got)
 	}

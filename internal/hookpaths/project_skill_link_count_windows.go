@@ -12,26 +12,24 @@ import (
 )
 
 // projectSkillFileLinkCount is how many names the file at path has.
+// It is read as readGated reads (rel-1-0-10:GAP-1264).
 func projectSkillFileLinkCount(path string) (uint64, error) {
-	read, release, ok := gatedPath(path)
-	if !ok {
-		return 0, networkShareError("stat", path)
-	}
-	defer release()
-	name, err := windows.UTF16PtrFromString(read)
-	if err != nil {
-		return 0, &os.PathError{Op: "stat", Path: path, Err: err}
-	}
-	handle, err := windows.CreateFile(name, 0,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
-	if err != nil {
-		return 0, &os.PathError{Op: "stat", Path: path, Err: err}
-	}
-	defer windows.CloseHandle(handle) //nolint:errcheck // a handle opened for attributes only
-	var info windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
-		return 0, &os.PathError{Op: "stat", Path: path, Err: err}
-	}
-	return uint64(info.NumberOfLinks), nil
+	return readGatedValue("stat", path, func(read string) (uint64, error) {
+		name, err := windows.UTF16PtrFromString(read)
+		if err != nil {
+			return 0, &os.PathError{Op: "stat", Path: path, Err: err}
+		}
+		handle, err := windows.CreateFile(name, 0,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+		if err != nil {
+			return 0, &os.PathError{Op: "stat", Path: path, Err: err}
+		}
+		defer windows.CloseHandle(handle) //nolint:errcheck // a handle opened for attributes only
+		var info windows.ByHandleFileInformation
+		if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+			return 0, &os.PathError{Op: "stat", Path: path, Err: err}
+		}
+		return uint64(info.NumberOfLinks), nil
+	})
 }

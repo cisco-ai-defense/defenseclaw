@@ -630,6 +630,13 @@ var prefixWrapperPrograms = map[string]bool{
 	"ionice": true, "taskset": true, "chrt": true, "flock": true, "caffeinate": true,
 }
 
+// PrefixWrapperProgram reports a program word (a path or a base name) that
+// StaticPrefixWrapperChild reads as a prefix wrapper: a cheap test for a
+// reader that only wants the child of such a chain.
+func PrefixWrapperProgram(word string) bool {
+	return prefixWrapperPrograms[wrapperProgramName(word)]
+}
+
 // wrappedShellPrograms are the shells whose wrapped call is read as the
 // plain call, so the plain reading of a -c STRING applies.
 var wrappedShellPrograms = map[string]bool{"sh": true, "bash": true, "dash": true, "ksh": true, "zsh": true}

@@ -1230,7 +1230,7 @@ func dispatchTrustedActionOnceIn(
 	// prove stays a block (rel-1-0-10:GAP-1055). The same envelope fed to
 	// apply_patch by a shell here-document is judged as the tool's is
 	// (rel-1-0-10:GAP-1077).
-	if actionfacts.PatchNamesUnplacedTarget(request.Input.Tool, request.Input.Args) ||
+	if actionfacts.PatchNamesUnplacedTarget(request.Input) ||
 		actionfacts.CommandPatchNamesUnplacedTarget(facts) {
 		defer func() {
 			findings = withUnknownFinding(findings, unknownReasonFinding(unplacedPatchTargetTitle,
@@ -1731,7 +1731,7 @@ func dispatchTrustedActionWith(
 				// the call budget, like its parent.
 				child.generation, child.budget = generation, budget
 				childFindings := dispatchTrustedAction(ctx, child)
-				if simple.UnresolvedFolder {
+				if simple.UnresolvedFolder && !guestWalkPlacesStatement(request, facts, simple) {
 					// The walk does not know the folder this statement runs
 					// in (cd "$X", cd "$(...)"): the unknown tier when an
 					// operand may be a named protected file there
@@ -8303,7 +8303,11 @@ func trustedRuleScanText(request trustedActionRequest, facts actionfacts.Facts) 
 		text = neutralizeKnownFixtureDataLiterals(text)
 	}
 	text = neutralizeTrustedSecretStoreValue(request.Input, text)
-	return relativeHomeWritesAsTilde(activeHomeAsTilde(text, request.Input.ActiveHome), facts)
+	command := request.Input.Command
+	if command == "" {
+		command, _ = trustedBashCommandInput(request.Input)
+	}
+	return relativeHomeWritesAsTilde(activeHomeAsTilde(text, request.Input.ActiveHome), command, facts)
 }
 
 // dispatchTrustedFallback judges a call with the legacy scan and the
@@ -12142,15 +12146,12 @@ func decodeTrustedTopLevelCommandField(raw json.RawMessage) (string, bool, bool)
 	return command, found, true
 }
 
+// trustedCommandFieldName is whether the reader reads name as the command:
+// the reader decides, so its aliases cannot drift from this check
+// (substrate-1:GAP-1132, the GAP-1128 class).
 func trustedCommandFieldName(name string) bool {
-	switch name {
-	case "command", "cmd", "script", "rawcommand", "raw_command",
-		"raw-command", "shellcommand", "shell_command", "shell-command",
-		"commandline", "command_line", "command-line":
-		return true
-	default:
-		return false
-	}
+	field, known := actionfacts.ReadArgumentField(name)
+	return known && field == "command"
 }
 
 func appendTrustedBashFallbackFindings(

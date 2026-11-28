@@ -63,6 +63,33 @@ func setTestFileDACL(t *testing.T, path string, dacl *windows.ACL, protected boo
 	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, info, nil, nil, dacl, nil); err != nil {
 		t.Fatalf("SetNamedSecurityInfo(%s): %v", path, err)
 	}
+	// The stamped DACL names SY, BA and a service, not the account that runs
+	// the test. An elevated administrator removes the folder through BA; a
+	// standard user (the Limited native row) owns it but holds no delete right,
+	// so t.TempDir() RemoveAll failed with Access is denied and failed tests
+	// that had already passed or skipped (GAP-1099). The owner gets full
+	// control back first; cleanups run last in, first out, so this runs before
+	// the temp folder is removed.
+	t.Cleanup(func() { restoreTestFileOwnerControl(path) })
+}
+
+// restoreTestFileOwnerControl gives the test account full control of path and
+// lets everything under it inherit that. Best effort: it never fails.
+func restoreTestFileOwnerControl(path string) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		return
+	}
+	descriptor, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;" + user.User.Sid.String() + ")(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+	if err != nil {
+		return
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		return
+	}
+	_ = windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
 }
 
 func TestWindowsDriftScopeDowngradesLeafPermissionVerdicts(t *testing.T) {

@@ -156,17 +156,29 @@ func TestGAP0684RgWorkingFolderLive(t *testing.T) {
 	}
 }
 
-// TestGAP0684EnvChdirNotAuthoritative: env -C and --chdir are not unwrapped
-// (posixEnvChangesDirectory), so the call is not an authoritative parse and
-// rg's globs are never read against the wrong folder. Such a call starts no
-// secret-read chain at this head, at base and at rel alike (P3, 1.0.11).
-func TestGAP0684EnvChdirNotAuthoritative(t *testing.T) {
+// TestGAP0685EnvChdirReadsAsCD: env -C DIR and --chdir DIR run their
+// program in DIR, as (cd DIR && program) does (substrate-1:GAP-0685): the
+// rg is read, in the -C folder. Before, env -C was not unwrapped, the call
+// was not authoritative and started no secret-read chain; the four forms
+// were pinned as failing closed in TestParsePOSIXContextChangingWrappersFailClosed,
+// which no longer lists them: a partial env -C call was allowed where its
+// cd spelling alerts or blocks (GAP-0685 probe at ef865bb868).
+func TestGAP0685EnvChdirReadsAsCD(t *testing.T) {
 	dir := g0684Folder(t)
 	for _, line := range []string{"env -C @P rg -g 'deploy/*' KEY @P", "env --chdir=@P rg -g '/.env' KEY @P"} {
 		cmd, hook := g0684Place(dir, g0684Row{up: true, cmd: line})
 		facts := Analyze(Input{Tool: "exec", Command: cmd, CWD: hook, ActiveHome: t.TempDir()})
-		if facts.Authoritative() || slices.ContainsFunc(facts.Commands, func(c CommandFact) bool { return c.Program == "rg" }) {
-			t.Errorf("%s: authoritative %v, commands %v: env -C must stay unread", line, facts.Authoritative(), facts.Commands)
+		if !facts.Authoritative() || !slices.ContainsFunc(facts.Commands, func(c CommandFact) bool { return c.Program == "rg" }) {
+			t.Errorf("%s: authoritative %v, commands %v: env -C must read its rg", line, facts.Authoritative(), facts.Commands)
+		}
+	}
+	for _, source := range []string{
+		`env -C /tmp rm -rf /tmp/victim`, `env -C/tmp rm -rf /tmp/victim`,
+		`env --chdir /tmp rm -rf /tmp/victim`, `env --chdir=/tmp rm -rf /tmp/victim`,
+	} {
+		facts := Analyze(Input{Tool: "exec", Command: source, DialectHint: DialectPOSIX})
+		if !hasExecutable(facts.Commands, "rm") || !factsHavePath(facts, PathAccessDelete, "/tmp/victim") {
+			t.Errorf("%s: the rm and its delete are not read (status %s)", source, facts.Parse.Status)
 		}
 	}
 }

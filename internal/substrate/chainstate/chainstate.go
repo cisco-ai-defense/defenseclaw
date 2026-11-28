@@ -202,7 +202,20 @@ const (
 	LifecycleReverted  = "reverted"
 	LifecycleDeleted   = "deleted"
 	LifecycleCrashed   = "crashed"
+	// LifecycleCheckpointed and LifecycleUndone are the workspace events
+	// the actor's owner reports through the gateway (defenseclaw substrate
+	// checkpoint and undo, which run git inside the actor and which the
+	// controller never sees): a checkpoint marks its place in the actor's
+	// chain clock; an undo takes the facts about the files it reverted out
+	// of the artifact chains (substrate-1:GAP-0476).
+	LifecycleCheckpointed = "checkpointed"
+	LifecycleUndone       = "undone"
 )
+
+// MaxUndoFiles bounds the files one undo event names, removed and restored
+// each; an undo that reverted more names the first ones, and the chains
+// keep the facts about the rest (stricter, never laxer).
+const MaxUndoFiles = 4096
 
 // LifecycleEvent is the ChainLifecycle body. A fork names its Parent.
 type LifecycleEvent struct {
@@ -210,8 +223,17 @@ type LifecycleEvent struct {
 	Event  string `json:"event"`
 	Parent *Actor `json:"parent,omitempty"`
 	// AtUnixNano is when the controller saw the event; zero is the leader's
-	// receive time.
+	// receive time. A workspace event always takes the leader's time.
 	AtUnixNano int64 `json:"at_unix_nano,omitempty"`
+	// Checkpoint is the commit of the checkpoint a checkpointed event took
+	// or an undone event went back to.
+	Checkpoint string `json:"checkpoint,omitempty"`
+	// Removed and Restored are the path digests
+	// (guardrail.ToolChainPOSIXPathDigest) of the files an undone event
+	// removed (added since the checkpoint) and put back (changed or deleted
+	// since).
+	Removed  []string `json:"removed,omitempty"`
+	Restored []string `json:"restored,omitempty"`
 }
 
 // LifecycleResult reports what a lifecycle event changed.
@@ -223,6 +245,12 @@ type LifecycleResult struct {
 	Barriers int `json:"barriers,omitempty"`
 	// Ignored is a suspend or resume older than the last one applied.
 	Ignored bool `json:"ignored,omitempty"`
+	// Forgotten counts the chain events an undone event changed.
+	Forgotten int `json:"forgotten,omitempty"`
+	// CheckpointUnknown: the leader has no mark for the undone event's
+	// checkpoint (taken before this leader version, or its report failed),
+	// so the facts about the files the undo put back stay.
+	CheckpointUnknown bool `json:"checkpoint_unknown,omitempty"`
 }
 
 // EgressRequest is the ChainEgress body: one request the callout saw.

@@ -17,11 +17,13 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"path"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -105,6 +107,14 @@ type UndoInfo struct {
 	Pushes int
 	ID     string
 	Commit string
+	// Removed and Restored are the files (paths in the actor, below the
+	// folder) the undo removed (added since the checkpoint and gone after
+	// it) and put back (changed or deleted since), at most 512 KiB of names
+	// each; an actor that does not list them (an older script) leaves both
+	// empty. The launcher reports them
+	// to the cluster's chain state (substrate-1:GAP-0476).
+	Removed  []string
+	Restored []string
 }
 
 const gitPrelude = `set -eu
@@ -135,9 +145,17 @@ else
   id=${3#dc-checkpoint-}
   g rev-parse -q --verify "refs/tags/dc-checkpoint-$id^{commit}" >/dev/null || { echo "known=$(g tag -l 'dc-checkpoint-*' | sed 's/^dc-checkpoint-//' | sort -n | tr '\n' ' ')"; exit 93; }
 fi
+L="$state/undo.$$"
+g diff --name-status --no-renames -z "dc-checkpoint-$id" -- >"$L.d" 2>/dev/null || : >"$L.d"
+g diff --name-only --no-renames --diff-filter=A -z "dc-checkpoint-$id" -- >"$L.a" 2>/dev/null || : >"$L.a"
 g reset -q --hard "dc-checkpoint-$id"
+g ls-files --others --exclude-standard -z >>"$L.a" 2>/dev/null || :
 g clean -q -fd
+xargs -0 sh -c 'for f; do [ -e "$f" ] || [ -L "$f" ] || printf "%s\0" "$f"; done' dc-gone <"$L.a" >"$L.u" 2>/dev/null || : >"$L.u"
 printf 'restored=%s\ncommit=%s\n' "$id" "$(g rev-parse HEAD)"
+printf 'changes=%s,%s\n' "$(head -c 524288 "$L.d" | wc -c | tr -d ' ')" "$(head -c 524288 "$L.u" | wc -c | tr -d ' ')"
+head -c 524288 "$L.d"; head -c 524288 "$L.u"
+rm -f "$L.d" "$L.a" "$L.u"
 `
 
 var idRE = regexp.MustCompile(`^(dc-checkpoint-)?[0-9]+$`)
@@ -299,11 +317,13 @@ func Undo(ctx context.Context, opts UndoOptions) (*UndoInfo, error) {
 	default:
 		return nil, failure("the undo", res)
 	}
-	m := kv(res.Stdout)
+	head, changes := undoAnswer(res.Stdout)
+	m := kv(head)
 	if m["restored"] == "" {
-		return nil, fmt.Errorf("workspace: the actor answered the undo with %q", strings.TrimSpace(string(res.Stdout)))
+		return nil, fmt.Errorf("workspace: the actor answered the undo with %q", strings.TrimSpace(string(head)))
 	}
 	info := &UndoInfo{ID: safetext.Line(m["restored"]), Commit: safetext.Line(m["commit"])}
+	info.Removed, info.Restored = undoChanges(dir, m["changes"], changes)
 	if opts.DataDir != "" && opts.Name != "" && !usesHostCopy(opts.DataDir, opts.Name) {
 		// A push after this restore point is undone with the files, so
 		// the baseline goes back too; pull then shows the right work.
@@ -314,4 +334,65 @@ func Undo(ctx context.Context, opts UndoOptions) (*UndoInfo, error) {
 		info.Pushes = n
 	}
 	return info, nil
+}
+
+// undoAnswer splits the undo script's answer into its key=value lines and
+// the file lists after the changes line. File names come only after it, so
+// none can stand for a key.
+func undoAnswer(out []byte) (head, changes []byte) {
+	i := bytes.Index(out, []byte("\nchanges="))
+	if i < 0 {
+		return out, nil
+	}
+	j := bytes.IndexByte(out[i+1:], '\n')
+	if j < 0 {
+		return out, nil
+	}
+	return out[:i+1+j+1], out[i+1+j+1:]
+}
+
+// undoChanges reads the two NUL-separated lists the undo script printed,
+// sizes from the changes line: git diff --name-status against the
+// checkpoint (M, T, D: put back) then the files the undo removed. A name
+// counts as removed only when nothing is left at its path after the reset
+// and the clean (added since the checkpoint, or untracked and not ignored
+// under the rules the reset put back), so a file clean kept (ignored again
+// by a .gitignore the reset restored) is not listed (substrate-1:GAP-0476).
+// A name cut off at the size bound is dropped, and so is one that is
+// absolute, has a ".." element or does not name a path below dir: the
+// answer comes from the actor, and the chain state must never forget a
+// file outside the folder.
+func undoChanges(dir, sizes string, b []byte) (removed, restored []string) {
+	ds, us, ok := strings.Cut(sizes, ",")
+	nd, err1 := strconv.Atoi(ds)
+	nu, err2 := strconv.Atoi(us)
+	if !ok || err1 != nil || err2 != nil || nd < 0 || nu < 0 || nd+nu > len(b) {
+		return nil, nil
+	}
+	below := func(rel string) (string, bool) {
+		if rel == "" || path.IsAbs(rel) || slices.Contains(strings.Split(rel, "/"), "..") {
+			return "", false
+		}
+		p := path.Join(dir, rel)
+		return p, strings.HasPrefix(p, dir+"/")
+	}
+	// The last piece of each list follows its last NUL: empty, or a name
+	// cut off at the bound.
+	diff := strings.Split(string(b[:nd]), "\x00")
+	diff = diff[:len(diff)-1]
+	for i := 0; i+1 < len(diff); i += 2 {
+		switch diff[i] {
+		case "M", "T", "D":
+			if p, ok := below(diff[i+1]); ok {
+				restored = append(restored, p)
+			}
+		}
+	}
+	gone := strings.Split(string(b[nd:nd+nu]), "\x00")
+	for _, name := range gone[:len(gone)-1] {
+		if p, ok := below(name); ok {
+			removed = append(removed, p)
+		}
+	}
+	return removed, restored
 }

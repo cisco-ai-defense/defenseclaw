@@ -105,10 +105,25 @@ func (out extractedInput) sourceDestinationArguments() (
 const maxArgsProjectionDepth = 2
 
 func extractArgs(raw json.RawMessage) extractedInput {
-	return extractArgsAtSchema(raw, 0, false)
+	return extractArgsAtSchema(raw, 0, patchSchema{})
+}
+
+// patchSchema says the arguments are an apply_patch tool's (on), and the
+// working folder its drive-relative header names are placed against (cwd,
+// patchView).
+type patchSchema struct {
+	on  bool
+	cwd string
 }
 
 func extractArgsForTool(raw json.RawMessage, tool string) extractedInput {
+	return extractArgsForToolAt(raw, tool, "")
+}
+
+// extractArgsForToolAt is extractArgsForTool with the call's working folder,
+// against which an apply_patch header spelled C:name is placed when the
+// folder is on that drive (patchCallCWD, rel-1-0-10:GAP-1078).
+func extractArgsForToolAt(raw json.RawMessage, tool, cwd string) extractedInput {
 	switch {
 	case strings.EqualFold(tool, "search_files"):
 		return extractExactSearchFilesArgs(raw)
@@ -289,7 +304,7 @@ func extractArgsForTool(raw json.RawMessage, tool string) extractedInput {
 		// provider command through generic command-field extraction.
 		return extractExactAWSCLIArgs(raw)
 	}
-	return extractArgsAtSchema(raw, 0, isApplyPatchTool(tool))
+	return extractArgsAtSchema(raw, 0, patchSchema{on: isApplyPatchTool(tool), cwd: cwd})
 }
 
 // exactTerminalKeystrokesTool identifies the one reviewed terminal-control
@@ -383,38 +398,41 @@ func exactSingleStaticPOSIXCommand(source string) bool {
 }
 
 func usesClosedCodingAgentArgumentSchema(raw json.RawMessage, tool string) bool {
+	// The tool name selects the schema keys before the arguments are
+	// decoded: every other tool (an MCP tool, for one) is never this schema,
+	// and decoding its arguments here only to answer false doubled the
+	// argument reading of each analysis (substrate-1:GAP-1164).
+	var keys []string
+	switch strings.ToLower(tool) {
+	case "read":
+		keys = []string{"limit", "offset", "pages"}
+	case "edit":
+		keys = []string{"old_string", "new_string", "replace_all", "oldString", "newString", "replaceAll", "old_str", "new_str"}
+	case "multiedit", "multi_edit", "multi-edit":
+		keys = []string{"edits"}
+	case "create":
+		keys = []string{"file_text"}
+	case "grep", "glob":
+		keys = []string{"pattern"}
+	case "webfetch":
+		keys = []string{"prompt"}
+	case "search_code":
+		keys = []string{"root", "pattern", "max_results"}
+	case "notebookedit":
+		keys = []string{"notebook_path", "new_source", "edit_mode"}
+	default:
+		return false
+	}
 	object, problem := exactJSONObject(raw)
 	if problem.status != "" {
 		return false
 	}
-	hasAny := func(keys ...string) bool {
-		for _, key := range keys {
-			if _, ok := object[key]; ok {
-				return true
-			}
+	for _, key := range keys {
+		if _, ok := object[key]; ok {
+			return true
 		}
-		return false
 	}
-	switch strings.ToLower(tool) {
-	case "read":
-		return hasAny("limit", "offset", "pages")
-	case "edit":
-		return hasAny("old_string", "new_string", "replace_all", "oldString", "newString", "replaceAll", "old_str", "new_str")
-	case "multiedit", "multi_edit", "multi-edit":
-		return hasAny("edits")
-	case "create":
-		return hasAny("file_text")
-	case "grep", "glob":
-		return hasAny("pattern")
-	case "webfetch":
-		return hasAny("prompt")
-	case "search_code":
-		return hasAny("root", "pattern", "max_results")
-	case "notebookedit":
-		return hasAny("notebook_path", "new_source", "edit_mode")
-	default:
-		return false
-	}
+	return false
 }
 
 // codingAgentEditKeys names the arguments of a coding-agent edit tool in one
@@ -790,7 +808,7 @@ func statusForStructuredJSONIssue(issue IssueCode) ParseStatus {
 func extractArgsAtSchema(
 	raw json.RawMessage,
 	projectionDepth int,
-	patchSchema bool,
+	patch patchSchema,
 ) extractedInput {
 	if projectionDepth > maxArgsProjectionDepth {
 		return extractedInput{status: StatusLimitExceeded, issues: []IssueCode{IssueDepthLimit}}
@@ -805,7 +823,7 @@ func extractArgsAtSchema(
 		return extractedInput{status: StatusInvalid, issues: []IssueCode{IssueInvalidUTF8}}
 	}
 	stringLimit := maxCommandBytes
-	if patchSchema {
+	if patch.on {
 		stringLimit = maxArgsJSONBytes
 	}
 	if issue := validateJSONWithStringLimit(raw, stringLimit); issue != "" {
@@ -824,19 +842,19 @@ func extractArgsAtSchema(
 	if err := decoder.Decode(&value); err != nil {
 		return extractedInput{status: StatusInvalid, issues: []IssueCode{IssueInvalidJSON}}
 	}
-	return extractJSONValue(value, projectionDepth, true, patchSchema)
+	return extractJSONValue(value, projectionDepth, true, patch)
 }
 
 func extractJSONValue(
 	value any,
 	projectionDepth int,
 	malformedJSONIsCommand bool,
-	patchSchema bool,
+	patch patchSchema,
 ) extractedInput {
 	switch value := value.(type) {
 	case string:
 		validate := validateCommandText
-		if patchSchema {
+		if patch.on {
 			validate = validatePatchToolCommandText
 		}
 		if issue := validate(value); issue != "" {
@@ -856,7 +874,7 @@ func extractJSONValue(
 			nested := extractArgsAtSchema(
 				json.RawMessage(trimmed),
 				projectionDepth+1,
-				patchSchema,
+				patch,
 			)
 			if !malformedJSONIsCommand ||
 				nested.status != StatusInvalid ||
@@ -876,7 +894,7 @@ func extractJSONValue(
 		}
 		return extractedInput{argv: argv, status: StatusComplete}
 	case map[string]any:
-		return extractJSONObject(value, projectionDepth, patchSchema)
+		return extractJSONObject(value, projectionDepth, patch)
 	case nil:
 		return extractedInput{status: StatusNotApplicable}
 	default:
@@ -887,7 +905,7 @@ func extractJSONValue(
 func extractJSONObject(
 	object map[string]any,
 	projectionDepth int,
-	patchSchema bool,
+	patch patchSchema,
 ) extractedInput {
 	out := extractedInput{status: StatusNotApplicable}
 	keys := make([]string, 0, len(object))
@@ -902,13 +920,13 @@ func extractJSONObject(
 			continue
 		}
 		value := object[key]
-		if patchSchema && (isPatchInputField(key) || isPatchEnvelopeField(key, value)) {
+		if patch.on && (isPatchInputField(key) || isPatchEnvelopeField(key, value)) {
 			text, ok := value.(string)
 			if !ok {
 				out.mergeProblem(StatusInvalid, IssueInvalidJSON)
 				continue
 			}
-			appendExtractedPatch(&out, text)
+			appendExtractedPatch(&out, text, patch.cwd)
 			continue
 		}
 		field, known := canonicalInputFieldName(key)
@@ -924,7 +942,7 @@ func extractJSONObject(
 			switch value := value.(type) {
 			case string:
 				validate := validateCommandText
-				if patchSchema {
+				if patch.on {
 					validate = validatePatchToolCommandText
 				}
 				if issue := validate(value); issue != "" {
@@ -970,7 +988,7 @@ func extractJSONObject(
 				}
 				mergeExtractedArgv(&out, argv)
 			case string, map[string]any:
-				mergeNestedExtractedValue(&out, value, projectionDepth, patchSchema)
+				mergeNestedExtractedValue(&out, value, projectionDepth, patch)
 			default:
 				out.mergeProblem(StatusInvalid, IssueInvalidJSON)
 			}
@@ -998,7 +1016,7 @@ func extractJSONObject(
 			}
 			out.cwd = text
 		case "path", "source", "destination", "target":
-			if patchSchema {
+			if patch.on {
 				out.mergeProblem(StatusAmbiguous, IssueConflictingSources)
 				continue
 			}
@@ -1085,7 +1103,7 @@ func extractJSONObject(
 				out.markApplicable()
 			}
 		case "nested":
-			mergeNestedExtractedValue(&out, value, projectionDepth, patchSchema)
+			mergeNestedExtractedValue(&out, value, projectionDepth, patch)
 		}
 	}
 	return out
@@ -1146,7 +1164,7 @@ func mergeNestedExtractedValue(
 	out *extractedInput,
 	value any,
 	projectionDepth int,
-	patchSchema bool,
+	patch patchSchema,
 ) {
 	if projectionDepth >= maxArgsProjectionDepth {
 		out.mergeProblem(StatusLimitExceeded, IssueDepthLimit)
@@ -1154,7 +1172,7 @@ func mergeNestedExtractedValue(
 	}
 	switch value.(type) {
 	case string, []any, map[string]any:
-		out.merge(extractJSONValue(value, projectionDepth+1, false, patchSchema))
+		out.merge(extractJSONValue(value, projectionDepth+1, false, patch))
 	default:
 		out.mergeProblem(StatusInvalid, IssueInvalidJSON)
 	}

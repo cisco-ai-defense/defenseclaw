@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 // referenceExactSecretReadChainDigest and referenceCredentialFileReadProofDigest
@@ -70,7 +71,7 @@ func referenceCredentialFileReadProofDigest(facts actionfacts.Facts) (string, bo
 	case !found:
 		return "", false
 	case exact && selected != "" && !credentialFileReadDerivesFile(facts):
-		return pathIdentityDigest(selected), true
+		return guardrail.ToolChainPathIdentityDigest(selected), true
 	default:
 		return "unknown", true
 	}

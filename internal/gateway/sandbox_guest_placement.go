@@ -396,7 +396,18 @@ func newGuestPlacementPlan(input actionfacts.Input, facts actionfacts.Facts,
 	// own place. Its cd targets are still kept.
 	scriptCalls, cdpath := guestScriptCalls(command, input.ActiveHome)
 	var known map[string]int
-	targets, known = guestKnownFolders(scriptCalls, dirs, targets, followed, input.CWD, input.ActiveHome, cdpath, cdMemo)
+	var looped []string
+	targets, known, looped = guestKnownFoldersLooped(scriptCalls, dirs, targets, followed, input.CWD, input.ActiveHome, cdpath, cdMemo)
+	// A folder a cd in a loop reaches is one the statements of the loop
+	// body before that cd run in on the next pass, each read there from the
+	// place it is known from, as a folder the call runs in, not a candidate
+	// (guestKnownFoldersLooped, substrate-1 GAP-0998). The simples pass
+	// above is done, so only the script calls read it so.
+	for _, dir := range looped {
+		if _, ok := known[dir]; ok {
+			dirs = keep(dirs, dir)
+		}
+	}
 	for _, call := range scriptCalls {
 		if !splitRead[call.text] {
 			plan.calls = append(plan.calls, call)
@@ -1192,6 +1203,49 @@ func withSandboxGuestSplitGapEffects(ctx context.Context, request trustedActionR
 	return findings
 }
 
+// guestWalkPlacesStatement reports a statement that the walk of a
+// copy-mode sandbox call placed nowhere only because that reading has no
+// folder: the walk of the call placed in the guest working directory
+// (sandboxGuestPlacedInput) reads the whole call, reads every statement of
+// the same text in a folder it gives, and the guest placement judges each
+// of them there (guestPlacementSkips), as the laptop walk places it in its
+// own folder. Such a statement takes no unknown tier for the folder it may
+// run in: cd .cache; cd ../.ssh followed by a key read named PATH-SSH-KEY,
+// as the laptop does, and an ACTION-COMPOUND-LIMIT the laptop does not name
+// (substrate-1 GAP-1158). A statement the guest walk leaves unplaced as
+// well (cd "$X") keeps the tier, in both readings.
+//
+// A call the actor's kit claims a proof for (a private-key read or a
+// protected write of its command) keeps the tier: the kit's claims only add
+// findings (substrate-1 GAP-0549), and the proof they add made the walk's
+// reading drop a rule the call without them names. cd a/b/ssh && cat
+// id_ed25519 is an ACTION-COMPOUND-LIMIT alert with no facts; with a forged
+// key-read claim it was a PATH-SSH-KEY block without that rule
+// (TestGAP0549ForgedKitClaimsNeverWeakenAVerdict).
+func guestWalkPlacesStatement(request trustedActionRequest, facts actionfacts.Facts, simple actionfacts.SimpleCommand) bool {
+	if path.IsAbs(request.Input.CWD) || request.guestKeyReadCommand != "" || request.guestProtectedWriteCommand != "" {
+		return false
+	}
+	guest, ok := sandboxGuestPlacedInput(request, facts)
+	if !ok {
+		return false
+	}
+	placed := false
+	for _, statement := range request.guestMemo.simpleCommands(guest, request.guestMemo.analyze(guest)) {
+		if statement.EvaluationFailure != "" {
+			return false
+		}
+		if statement.Text != simple.Text {
+			continue
+		}
+		if statement.UnresolvedFolder || guestPlacementSkips(statement) {
+			return false
+		}
+		placed = true
+	}
+	return placed
+}
+
 // guestPlacementSkips reports a simple command the guest placement does not
 // read: one with no complete view, an opaque assignment, literal output, or
 // a guessed login.
@@ -1546,8 +1600,9 @@ func guestOwnShellFolders(command, cwd, home string) *guestShellReadings {
 // text, whether the walk placed it at every place it comes: true when each
 // is a statement of the call shell, read where the walk knew the folders the
 // shell may stand in (at top level, or on the path an && or a cd X || exit
-// runs); false when one sits inside another command (a subshell, a group,
-// an if, a loop, a function body, a pipeline, an || list) or comes after a
+// runs, or in a { ... } group stepped the same way); false when one sits
+// inside another command (a subshell, an if, a loop, a function body, a
+// pipeline, an || list, a group with a redirection) or comes after a
 // directory change the walk cannot follow. A text missing from it was not
 // read by the walk. The sandbox hook-config guard reads a candidate folder
 // of a placed text only where the walk says the shell may stand in it, and
@@ -1732,6 +1787,21 @@ func guestOwnShellWalkText(command, cwd, home string) (*guestShellReadings, map[
 				leftOK, _ := step(pair.X, in)
 				return leftOK, nil
 			}
+		}
+		if group, ok := stmt.Cmd.(*syntax.Block); ok && !stmt.Background && !stmt.Negated && len(stmt.Redirs) == 0 && len(group.Stmts) != 0 {
+			// A { ... } group runs in the call shell: its statements run in
+			// order, as those of the call do, and the group ends where its
+			// last one does. Left unknown, a cd ../.ssh || exit in it made
+			// the authorized_keys write after it an alert where the laptop
+			// blocks (substrate-1 GAP-0948).
+			current := in
+			for at, inner := range group.Stmts {
+				succeeded, failed = step(inner, current)
+				if at < len(group.Stmts)-1 {
+					current = join(succeeded, failed)
+				}
+			}
+			return succeeded, failed
 		}
 		read(stmt, in)
 		defer func() {
@@ -2079,6 +2149,21 @@ func guestCDJoinReadsBases(operand, home string) bool {
 // whether a round changed anything.
 func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed map[string]int, cwd, home string, cdpath int,
 	cdMemo *guestCDMemo) ([]string, map[string]int) {
+	grown, known, _ := guestKnownFoldersLooped(calls, dirs, targets, followed, cwd, home, cdpath, cdMemo)
+	return grown, known
+}
+
+// guestKnownFoldersLooped is guestKnownFolders; looped lists the folders a
+// cd or pushd in a loop that may run its body again reaches
+// (guestScriptCall.loop). The statements of the body before that cd run in
+// them on the next pass, so they are folders the call runs in, not only cd
+// targets: for i in 1 2; do $CMD; g() { echo m > config.yaml; }; cd
+// ~/.defenseclaw; done may call g in ~/.defenseclaw, and read only as a
+// candidate there the write was an allow where the same write called after
+// the cd alerts tamper.detector_state_write (substrate-1 GAP-0998, SEC10-K
+// K04).
+func guestKnownFoldersLooped(calls []guestScriptCall, dirs, targets []string, followed map[string]int, cwd, home string, cdpath int,
+	cdMemo *guestCDMemo) ([]string, map[string]int, []string) {
 	type move struct {
 		operand string
 		at      int
@@ -2175,7 +2260,21 @@ func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed
 		}
 		return name
 	}
-	result := func(grown []int32) ([]string, map[string]int) {
+	// moveJoin is a join of one move (joins, below).
+	type moveJoin struct{ bases, targets []int32 }
+	var joins []moveJoin
+	result := func(grown []int32) ([]string, map[string]int, []string) {
+		var looped []string
+		for at, move := range moves {
+			if !calls[move.at].loop {
+				continue
+			}
+			for _, target := range joins[at].targets {
+				if dir := tree.path(target); !slices.Contains(looped, dir) {
+					looped = append(looped, dir)
+				}
+			}
+		}
 		out := make([]string, len(grown))
 		for at, id := range grown {
 			out[at] = tree.path(id)
@@ -2187,7 +2286,7 @@ func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed
 		for at, id := range grown {
 			places[out[at]], _ = placeOf(id)
 		}
-		return out, places
+		return out, places, looped
 	}
 	grown := targetIDs
 	var bases []int32
@@ -2199,8 +2298,7 @@ func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed
 	// only moves earlier), so it is not joined or looked up again: the
 	// round that only confirms the walk redid every join of an 8 KB cd
 	// chain (rel-1-0-10:GAP-2249).
-	type moveJoin struct{ bases, targets []int32 }
-	joins := make([]moveJoin, len(moves))
+	joins = make([]moveJoin, len(moves))
 	for round := 0; ; round++ {
 		if round == 4 {
 			for _, id := range slices.Concat(listed, grown) {
@@ -2298,6 +2396,10 @@ type guestScriptCall struct {
 	// is not static, or one of cmdRedefiningCommands (eval, source, ...) or
 	// a builtin or command wrapper: the split may follow a value there.
 	dynamic bool
+	// loop marks a cd or pushd in a loop that may run its body again: the
+	// statements of the body before it run in its folders on the next pass
+	// (guestKnownFoldersLooped, substrate-1 GAP-0998).
+	loop bool
 }
 
 // guestScriptCalls returns, in source order, every simple-command statement
@@ -2329,6 +2431,9 @@ func guestScriptCallsWork(command, home string, work *int) (calls []guestScriptC
 	type span struct {
 		start, end int
 		name       string
+		// once marks a loop a top-level break ends in its first pass
+		// (guestLoopRunsOnce).
+		once bool
 	}
 	var loops, bodies []span
 	// programs holds the static program word of each call, "" for none;
@@ -2339,11 +2444,13 @@ func guestScriptCallsWork(command, home string, work *int) (calls []guestScriptC
 		switch node := node.(type) {
 		case *syntax.CallExpr:
 			callNodes = append(callNodes, node)
-		case *syntax.ForClause, *syntax.WhileClause:
-			loops = append(loops, span{start: int(node.Pos().Offset()), end: int(node.End().Offset())})
+		case *syntax.ForClause:
+			loops = append(loops, span{start: int(node.Pos().Offset()), end: int(node.End().Offset()), once: guestLoopRunsOnce(node.Do)})
+		case *syntax.WhileClause:
+			loops = append(loops, span{start: int(node.Pos().Offset()), end: int(node.End().Offset()), once: guestLoopRunsOnce(node.Do)})
 		case *syntax.FuncDecl:
 			if node.Name != nil {
-				bodies = append(bodies, span{int(node.Pos().Offset()), int(node.End().Offset()), node.Name.Value})
+				bodies = append(bodies, span{start: int(node.Pos().Offset()), end: int(node.End().Offset()), name: node.Name.Value})
 			}
 		case *syntax.Stmt:
 			// The statement's span keeps its redirections (> ../.claude/settings.json).
@@ -2377,6 +2484,19 @@ func guestScriptCallsWork(command, home string, work *int) (calls []guestScriptC
 	})
 	if names && cdpath == math.MaxInt {
 		cdpath = -1 // a comment or a here-document: every folder, as before
+	}
+	// A loop a top-level break ends in its first pass runs no statement of
+	// its body again, so none runs after a later statement of that body:
+	// until false; do $CMD; g() { echo m > config.yaml; }; cd ~/.defenseclaw;
+	// break; done cannot call g in ~/.defenseclaw, and counting the later
+	// pass was a strict block where the laptop and both rels allow
+	// (substrate-1 GAP-0998, SEC10-K K12). A function, an alias or an enable
+	// that may change what break or continue runs, or a function that may
+	// run continue (guestFuncMayContinue), keeps every loop.
+	if slices.ContainsFunc(loops, func(loop span) bool { return loop.once }) &&
+		!slices.ContainsFunc(bodies, func(body span) bool { return body.name == "break" || body.name == "continue" }) &&
+		!slices.Contains(programs, "alias") && !slices.Contains(programs, "enable") && (len(bodies) == 0 || !guestFuncMayContinue(file)) {
+		loops = slices.DeleteFunc(loops, func(loop span) bool { return loop.once })
 	}
 	if len(loops) == 0 && len(bodies) == 0 {
 		return calls, cdpath
@@ -2592,8 +2712,97 @@ func guestScriptCallsWork(command, home string, work *int) (calls []guestScriptC
 	for at := range calls {
 		calls[at].first = early(calls[at].start, 0)
 		calls[at].at = place(calls[at].at, 0)
+		if len(loops) != 0 && (programs[at] == "cd" || programs[at] == "pushd") {
+			calls[at].loop = loopEnd(calls[at].start) >= 0
+		}
 	}
 	return calls, cdpath
+}
+
+// guestLoopRunsOnce reports a loop body (do ... done) with a top-level
+// break that always ends the loop in its first pass: a plain break, or break
+// N of a static N of 1 or more, with no redirection, not in the background
+// and not negated, and no continue anywhere in the body that may start
+// another pass before it (guestLoopMayContinue; substrate-1 GAP-0998). A break in a condition, a
+// group or a subshell may not run or end nothing.
+func guestLoopRunsOnce(body []*syntax.Stmt) bool {
+	once := slices.ContainsFunc(body, func(stmt *syntax.Stmt) bool {
+		call, isCall := stmt.Cmd.(*syntax.CallExpr)
+		if !isCall || stmt.Negated || stmt.Background || stmt.Coprocess || len(stmt.Redirs) != 0 ||
+			len(call.Assigns) != 0 || len(call.Args) == 0 || len(call.Args) > 2 || call.Args[0].Lit() != "break" {
+			return false
+		}
+		if len(call.Args) == 1 {
+			return true
+		}
+		count := call.Args[1].Lit()
+		return count != "" && !strings.HasPrefix(count, "0") && strings.Trim(count, "0123456789") == ""
+	})
+	if !once {
+		return false
+	}
+	// The first statement's own call may run a continue it wraps or expands
+	// to: no statement of the body ran before it in that pass, so another
+	// pass runs none after a later one.
+	first := body[0].Cmd
+	next := true
+	visit := func(node syntax.Node) bool {
+		if call, isCall := node.(*syntax.CallExpr); isCall && len(call.Args) != 0 &&
+			(call.Args[0].Lit() == "continue" || syntax.Command(call) != first && guestLoopMayContinue(call)) {
+			next = false
+		}
+		return next
+	}
+	for _, stmt := range body {
+		if syntax.Walk(stmt, visit); !next {
+			return false
+		}
+	}
+	return true
+}
+
+// guestLoopMayContinue reports a call that may run continue in the loop
+// around it: continue itself, continue run through builtin or command, eval,
+// source or . (their text may hold one), or a program word, or a word after
+// builtin or command and its options, that is not one plain literal: it may
+// expand to continue, and a quoted continue still is one (substrate-1
+// GAP-0998, CHK-T6-SGB3 C2: builtin continue between the cd and the break
+// ran the loop again).
+func guestLoopMayContinue(call *syntax.CallExpr) bool {
+	wrapped := false
+	for _, word := range call.Args {
+		lit := word.Lit()
+		switch {
+		case lit == "builtin" || lit == "command":
+			wrapped = true
+			continue
+		case wrapped && strings.HasPrefix(lit, "-"):
+			continue
+		}
+		return lit == "" || lit == "continue" || lit == "eval" || lit == "source" || lit == "."
+	}
+	return false
+}
+
+// guestFuncMayContinue reports a function of file whose body may run
+// continue (guestLoopMayContinue): a loop that calls it may run again, as
+// bash runs a continue of a function in the loop of its caller.
+func guestFuncMayContinue(file *syntax.File) bool {
+	// The walk is in source order, so a call before the end of the last
+	// function seen that ends after it is in that function's body.
+	found, end := false, -1
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.FuncDecl:
+			end = max(end, int(node.End().Offset()))
+		case *syntax.CallExpr:
+			if int(node.Pos().Offset()) < end && guestLoopMayContinue(node) {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
 }
 
 // guestWordCounts counts each word of text, a longest run of name bytes

@@ -116,16 +116,25 @@ func TestNetworkShareThatDoesNotAnswerIsAskedOnceAndBounded(t *testing.T) {
 	}
 }
 
+// shareUnanswered is the share gate's answer for a path below a network
+// share: true when the share has not answered in time. The product asks
+// networkPathRead inside its readers (readGated); a bare question before a
+// read of the name is no gate (rel-1-0-10:GAP-1264), so only tests ask it.
+func shareUnanswered(path string) bool {
+	unanswered, _ := networkPathRead(path)
+	return unanswered
+}
+
 // A share whose probe ended after networkShareDeadAfter stays unknown for
 // networkShareQuietFor without another probe.
 func TestNetworkShareThatTimedOutStaysQuiet(t *testing.T) {
 	probes := fakeNetworkShare(t, "/dead.example", 20*time.Millisecond, 30*time.Millisecond, func(string) { time.Sleep(60 * time.Millisecond) })
-	if !networkPathUnanswered("/dead.example/s/a") {
+	if !shareUnanswered("/dead.example/s/a") {
 		t.Fatal("first read of a share that does not answer in the wait was read")
 	}
 	time.Sleep(100 * time.Millisecond)
 	start := time.Now()
-	if !networkPathUnanswered("/dead.example/s/b") {
+	if !shareUnanswered("/dead.example/s/b") {
 		t.Fatal("a share whose probe timed out was read again inside the quiet time")
 	}
 	if took := time.Since(start); took > 10*time.Millisecond || probes.Load() != 1 {
@@ -166,7 +175,7 @@ func TestLocalPathCostsNoNetworkProbe(t *testing.T) {
 	if _, err := pathStat(dir); err != nil {
 		t.Fatal(err)
 	}
-	if networkPathUnanswered(dir) || probes.Load() != 0 {
+	if shareUnanswered(dir) || probes.Load() != 0 {
 		t.Fatalf("local path probed %d times", probes.Load())
 	}
 }

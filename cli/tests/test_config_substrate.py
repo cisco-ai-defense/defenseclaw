@@ -88,7 +88,7 @@ _FULL = {
                 "ask": {"hold": "1500ms"},
                 "judge": {"url": "https://defenseclaw-leader.defenseclaw-system.svc/api/v1/substrate/callout/verdict",
                           "token_file": "/var/run/dc/judge-token", "ca_file": "/var/run/dc/ca.crt", "timeout": "1500ms"},
-                "dlp": {"credential_headers": "deny"}},
+                "dlp": {"credential_headers": "deny"}, "rate_limits": {"per_actor_rps": 150}},
     "llm": {"providers": ["anthropic", "bedrock"],
             "credential": {"provider_uri": "ate-secret://k8s.io/default/defenseclaw-system/llm-keys"}},
     "egress": {"allow": ["github.com", "*.githubusercontent.com"], "ecosystem_packs": ["pypi", "npm"],

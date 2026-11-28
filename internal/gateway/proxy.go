@@ -3702,6 +3702,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	var accumulated responseText
 	var tcAcc toolCallAccumulator
 	var bufferedTCChunks [][]byte // tool-call chunks held until post-stream inspection
+	// The mid-stream checks of this stream share what they read of the
+	// text so far (midStreamScanState, GAP-0515).
+	midCtx := withMidStreamScanState(llmCtx, newMidStreamScanState())
 	bufferedTCSize := 0
 	lastScanLen := 0
 	streamFinishReasons := []string{}
@@ -3739,7 +3742,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	// check, or (full false) the check of a hold due by age only
 	// (inspectStreamText). False: it blocked; the stream is cut.
 	scanMid := func(full bool) bool {
-		midVerdict, ranFull := p.inspectStreamText(llmCtx, accumulated.CheckText(), aliasModel, mode, full)
+		midVerdict, ranFull := p.inspectStreamText(midCtx, accumulated.CheckText(), aliasModel, mode, full)
 		p.resolveConfirm(r.Context(), r, midVerdict, "completion", aliasModel, mode)
 		if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 			fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s (%d bytes held back)\n",
@@ -4099,7 +4102,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	if !initialBufFlushed && !streamBlocked && len(initialChunkBuf) > 0 {
 		if accumulated.Len() > 0 && mode == "action" {
 			checkContent := accumulated.CheckText()
-			initVerdict := p.inspector.InspectMidStream(llmCtx, "completion", checkContent,
+			initVerdict := p.inspector.InspectMidStream(midCtx, "completion", checkContent,
 				[]ChatMessage{{Role: "assistant", Content: checkContent}}, aliasModel, mode)
 			p.resolveConfirm(r.Context(), r, initVerdict, "completion", aliasModel, mode)
 			if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
@@ -5967,12 +5970,13 @@ func (p *GuardrailProxy) toolCallCodeGuardFindings(ctx context.Context, action t
 	if p.toolCallSecureClient(ctx) || ManagedEnterpriseActive() {
 		return nil
 	}
-	tool, args, partial := action.Input.Tool, action.Input.Args, false
+	tool, args := action.Input.Tool, action.Input.Args
+	var shown json.RawMessage
 	if !codeGuardWriteTool(tool) {
-		// A shell here-document patch (rel-1-0-10:GAP-1635), as the hook
-		// routes read it (codeGuardWriteRequest).
+		// A shell here-document patch or file write (rel-1-0-10:GAP-1635,
+		// GAP-1640), as the hook routes read it (codeGuardWriteRequest).
 		var ok bool
-		if args, partial, ok = codeGuardShellPatchArgs(action.Input); !ok {
+		if args, shown, ok = codeGuardShellPatchArgs(action.Input); !ok {
 			return nil
 		}
 		tool = "apply_patch"
@@ -5981,9 +5985,7 @@ func (p *GuardrailProxy) toolCallCodeGuardFindings(ctx context.Context, action t
 	if cfg := proxyDecisionConfig(ctx); cfg != nil {
 		rulesDir = cfg.Scanners.CodeGuard
 	}
-	scan := codeGuardScanWriteArgs(rulesDir, tool, args)
-	scan.complete = scan.complete && !partial
-	return codeGuardRuleFindings(scan, true, action.EnforcementCapable)
+	return codeGuardRuleFindings(codeGuardScanShellView(rulesDir, tool, args, shown), true, action.EnforcementCapable)
 }
 
 // proxyBareReading is a tool call as the proxy read it before it was built
@@ -6714,6 +6716,9 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 	var accumulated responseText
 	var tcAcc toolCallAccumulator
 	var bufferedTCFrames [][]byte
+	// The mid-stream checks of this stream share what they read of the
+	// text so far (midStreamScanState, GAP-0515).
+	midCtx := withMidStreamScanState(llmCtx, newMidStreamScanState())
 	bufferedTCSize := 0
 	streamBlocked := false
 	streamResponseID := ""
@@ -6977,7 +6982,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 
 		if mode == "action" && frameHasText {
 			content := accumulated.CheckText()
-			verdict := p.inspector.InspectMidStream(llmCtx, "completion", content,
+			verdict := p.inspector.InspectMidStream(midCtx, "completion", content,
 				[]ChatMessage{{Role: "assistant", Content: content}}, req.Model, mode)
 			p.resolveConfirm(r.Context(), r, verdict, "completion", req.Model, mode)
 			if verdict != nil && verdict.Action == "block" {

@@ -42,14 +42,13 @@ func projectSkillRootSharedWritable(home, root string) (bool, error) {
 }
 
 func projectSkillFolderSharedWritable(path, caller string) (bool, error) {
-	// The security descriptor is read only below a share that has answered.
-	read, release, ok := gatedPath(path)
-	if !ok {
-		return false, networkShareError("security", path)
-	}
-	defer release()
-	sd, err := windows.GetNamedSecurityInfo(read, windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	// The security descriptor is read as readGated reads: only below a share
+	// that has answered, on the path the gate read, discarded when the hold
+	// saw the folder change (rel-1-0-10:GAP-1264).
+	sd, err := readGatedValue("security", path, func(read string) (*windows.SECURITY_DESCRIPTOR, error) {
+		return windows.GetNamedSecurityInfo(read, windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	})
 	if err != nil {
 		return false, err
 	}

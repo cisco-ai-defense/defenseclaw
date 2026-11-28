@@ -265,7 +265,7 @@ DefenseClaw reads the requests sent to MCP and listed hosts as the server will. 
 
 ### A request is blocked with `egress_blocked`
 
-The callout's refusal is a JSON body with `error: egress_blocked`, a `message` that starts "DefenseClaw blocked egress from actor NAME to HOST (CATEGORY): ...", the `category` (for example `url_rule`, `ask_denied`, `ask_pending`, `chain_egress`, `mcp_tool_blocked`, `body_uninspectable`, `path_ambiguous`, `actor_not_live`), the `rule` and a `how_to_unblock` hint. A message that starts "Blocked by your organization's DefenseClaw policy:" is your profile refusing something you can't approve; it names the request-access contact.
+The callout's refusal is a JSON body with `error: egress_blocked`, a `message` that starts "DefenseClaw blocked egress from actor NAME to HOST (CATEGORY): ...", the `category` (for example `url_rule`, `ask_denied`, `ask_pending`, `chain_egress`, `mcp_tool_blocked`, `body_uninspectable`, `path_ambiguous`, `actor_not_live`, `rate_limited`), the `rule` and a `how_to_unblock` hint. A message that starts "Blocked by your organization's DefenseClaw policy:" is your profile refusing something you can't approve; it names the request-access contact.
 
 ![A tool call to an MCP server refused inside the agent: curl to https://mcp.deepwiki.com/mcp for the tool ask_wiki_question answers HTTP/2 403 with x-defenseclaw-decision: block and the body error egress_blocked, category mcp_tool_blocked, DefenseClaw's tool rules refused the MCP tool call, and Claude saying the call was blocked by a policy and not by the server](/images/substrate/oss/mcp-tool-refused.png)
 

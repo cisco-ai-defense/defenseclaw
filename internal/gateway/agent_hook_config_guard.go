@@ -138,6 +138,11 @@ type agentHookConfigGuard struct {
 	// (rel-1-0-10:GAP-1316). It is nil between passes: a pass never answers
 	// from the reads of another.
 	identities map[string]string
+	// spellings are the physical spellings of the registration names read
+	// in this hook call (hookpaths.RegistrationSpellings): every statement
+	// of the call is read against the same names, and a guard made for the
+	// folder of one statement shares the set of the call (TST-18078).
+	spellings *hookpaths.RegistrationSpellings
 }
 
 // beginIdentityPass begins a pass of the guard in which the identity of each
@@ -210,7 +215,8 @@ func (g *agentHookConfigGuard) shellMentionsRegistryPath(text string) bool {
 }
 
 func newAgentHookConfigGuard(cwd, home string) *agentHookConfigGuard {
-	guard := &agentHookConfigGuard{cwd: cwd, home: home, files: gatewayconnector.AgentHookConfigFiles()}
+	guard := &agentHookConfigGuard{cwd: cwd, home: home, files: gatewayconnector.AgentHookConfigFiles(),
+		spellings: hookpaths.NewRegistrationSpellings()}
 	if home != "" && filepath.IsAbs(home) {
 		guard.home = filepath.Clean(home)
 		for _, file := range agentHookConfigHomeFiles {
@@ -1148,12 +1154,14 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 		// Managed installations keep their own file policy. A literal
 		// configuration change on the launched agent is still a proved
 		// disablement of this call's hooks.
-		parts, placed := agentHookConfigPlacedCommands(managedRaw, request.Input.CWD, request.Input.ActiveHome, 0)
+		parts, placed, _ := agentHookConfigPlacedCommands(managedRaw, request.Input.CWD, request.Input.ActiveHome, 0)
+		spellings := hookpaths.NewRegistrationSpellings()
 		for index, part := range parts {
 			if placed && index == 0 {
 				continue
 			}
 			guard := newAgentHookConfigGuard(part.Dir, request.Input.ActiveHome)
+			guard.spellings = spellings
 			if hookpaths.RegistrationWriteCandidate(part.Command) {
 				owned, _, truncated := agentHookConfigReachedPaths(part, guard, agentHookConfigRegistrationPaths(guard))
 				for _, path := range owned {
@@ -1255,7 +1263,13 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 	}
 	// The registration set is read by hookpaths' shared shell writer. A
 	// placed statement carries its own directory, including after literal cd.
-	parts, placed := agentHookConfigPlacedCommands(rawCommand, guard.cwd, guard.home, 0)
+	parts, placed, cut := agentHookConfigPlacedCommands(rawCommand, guard.cwd, guard.home, 0)
+	if cut {
+		// More statements of a long call name a hook file than the guard
+		// reads: the write rule, as the sandbox guard names it (substrate-1
+		// GAP-1160).
+		add(agentHookConfigWriteRuleID, "", agentHookConfigLongCallCut)
+	}
 	for index, part := range parts {
 		if placed && index == 0 {
 			continue
@@ -1265,6 +1279,7 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 			partGuard = newAgentHookConfigGuard(part.Dir, guard.home)
 			partGuard.gitIndexRedirected = guard.gitIndexRedirected
 			partGuard.links = guard.links
+			partGuard.spellings = guard.spellings
 		}
 		// Every write operand the shell reading names is judged as the
 		// managed route judges the resolved targets of the hook client: a
@@ -1390,6 +1405,12 @@ func sandboxAgentHookConfigFindings(ctx context.Context, request trustedActionRe
 // changes none (sandboxAgentHookConfigFindings). note is set for a native
 // tool call's document.
 func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequest) (ruleID, note, target string) {
+	return sandboxAgentHookConfigChangeAt(ctx, request, 0)
+}
+
+// sandboxAgentHookConfigChangeAt is sandboxAgentHookConfigChange of a call
+// spliced depth times (agentHookConfigShellStdinSplice).
+func sandboxAgentHookConfigChangeAt(ctx context.Context, request trustedActionRequest, depth int) (ruleID, note, target string) {
 	input := request.Input
 	if request.SandboxGuestCWD != "" {
 		input.CWD = request.SandboxGuestCWD
@@ -1474,16 +1495,33 @@ func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequ
 	// statement, in its folder (agentHookConfigReachedPaths), and on the
 	// whole call where this guard places no statement.
 	command := agentHookConfigRawShellCommand(input)
+	// The call with each here-document a shell runs as its script spliced
+	// in as a subshell, and its aliases expanded, is read as a call of its
+	// own, as the laptop guard reads it (agentHookConfigShellStdinSplice,
+	// substrate-1 GAP-0949). A splice of a splice is read up to four deep.
+	if depth < 4 && command != "" && len(command) <= agentHookConfigMaxPlacedBytes {
+		if spliced := agentHookConfigShellStdinSplice(command, input.ActiveHome); spliced != "" {
+			sub := request
+			sub.Input.Command, sub.Input.Args, sub.Input.Argv = spliced, nil, nil
+			if ruleID, note, target := sandboxAgentHookConfigChangeAt(ctx, sub, depth+1); target != "" {
+				return ruleID, note, target
+			}
+		}
+	}
 	if command == "" || len(command) > agentHookConfigMaxPlacedBytes || !path.IsAbs(input.CWD) ||
 		whole.Authoritative() && !strings.Contains(command, "cd") && !strings.Contains(command, "pushd") {
 		if target := sandboxAgentHookConfigInlineWrite(command, input.CWD, input.ActiveHome); target != "" {
 			return agentHookConfigWriteRuleID, "", target
 		}
 		if len(command) > agentHookConfigMaxPlacedBytes && path.IsAbs(input.CWD) {
-			for _, statement := range agentHookConfigLongCallStatements(command, input.CWD, input.ActiveHome) {
+			statements, cut := agentHookConfigLongCallStatements(command, input.CWD, input.ActiveHome)
+			for _, statement := range statements {
 				if target := sandboxAgentHookConfigPlacedWrite(statement.Command, statement.Dir, input.ActiveHome); target != "" {
 					return agentHookConfigWriteRuleID, "", target
 				}
+			}
+			if cut {
+				return agentHookConfigWriteRuleID, "", agentHookConfigLongCallCut
 			}
 		}
 		return "", "", ""
@@ -1606,6 +1644,13 @@ func sandboxStatementMayNameHookConfig(statement string) bool {
 	if strings.ContainsAny(statement, "$`*?[{\\\r\n") {
 		return true
 	}
+	return sandboxStatementNamesHookConfig(statement)
+}
+
+// sandboxStatementNamesHookConfig reports a statement whose text, with
+// quotes taken out, names a hook file name: one that names its target in
+// plain letters, not only through an expansion or a pattern.
+func sandboxStatementNamesHookConfig(statement string) bool {
 	plain := sandboxHookConfigQuotes.Replace(statement)
 	for _, name := range sandboxHookConfigNames() {
 		if strings.Contains(plain, name) {
@@ -1622,8 +1667,15 @@ func sandboxStatementMayNameHookConfig(statement string) bool {
 const agentHookConfigMaxPlacedBytes = 8192
 
 // agentHookConfigLongCallStatementCap bounds the statements of a call over
-// agentHookConfigMaxPlacedBytes that the guards read.
+// agentHookConfigMaxPlacedBytes that the guards read: the first ones that
+// may name a hook file, then as many again of those that name one in plain
+// letters.
 const agentHookConfigLongCallStatementCap = 16
+
+// agentHookConfigLongCallCut is the target the guards name when a long call
+// has more statements naming a hook file than they read
+// (agentHookConfigLongCallStatements).
+const agentHookConfigLongCallCut = "hook-file statements past the long-call cap"
 
 // agentHookConfigLongCallStatements are the top-level statements of a call
 // over agentHookConfigMaxPlacedBytes, up to the analyzer's command bound,
@@ -1638,27 +1690,44 @@ const agentHookConfigLongCallStatementCap = 16
 // bound or its directories cannot be placed (TopLevelStatements): such a
 // call is read as before. One parse; the filter and both caps keep the
 // statement work under what one call at the bound costs (substrate-1
-// GAP-0364).
-func agentHookConfigLongCallStatements(command, cwd, home string) []hookpaths.PlacedStatement {
+// GAP-0364). Past the first cap only the statements that name a hook file
+// in plain letters (sandboxStatementNamesHookConfig) or a DefenseClaw file
+// are read, up to the cap
+// again, and cut reports one more: the guards then name the write rule as
+// an alert. The first cap cut the rest silently, so 16 cheap statements
+// with an expansion pushed a later settings write out of the reading
+// (substrate-1 GAP-1160).
+func agentHookConfigLongCallStatements(command, cwd, home string) (out []hookpaths.PlacedStatement, cut bool) {
 	if len(command) > agentHookConfigLongCallMaxBytes || !path.IsAbs(filepath.ToSlash(cwd)) && !filepath.IsAbs(cwd) {
-		return nil
+		return nil, false
 	}
 	statements, ok := hookpaths.TopLevelStatements(command, cwd, home)
 	if !ok {
-		return nil
+		return nil, false
 	}
-	var out []hookpaths.PlacedStatement
+	named := 0
 	for _, statement := range statements {
-		if len(statement.Command) > agentHookConfigMaxPlacedBytes ||
-			!sandboxStatementMayNameHookConfig(statement.Command) && !strings.Contains(strings.ToLower(statement.Command), "defenseclaw") {
+		if len(statement.Command) > agentHookConfigMaxPlacedBytes {
 			continue
 		}
-		out = append(out, statement)
-		if len(out) == agentHookConfigLongCallStatementCap {
-			break
+		dc := strings.Contains(strings.ToLower(statement.Command), "defenseclaw")
+		if !dc && !sandboxStatementMayNameHookConfig(statement.Command) {
+			continue
 		}
+		if len(out) < agentHookConfigLongCallStatementCap {
+			out = append(out, statement)
+			continue
+		}
+		if !dc && !sandboxStatementNamesHookConfig(statement.Command) {
+			continue
+		}
+		if named == agentHookConfigLongCallStatementCap {
+			return out, true
+		}
+		out = append(out, statement)
+		named++
 	}
-	return out
+	return out, false
 }
 
 // agentHookConfigLongCallMaxBytes is the analyzer's command bound
@@ -2157,6 +2226,9 @@ func agentHookConfigShellWriteOperands(command, dir, home string) []string {
 		return nil
 	}
 	operands := hookpaths.LiteralWriteOperands(command, dir, home)
+	// A move, install or sync into a hook file spelled through x/.. is
+	// judged as its plain spelling (rel-1-0-10:GAP-2288).
+	operands = append(operands, hookpaths.DotDotMoveDestinations(command, dir, home)...)
 	if strings.Contains(command, ">") {
 		redirects, _, _ := hookpaths.ShellWriteOperands(command, dir, home)
 		operands = append(operands, redirects...)
@@ -2181,7 +2253,7 @@ func agentHookConfigShellWriteOperands(command, dir, home string) []string {
 func agentHookConfigReachedPaths(part hookpaths.PlacedStatement, guard *agentHookConfigGuard, registered []string) (owned, other []string, truncated bounded.CapSet) {
 	// One pass over the paths the statement reaches (rel-1-0-10:GAP-1316).
 	defer guard.endIdentityPass(guard.beginIdentityPass())
-	reached, truncated := hookpaths.RegistrationWriteReachedBounded(part.Command, part.Dir, guard.home, registered)
+	reached, truncated := hookpaths.RegistrationWriteReachedBounded(part.Command, part.Dir, guard.home, registered, guard.spellings)
 	for _, path := range reached {
 		if guard.ownedFile(path) || guard.ownedFolder(path) {
 			owned = append(owned, path)
@@ -2268,21 +2340,22 @@ func decodeAgentHookConfigRawShellCommand(raw json.RawMessage) string {
 // a nested sh -c body adds entries too, and when the statements were not
 // placed (popd; or a cd inside { ...; } that TopLevelStatements does not
 // read), the whole command is the only reading of the top-level writes
-// (rel-1-0-10:GAP-1014, rv1014).
-func agentHookConfigPlacedCommands(command, cwd, home string, depth int) ([]hookpaths.PlacedStatement, bool) {
+// (rel-1-0-10:GAP-1014, rv1014). cut reports a long call with more
+// statements naming a hook file than agentHookConfigLongCallStatements reads.
+func agentHookConfigPlacedCommands(command, cwd, home string, depth int) ([]hookpaths.PlacedStatement, bool, bool) {
 	if depth > 4 || command == "" {
-		return nil, false
+		return nil, false, false
 	}
 	root := hookpaths.PlacedStatement{Command: command, Dir: cwd}
 	if len(command) > agentHookConfigMaxPlacedBytes {
 		if depth > 0 {
-			return nil, false
+			return nil, false, false
 		}
-		statements := agentHookConfigLongCallStatements(command, cwd, home)
+		statements, cut := agentHookConfigLongCallStatements(command, cwd, home)
 		if len(statements) == 0 {
-			return nil, false
+			return nil, false, cut
 		}
-		return append([]hookpaths.PlacedStatement{root}, statements...), true
+		return append([]hookpaths.PlacedStatement{root}, statements...), true, cut
 	}
 	out := []hookpaths.PlacedStatement{root}
 	placed := []hookpaths.PlacedStatement{root}
@@ -2294,8 +2367,15 @@ func agentHookConfigPlacedCommands(command, cwd, home string, depth int) ([]hook
 			topPlaced = true
 		}
 	}
+	// The call with each here-document a shell runs as its script spliced
+	// in as a subshell, and its aliases expanded, is read as a nested call
+	// (agentHookConfigShellStdinSplice, substrate-1 GAP-0949).
+	if spliced := agentHookConfigShellStdinSplice(command, home); spliced != "" {
+		nested, _, _ := agentHookConfigPlacedCommands(spliced, cwd, home, depth+1)
+		out = append(out, nested...)
+	}
 	if !strings.Contains(command, "sh") {
-		return out, topPlaced
+		return out, topPlaced, false
 	}
 	for _, statement := range placed {
 		facts := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: statement.Command, CWD: statement.Dir, ActiveHome: home})
@@ -2329,12 +2409,193 @@ func agentHookConfigPlacedCommands(command, cwd, home string, depth int) ([]hook
 						return true
 					})
 				}
-				nested, _ := agentHookConfigPlacedCommands(body, statement.Dir, home, depth+1)
+				nested, _, _ := agentHookConfigPlacedCommands(body, statement.Dir, home, depth+1)
 				out = append(out, nested...)
 			}
 		}
 	}
-	return out, topPlaced
+	return out, topPlaced, false
+}
+
+// agentHookConfigShellStdinSplice is the call as the shell runs it when it
+// holds text its own statements do not show, "" when it holds none
+// (substrate-1 GAP-0949, RV-SEC10B rows E16, E09):
+//   - a here-document a shell runs as its script (bash, sh, dash, zsh, ash
+//     or ksh with static options only, no -c and no script operand: bash
+//     <<EOF, sh -s <<EOF) is spliced in place of its statement as a
+//     subshell of its body, ( body ), the document taken out: $CMD; bash
+//     <<EOF / cd .claude / echo {} > settings.json / EOF writes
+//     .claude/settings.json as the same lines in a subshell do, where both
+//     guards allowed;
+//   - a later call of a static alias is read as its value (alias g=cd
+//     .claude, then g): zsh expands aliases in a script, and Bash after
+//     shopt -s expand_aliases. Where an alias does not expand, the plain
+//     reading of the call, which the guard reads too, stays.
+//
+// A body is spliced as written, its expansions unexpanded, as a -c body is
+// read.
+func agentHookConfigShellStdinSplice(command, home string) string {
+	docs, aliases := strings.Contains(command, "<<"), strings.Contains(command, "alias")
+	if !docs && !aliases {
+		return ""
+	}
+	file, err := syntax.NewParser().Parse(shellparse.Reader(command), "")
+	if err != nil {
+		return ""
+	}
+	span := func(node syntax.Node) (int, int, bool) {
+		start, end := int(node.Pos().Offset()), int(node.End().Offset())
+		return start, end, start >= 0 && end <= len(command) && start < end
+	}
+	type edit struct {
+		start, end int
+		text       string
+	}
+	var edits []edit
+	type alias struct {
+		value string
+		from  int
+	}
+	var defined map[string]alias
+	syntax.Walk(file, func(node syntax.Node) bool {
+		stmt, ok := node.(*syntax.Stmt)
+		if !ok {
+			return true
+		}
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		words := make([]string, len(call.Args))
+		for at, arg := range call.Args {
+			word, static := hookpaths.StaticWord(arg, home)
+			if !static {
+				return true
+			}
+			words[at] = word
+		}
+		if aliases && words[0] == "alias" {
+			for _, word := range words[1:] {
+				name, value, ok := strings.Cut(word, "=")
+				if ok && name != "" && !strings.ContainsAny(name, "/$`\\\x22\x27=") && strings.TrimSpace(value) != "" {
+					if defined == nil {
+						defined = map[string]alias{}
+					}
+					defined[name] = alias{value, int(stmt.End().Offset())}
+				}
+			}
+			return true
+		}
+		if !docs || !agentHookConfigShellReadsStdin(words) {
+			return true
+		}
+		// The shell reads the last document on its standard input.
+		var doc *syntax.Redirect
+		for _, redirect := range stmt.Redirs {
+			if (redirect.Op == syntax.Hdoc || redirect.Op == syntax.DashHdoc) && (redirect.N == nil || redirect.N.Value == "0") {
+				doc = redirect
+			}
+		}
+		if doc == nil || doc.Hdoc == nil || doc.Word == nil {
+			return true
+		}
+		// The statement as its line shows it: its words and redirections,
+		// not the documents after the line (the parser ends a statement
+		// past its documents).
+		stmtStart, _, okStmt := span(stmt)
+		stmtEnd := int(call.End().Offset())
+		for _, redirect := range stmt.Redirs {
+			if redirect.Word != nil {
+				stmtEnd = max(stmtEnd, int(redirect.Word.End().Offset()))
+			}
+		}
+		bodyStart, bodyEnd, okBody := span(doc.Hdoc)
+		delimiter, okDelimiter := hookpaths.StaticWord(doc.Word, home)
+		if !okStmt || !okBody || !okDelimiter || delimiter == "" || bodyStart < stmtEnd {
+			return true
+		}
+		// A body that names no hook file, in plain letters or through an
+		// expansion or a pattern, writes none (sandboxStatementMayNameHookConfig
+		// less its line-break test, which every body meets): reading the
+		// call again for it cost an 8 KB body of touch lines 10% more
+		// allocations (guestperf hd-body-cd).
+		if body := command[bodyStart:bodyEnd]; !strings.ContainsAny(body, "$`*?[{\\") && !sandboxStatementNamesHookConfig(body) {
+			return true
+		}
+		docEnd := len(command)
+		if at := strings.Index(command[bodyEnd:], delimiter); at >= 0 {
+			docEnd = bodyEnd + at + len(delimiter)
+		}
+		edits = append(edits, edit{stmtStart, stmtEnd, "(\n" + command[bodyStart:bodyEnd] + "\n)"}, edit{bodyStart, docEnd, ""})
+		return true
+	})
+	if len(defined) != 0 {
+		syntax.Walk(file, func(node syntax.Node) bool {
+			call, ok := node.(*syntax.CallExpr)
+			if !ok || len(call.Args) == 0 {
+				return true
+			}
+			if def, ok := defined[call.Args[0].Lit()]; ok && int(call.Pos().Offset()) >= def.from {
+				if start, end, ok := span(call.Args[0]); ok {
+					edits = append(edits, edit{start, end, def.value})
+				}
+			}
+			return true
+		})
+	}
+	if len(edits) == 0 {
+		return ""
+	}
+	slices.SortStableFunc(edits, func(a, b edit) int { return a.start - b.start })
+	var spliced strings.Builder
+	last := 0
+	for _, e := range edits {
+		if e.start < last {
+			return "" // edits that overlap: no single reading
+		}
+		spliced.WriteString(command[last:e.start])
+		spliced.WriteString(e.text)
+		last = e.end
+	}
+	spliced.WriteString(command[last:])
+	if spliced.Len() > agentHookConfigMaxPlacedBytes {
+		return ""
+	}
+	return spliced.String()
+}
+
+// agentHookConfigShellReadsStdin reports the static words of a shell that
+// runs its standard input as its script: bash, sh, dash, zsh, ash or ksh,
+// then only options (-o and +o with their value, --login, --noprofile,
+// --norc, --posix, short clusters without c), and after -s or -- only its
+// positional parameters. A -c or a script operand gives the input to
+// another program.
+func agentHookConfigShellReadsStdin(words []string) bool {
+	switch path.Base(words[0]) {
+	case "bash", "sh", "dash", "zsh", "ash", "ksh":
+	default:
+		return false
+	}
+	for at := 1; at < len(words); at++ {
+		word := words[at]
+		switch {
+		case word == "--":
+			return at == len(words)-1
+		case word == "-o" || word == "+o":
+			at++
+		case word == "--login" || word == "--noprofile" || word == "--norc" || word == "--posix":
+		case len(word) > 1 && (strings.HasPrefix(word, "-") || strings.HasPrefix(word, "+")) && !strings.HasPrefix(word, "--"):
+			if strings.Contains(word, "c") {
+				return false
+			}
+			if strings.Contains(word, "s") {
+				return true
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func agentHookConfigExactWords(command actionfacts.CommandFact) []string {

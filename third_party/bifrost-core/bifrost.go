@@ -6136,6 +6136,14 @@ func executeRequestWithRetries[T any](
 		// the SSE stream instead of returning proper HTTP error status codes.
 		if bifrostError == nil {
 			if streamChan, ok := any(result).(chan *schemas.BifrostStreamChunk); ok {
+				// A provider returns a stream only after its HTTP status check
+				// passed: it accepted the request and may bill it, whatever the
+				// stream then says (an error event with a status, a break). Kept
+				// across retries and fallbacks, so a later attempt's error
+				// status does not hide this one.
+				if streamChan != nil {
+					ctx.SetValue(schemas.BifrostContextKeyProviderAccepted, true)
+				}
 				checkedStream, drainDone, firstChunkErr := providerUtils.CheckFirstStreamChunkForError(ctx, streamChan)
 				if firstChunkErr != nil {
 					<-drainDone

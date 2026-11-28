@@ -95,6 +95,8 @@ func refusalHint(v Verdict) string {
 		return "Tell the user DefenseClaw's tool rules refused this MCP tool call." + dont
 	case CategoryPushRedirect:
 		return "Tell the user this push was refused: while pull --push-branch pushes this actor's work, git pushes go only to the repository they approved." + dont
+	case CategoryRateLimited:
+		return "Slow down: wait a second, then send fewer requests at a time; DefenseClaw limits how fast one actor can send."
 	case CategoryUnattributed, CategoryActorNotLive, CategoryCalloutError, CategoryChainUnchecked, CategoryPushUnchecked:
 		return "DefenseClaw could not check this request. Retry in a moment; if it keeps failing, tell the user."
 	case CategoryBodyUninspected, CategoryPathAmbiguous:

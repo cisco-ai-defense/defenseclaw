@@ -326,6 +326,14 @@ type Text struct {
 	// (literal_ranges.go).
 	hitMu   sync.Mutex
 	hitSets map[*literalPlan]hitSet
+	// memo, for a text of a role checked again and again (NewTextMemo,
+	// memo.go): memoGen is this text's turn in it, memoCommon the common
+	// prefix with the text before; the views answer the literals (mu).
+	memo       *Memo
+	memoGen    uint64
+	memoCommon int
+	rawView    *PresenceView
+	foldedView *PresenceView
 }
 
 // NewText returns the check state for text.
@@ -351,6 +359,21 @@ func (t *Text) holds(re *regexp.Regexp) bool {
 		return false
 	}
 	if !set.ok {
+		return true
+	}
+	if t.memo != nil {
+		for _, c := range set.clauses {
+			found := false
+			for _, l := range c {
+				if t.contains(l.text, l.fold) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
 		return true
 	}
 	folded := ""
@@ -384,6 +407,16 @@ func (t *Text) holds(re *regexp.Regexp) bool {
 // MayMatch is Text.MayMatch for one expression.
 func MayMatch(re *regexp.Regexp, text string) bool {
 	return NewText(text).MayMatch(re)
+}
+
+// HoldsLiterals is RequiredLiteralsIn for the text, of any length: false
+// only when re cannot match it. The text keeps its fold for the next
+// expression, so several expressions read one short text cheaply.
+func (t *Text) HoldsLiterals(re *regexp.Regexp) bool {
+	if t == nil || re == nil {
+		return true
+	}
+	return t.holds(re)
 }
 
 // RequiredLiteralsIn reports whether text, of any length, satisfies every

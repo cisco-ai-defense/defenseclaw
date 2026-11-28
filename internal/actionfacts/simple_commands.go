@@ -613,11 +613,17 @@ func SimpleCommandsWith(input Input, facts Facts, operands *RelativeOperandMemo)
 		}
 		// A command that is a piece of the call as written adds nothing: the
 		// call is judged as written, with the rules and the enforcement it had
-		// before this reading. Only a reading with a variable resolved is new.
+		// before this reading. Only a reading with a variable resolved is new,
+		// and so is a piece the walk read in a folder a cd moved the shell
+		// to: the call as written is judged in its own folder only, so time {
+		// cd D && ls; }; X, or cd D; cat <(...); X, judged X in the hook
+		// folder alone, a state write in D included (substrate-1 GAP-0668).
 		// The walk records the pieces as it reads them, so a text that merely
 		// occurs elsewhere in the call (a comment, a quoted word) is no piece.
 		if pieces != nil {
-			result = slices.DeleteFunc(result, pieces.has)
+			result = slices.DeleteFunc(result, func(simple SimpleCommand) bool {
+				return simple.CWD == input.CWD && pieces.has(simple)
+			})
 		}
 	}
 	return result
@@ -1416,10 +1422,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					innerInput := input
 					innerInput.Command, innerInput.Args, innerInput.Argv = script, nil, nil
 					innerInput.CWD = state.cwd
-					var wrapperFolderUnknown bool
+					var wrapperFolderUnknown, wrapperFolder bool
 					if folder, changed, unknown := simpleNestedChildFolder(nestedCall.Args, nestedVars, state.cwd, input.StandInCWD); changed {
 						innerInput.CWD = folder
-						wrapperFolderUnknown = unknown
+						wrapperFolder, wrapperFolderUnknown = true, unknown
 						innerCWDUnknown = innerCWDUnknown || unknown
 					}
 					if innerCWDUnknown {
@@ -1492,7 +1498,11 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					// moved to: `cd X || cd Y && eval "$body"` runs the body
 					// in X or Y, so it is read in each of them as well
 					// (rel-1-0-10:GAP-1144, GAP-0183). A body that starts in
-					// a folder of its own (innerCWDUnknown) has none.
+					// a folder of its own (innerCWDUnknown) has none. A body a
+					// wrapper runs in a folder it names (sudo -D DIR, env -C
+					// DIR, chroot) starts in that folder as placed from each
+					// of the caller's folders, never in the caller's folder
+					// itself (rel-1-0-10:GAP-1274).
 					//
 					// These readings come on top of the statements of the
 					// call: they never make the call over its budget. Past
@@ -1506,6 +1516,13 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					if !innerCWDUnknown && innerInput.CWD != "" {
 						capped := false
 						for _, dir := range mayRunIn[partIndex] {
+							if wrapperFolder {
+								folder, _, unknown := simpleNestedChildFolder(nestedCall.Args, nestedVars, dir, input.StandInCWD)
+								if unknown || folder == "" {
+									continue
+								}
+								dir = folder
+							}
 							if dir == innerInput.CWD {
 								continue
 							}
@@ -3518,10 +3535,13 @@ func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd, s
 			}
 			child = parsed.childIndex
 			if !slices.Contains(words[1:child], "--skip-chdir") {
-				if filepath.IsAbs(parsed.root) {
-					folder = filepath.Clean(parsed.root)
+				// A chroot root is a POSIX path: read with the rules of the
+				// cd walk, not the native ones of the gateway host
+				// (rel-1-0-10:GAP-1881).
+				if simplePathAbs(parsed.root) {
+					folder = simplePathClean(parsed.root)
 				} else if folder != "" && !standInReached(folder, standIn) {
-					folder = filepath.Join(folder, parsed.root)
+					folder = simplePathJoin(folder, parsed.root)
 				} else {
 					return "", true, true
 				}
@@ -3537,16 +3557,53 @@ func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd, s
 				return "", true, true
 			}
 			if parsed.workDir != "" {
-				if filepath.IsAbs(parsed.workDir) {
-					folder = filepath.Clean(parsed.workDir)
+				if simplePathAbs(parsed.workDir) {
+					folder = simplePathClean(parsed.workDir)
 				} else if folder != "" && !standInReached(folder, standIn) {
-					folder = filepath.Join(folder, parsed.workDir)
+					folder = simplePathJoin(folder, parsed.workDir)
 				} else {
 					return "", true, true
 				}
 				changed = true
 			}
+		case "env":
+			dir, chdir, known := simpleEnvChdir(words, static)
+			if !chdir {
+				child = WrapperChildIndex(words, static)
+				break
+			}
+			if !known {
+				return "", true, true
+			}
+			switch {
+			case simplePathAbs(dir):
+				folder = simplePathClean(dir)
+			case folder != "" && !standInReached(folder, standIn):
+				folder = path.Join(folder, dir)
+			default:
+				return "", true, true
+			}
+			changed = true
+			child = simpleEnvChildIndex(words)
 		default:
+			// A prefix wrapper chain records the folder it runs its child in
+			// (sudo -D/--chdir DIR, env -C DIR) or that the child starts in
+			// a folder the words do not name (sudo -i/--login: the target
+			// user's home). The child's relative paths are read there, not
+			// in the caller's folder (rel-1-0-10:GAP-1274, the class of
+			// GAP-1241 for chroot and nsenter).
+			if run, ok := StaticPrefixWrapperChild(words, static); ok {
+				if run.DirUnknown {
+					return "", true, true
+				}
+				if run.Dir != "" {
+					next, known := simpleWrapperRunFolder(run.Dir, folder, vars, standIn)
+					if !known {
+						return "", true, true
+					}
+					folder, changed = next, true
+				}
+			}
 			child = WrapperChildIndex(words, static)
 		}
 		if child <= 0 || child >= len(words) {
@@ -3555,6 +3612,50 @@ func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd, s
 		words, static = words[child:], static[child:]
 	}
 	return folder, changed, false
+}
+
+// simpleWrapperRunFolder is the folder a wrapper's child runs in when the
+// wrapper names dir (PrefixWrapperRun.Dir) and the caller runs in cwd: an
+// absolute dir as written, one spelled from the home (~, ~/x, the wrapper
+// reader's home marker) below the HOME the walk knows, a relative one below
+// cwd. known is false when the walk cannot place it: no home or no caller
+// folder, another account's home (~user), or a folder reached from the
+// stand-in folder (rel-1-0-10:GAP-2188).
+func simpleWrapperRunFolder(dir, cwd string, vars map[string]string, standIn string) (string, bool) {
+	if rest, home := strings.CutPrefix(dir, homeDirSentinel); home {
+		dir = "~" + rest
+	}
+	if dir == "~" || strings.HasPrefix(dir, "~/") {
+		home := vars["HOME"]
+		if !filepath.IsAbs(home) {
+			return "", false
+		}
+		folder := OperandPath(strings.TrimPrefix(strings.TrimPrefix(dir, "~"), "/"), home)
+		if hasDotDotStep(filepath.ToSlash(folder)) {
+			return "", false
+		}
+		return folder, true
+	}
+	if strings.HasPrefix(dir, "~") {
+		return "", false
+	}
+	var folder string
+	switch {
+	case filepath.IsAbs(dir):
+		folder = OperandPath(dir, "")
+	case cwd == "" || standInReached(cwd, standIn):
+		return "", false
+	default:
+		folder = OperandPath(dir, cwd)
+	}
+	// OperandPath keeps a dot-dot step raw where the kernel climbs from a
+	// link target the text does not name; the child's paths would later be
+	// joined to that text, so the folder is not known (CHK-RF-VB7 GAP-1274
+	// N2).
+	if hasDotDotStep(filepath.ToSlash(folder)) {
+		return "", false
+	}
+	return folder, true
 }
 
 // standInReached reports that folder is the stand-in folder (Input.StandInCWD),
@@ -3568,6 +3669,42 @@ func standInReached(folder, standIn string) bool {
 	sep := string(filepath.Separator)
 	return folder == standIn || strings.HasPrefix(folder, standIn+sep) ||
 		strings.HasPrefix(standIn, strings.TrimSuffix(folder, sep)+sep)
+}
+
+// simpleEnvChdir is the folder an env call (words after the walk expanded
+// them) runs its program in: the value of its last -C DIR, -CDIR,
+// --chdir DIR or --chdir=DIR before the program, as GNU env reads it
+// (substrate-1:GAP-0685). chdir is false when env changes no folder; known
+// is false when the folder word is made at run time or empty.
+func simpleEnvChdir(words []string, static []bool) (dir string, chdir, known bool) {
+	known = true
+	for index := 1; index < len(words); index++ {
+		arg := words[index]
+		if !static[index] {
+			return dir, chdir, false
+		}
+		switch {
+		case arg == "--":
+			return dir, chdir, known
+		case arg == "--chdir" || arg == "-C":
+			index++
+			if index >= len(words) {
+				return "", true, false
+			}
+			dir, chdir, known = words[index], true, static[index] && words[index] != ""
+		case len(arg) > len("--chdir=") && strings.HasPrefix(arg, "--chdir="):
+			dir, chdir, known = strings.TrimPrefix(arg, "--chdir="), true, true
+		case len(arg) > len("-C") && strings.HasPrefix(arg, "-C"):
+			dir, chdir, known = strings.TrimPrefix(arg, "-C"), true, true
+		case arg == "-u" || arg == "--unset":
+			index++
+		case strings.HasPrefix(arg, "-") || isStaticEnvironmentAssignment(arg):
+			continue
+		default:
+			return dir, chdir, known
+		}
+	}
+	return dir, chdir, known
 }
 
 // simpleNestedScript returns a static shell -c or eval body. eval shares the
@@ -3761,6 +3898,7 @@ func simpleNestedScriptRun(args []*syntax.Word, vars map[string]string, depth, n
 		// invocation grammar as Analyze so option order and +n are honored.
 		return "", false, false, false
 	}
+	shortSeen := false
 	for index := 1; index < len(args); index++ {
 		// The option is the word the shell sees, after quote removal and
 		// escapes ('-c', "-c", $'-c', -'c', \-c read as -c), not its
@@ -3777,6 +3915,16 @@ func simpleNestedScriptRun(args []*syntax.Word, vars map[string]string, depth, n
 		if option == "--" {
 			continue
 		}
+		if shellProgram == "bash" && !shortSeen && strings.HasPrefix(option, "--") {
+			if login, ok := simpleBashLongOption(option); ok {
+				if login && cwdUnknown != nil {
+					// A login shell runs its profile before the body.
+					*cwdUnknown = true
+				}
+				continue
+			}
+		}
+		shortSeen = true
 		if option == "-o" || option == "+o" {
 			index++
 			if index >= len(args) {
@@ -3811,6 +3959,25 @@ func simpleNestedScriptRun(args []*syntax.Word, vars map[string]string, depth, n
 		}
 	}
 	return "", false, false, false
+}
+
+// simpleBashLongOption reports a long option bash reads before its short
+// ones, as Analyze reads it (parseBashInvocation), that takes no value and
+// leaves a following -c body what the shell runs: --norc, --noprofile,
+// --noediting, --posix, --restricted, --verbose and --login (login: the
+// profile it runs may change folder first). Before, the walk read no long
+// option, so bash --norc -c BODY was a gap of the split whose twins added the
+// unknown tier (ACTION-COMPOUND-LIMIT) to a relative protected path of BODY,
+// in the folder a cd or an env -C gave it (substrate-1:GAP-0685 follow-up).
+// --rcfile, --init-file and --debugger name startup input and stay unread.
+func simpleBashLongOption(option string) (login, ok bool) {
+	switch option {
+	case "--login":
+		return true, true
+	case "--norc", "--noprofile", "--noediting", "--posix", "--restricted", "--verbose":
+		return false, true
+	}
+	return false, false
 }
 
 func simpleShellNoExec(args []*syntax.Word, vars map[string]string, program string) bool {
@@ -3883,10 +4050,15 @@ func simpleNestedWrapper(program string) bool {
 	}
 }
 
-// An env assignment changes the child's environment but leaves a following
-// static shell -c body executable. Directory changes are accepted here only
-// when they preserve the caller's directory; other forms stay whole-action
-// only until the simple-command walker can carry their new CWD.
+// An env assignment changes the environment of the child but leaves a
+// following static shell -c body executable. A change of folder (-C DIR,
+// -CDIR, --chdir DIR, --chdir=DIR) runs the child in DIR, as (cd DIR &&
+// child) does: the walk starts a nested body there (simpleNestedChildFolder)
+// and Analyze reads the child there (posixEnvChdir, substrate-1:GAP-0685),
+// so the call is no gap of the split. Before GAP-0685 the walk stopped at
+// such an env (a parse gap); once Analyze read the child, that gap added the
+// unknown tier (ACTION-COMPOUND-LIMIT) to every protected path the child
+// touches, which its cd spelling does not get.
 func simpleEnvChildIndex(argv []string) int {
 	for index := 1; index < len(argv); index++ {
 		arg := argv[index]
@@ -3906,13 +4078,14 @@ func simpleEnvChildIndex(argv []string) int {
 			}
 		case strings.HasPrefix(arg, "--unset="):
 			continue
-		case arg == "--chdir=." || arg == "-C.":
-			continue
 		case arg == "--chdir" || arg == "-C":
 			index++
-			if index >= len(argv) || argv[index] != "." {
+			if index >= len(argv) {
 				return -1
 			}
+		case len(arg) > len("--chdir=") && strings.HasPrefix(arg, "--chdir="),
+			len(arg) > len("-C") && strings.HasPrefix(arg, "-C"):
+			continue
 		case strings.HasPrefix(arg, "-"):
 			return -1
 		case isStaticEnvironmentAssignment(arg):
@@ -4511,10 +4684,7 @@ func simpleCommandNextCWD(source string, state *simpleShellState, vars map[strin
 	if state.cwd == "" {
 		return "", true
 	}
-	if simplePOSIXAbs(state.cwd) {
-		return path.Join(state.cwd, dir), true
-	}
-	return filepath.Clean(filepath.Join(state.cwd, dir)), true
+	return simplePathJoin(state.cwd, dir), true
 }
 
 // simplePathAbs reports whether a shell directory or operand is absolute.
@@ -4533,6 +4703,16 @@ func simplePathClean(value string) string {
 		return path.Clean(value)
 	}
 	return filepath.Clean(value)
+}
+
+// simplePathJoin joins a relative operand to a folder with the rules of
+// the folder: POSIX rules for a "/" folder (filepath.Join would turn
+// /srv/root into \srv\root on Windows), native rules for any other.
+func simplePathJoin(folder, operand string) string {
+	if simplePOSIXAbs(folder) {
+		return path.Join(folder, operand)
+	}
+	return filepath.Join(folder, operand)
 }
 
 // simplePOSIXAbs reports a "/" path that is not a "//host/share" one, which

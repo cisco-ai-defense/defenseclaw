@@ -559,9 +559,7 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		if err := os.WriteFile(keys, []byte("key\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(keys, filepath.Join(project, "keys.link")); err != nil {
-			t.Fatal(err)
-		}
+		testenv.Symlink(t, keys, filepath.Join(project, "keys.link"))
 		for _, input := range []actionfacts.Input{
 			{Tool: "Bash", Args: []byte(`{"command":"echo key >> ./keys.link"}`), CWD: project, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX},
 			{Tool: "Write", Args: []byte(`{"file_path":"./keys.link","content":"key"}`), CWD: project, ActiveHome: home},

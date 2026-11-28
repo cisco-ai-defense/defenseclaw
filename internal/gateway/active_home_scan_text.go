@@ -10,6 +10,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // ruleReadableHome is the user home the home-relative path rules read in a
@@ -159,12 +161,16 @@ func asciiAlphanumeric(b byte) bool {
 // pass of each of its simple commands, whose folder the walk gives. Each
 // spelling of the operand in text is respelled; the call writes that file, so
 // a second mention of the same word cannot add a finding the write does not
-// already earn.
-func relativeHomeWritesAsTilde(text string, facts actionfacts.Facts) string {
+// already earn. A word of command, the shell text of the call, that spells
+// the operand with quotes (.aws/"credentials", ".aws/credentials") is
+// respelled whole in text, as written there or JSON-escaped, without them: a
+// quoted ~ is no home to the shell, nor to the rules (substrate-1:GAP-0700).
+func relativeHomeWritesAsTilde(text, command string, facts actionfacts.Facts) string {
 	home := strings.TrimRight(facts.ActiveHome, "/")
 	if text == "" || !facts.Authoritative() || len(home) < 2 || home[0] != '/' {
 		return text
 	}
+	spellings := map[string]string{}
 	for _, candidate := range facts.Paths {
 		switch candidate.Access {
 		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
@@ -180,9 +186,99 @@ func relativeHomeWritesAsTilde(text string, facts actionfacts.Facts) string {
 		if !ok || below == "" || !homeRelativeLiteral(below) {
 			continue
 		}
-		text = respellShellWord(text, value, "~/"+below)
+		spellings[value] = "~/" + below
+	}
+	if len(spellings) == 0 {
+		return text
+	}
+	if strings.ContainsAny(command, `'"`) {
+		text = respellQuotedShellWords(text, command, spellings)
+	}
+	for value, spelling := range spellings {
+		text = respellShellWord(text, value, spelling)
 	}
 	return text
+}
+
+// respellQuotedShellWords replaces in text each mention of an argument or
+// redirect word of command that has a quoted part and whose literal value is
+// a key of spellings with its spelling; text may hold command JSON-escaped
+// (a hook's tool input). A word with an expansion or an escape is left as
+// written; a command the parser does not read leaves text unchanged.
+func respellQuotedShellWords(text, command string, spellings map[string]string) string {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(command), "")
+	if err != nil {
+		return text
+	}
+	consider := func(word *syntax.Word) {
+		if word == nil {
+			return
+		}
+		value, ok := quotedLiteralWord(word)
+		if !ok {
+			return
+		}
+		spelling, ok := spellings[value]
+		start, end := int(word.Pos().Offset()), int(word.End().Offset())
+		if !ok || start < 0 || end <= start || end > len(command) {
+			return
+		}
+		raw := command[start:end]
+		text = strings.ReplaceAll(text, raw, spelling)
+		if escaped := strings.ReplaceAll(raw, `"`, `\"`); escaped != raw {
+			text = strings.ReplaceAll(text, escaped, spelling)
+		}
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.CallExpr:
+			for _, word := range node.Args {
+				consider(word)
+			}
+		case *syntax.Redirect:
+			consider(node.Word)
+		}
+		return true
+	})
+	return text
+}
+
+// quotedLiteralWord returns the value of word when it is made of literal
+// parts only, at least one of them quoted, with no escape.
+func quotedLiteralWord(word *syntax.Word) (string, bool) {
+	var value strings.Builder
+	quoted := false
+	literal := func(lit string) bool {
+		value.WriteString(lit)
+		return !strings.Contains(lit, `\`)
+	}
+	for _, part := range word.Parts {
+		switch part := part.(type) {
+		case *syntax.Lit:
+			if !literal(part.Value) {
+				return "", false
+			}
+		case *syntax.SglQuoted:
+			if part.Dollar || !literal(part.Value) {
+				return "", false
+			}
+			quoted = true
+		case *syntax.DblQuoted:
+			if part.Dollar {
+				return "", false
+			}
+			for _, inner := range part.Parts {
+				lit, ok := inner.(*syntax.Lit)
+				if !ok || !literal(lit.Value) {
+					return "", false
+				}
+			}
+			quoted = true
+		default:
+			return "", false
+		}
+	}
+	return value.String(), quoted
 }
 
 // homeRelativeLiteral reports whether below, a clean path under the home, is
