@@ -2036,6 +2036,22 @@ const r105Rows: DocRow[] = [
   { gap: "rel-1-0-10 GAP-1535", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["On Windows, a Git Bash command that reaches a file through the shell's working folder ($(pwd)/, ~+/, or a HOME set from it at run time) is not judged as that file; name the file directly."] },
   // Documented limit the lead ruled (rel-1-0-10 GAP-1588): A command joined to other statements
   { gap: "rel-1-0-10 GAP-1588", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["On Windows, a command joined to other statements in some list forms (a background &, a subshell, or a here-document on the same line) may be judged without the context of the other statements."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0260): outbound requests after a credentials read
+  { gap: "substrate-1 GAP-0260", page: "substrate/threat-model.mdx", section: "Known limits", has: ["After a credentials read, the Substrate callout refuses outbound requests for the rest of the chain window, including hosts on the egress allowlist."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0636): npx MCP server programs
+  { gap: "substrate-1 GAP-0636", page: "substrate/threat-model.mdx", section: "Known limits", has: ["An npx MCP server's own programs are attested from the actor's npx cache; tools the server starts through PATH and a package's first, uncached run are not."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0710): commands DefenseClaw cannot fully read
+  { gap: "substrate-1 GAP-0710", page: "substrate/threat-model.mdx", section: "Known limits", has: ["A command that DefenseClaw cannot fully read and that touches hundreds of files takes up to about twice the time of its plainly written form."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0886): very long commands
+  { gap: "substrate-1 GAP-0886", page: "substrate/threat-model.mdx", section: "Known limits", has: ["On very long commands the laptop may alert at its evaluation limit where a Substrate actor blocks a private-key read."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0555): Claude settings edits in a sandbox without the kit
+  { gap: "substrate-1 GAP-0555", page: "substrate/threat-model.mdx", section: "Known limits", has: ["In a sandbox without the DefenseClaw kit, edits of Claude settings files are refused; full rewrites that keep DefenseClaw hooks and new files are judged."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0705): files changed by inline interpreter code
+  { gap: "substrate-1 GAP-0705", page: "substrate/threat-model.mdx", section: "Known limits", has: ["Files changed by inline interpreter code (perl -pi, python -c) are judged by the interpreter rules, not by file path."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0700): a home file spelled with a drive letter in Git Bash text
+  { gap: "substrate-1 GAP-0700", page: "substrate/threat-model.mdx", section: "Known limits", has: ["On Windows, a home file spelled with a drive letter in Git Bash text is judged by the Windows path rules."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-2169): Windows hook binary size in 1.0.11
+  { gap: "rel-1-0-10 GAP-2169", page: "support-matrix.mdx", section: "Platforms", has: ["The Windows hook binary is about 44 MB in 1.0.11; the added size is the command parsers that read what each tool call does."] },
 ];
 
 function pageSection(name: string, heading?: string): string {
