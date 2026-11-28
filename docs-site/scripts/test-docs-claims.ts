@@ -2032,6 +2032,8 @@ const r105Rows: DocRow[] = [
   { gap: "rel-1-0-10 GAP-0898", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["A find -exec reader over another account's home outside /home and /Users is not raised as a read of that account's credentials; use file permissions for shared or mounted homes."] },
   // Documented limit the lead ruled (rel-1-0-10 GAP-2149): Removing hooks on Windows
   { gap: "rel-1-0-10 GAP-2149", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["On Windows, removing DefenseClaw hooks from an agent with many configured hook entries can take up to about 30 seconds."] },
+  // Documented limit the lead ruled (rel-1-0-10 GAP-1535): A Git Bash file reached through the working folder
+  { gap: "rel-1-0-10 GAP-1535", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["On Windows, a Git Bash command that reaches a file through the shell's working folder ($(pwd)/, ~+/, or a HOME set from it at run time) is not judged as that file; name the file directly."] },
 ];
 
 function pageSection(name: string, heading?: string): string {
