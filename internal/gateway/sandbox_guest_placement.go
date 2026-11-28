@@ -144,9 +144,18 @@ type guestPlacementPlan struct {
 	rest           bool
 	top            []guestPending
 	calls          []guestScriptCall
-	dirs, targets  []string
-	known          map[string]int
-	byPosition     bool
+	// keyCalls are the script calls the split read whose text may read a
+	// key (guestCandidateMayReadKey), and lateTargets marks each cd target
+	// (targets) the split's own walk never reached: a target only a cd the
+	// split does not run reaches (an uncalled function's body). The split
+	// read a keyCall in the folders it knew, so such a target is one more
+	// candidate folder for it from the place the target is known
+	// (rel-1-0-10:GAP-2246).
+	keyCalls      []guestScriptCall
+	lateTargets   []bool
+	dirs, targets []string
+	known         map[string]int
+	byPosition    bool
 	// overBudget is trustedCallOverStatementBudget of the call as the hook
 	// sent it, worked out once when a statement-budget placement asks.
 	overBudget     func() bool
@@ -395,6 +404,7 @@ func newGuestPlacementPlan(input actionfacts.Input, facts actionfacts.Facts,
 	// (splitRead) is not read again: it was read in the folders known at its
 	// own place. Its cd targets are still kept.
 	scriptCalls, cdpath := guestScriptCalls(command, input.ActiveHome)
+	splitTargets := targets
 	var known map[string]int
 	var looped []string
 	targets, known, looped = guestKnownFoldersLooped(scriptCalls, dirs, targets, followed, input.CWD, input.ActiveHome, cdpath, cdMemo)
@@ -411,6 +421,17 @@ func newGuestPlacementPlan(input actionfacts.Input, facts actionfacts.Facts,
 	for _, call := range scriptCalls {
 		if !splitRead[call.text] {
 			plan.calls = append(plan.calls, call)
+		} else if guestCandidateMayReadKey(call.text) {
+			plan.keyCalls = append(plan.keyCalls, call)
+		}
+	}
+	if len(plan.keyCalls) != 0 {
+		plan.lateTargets = make([]bool, len(targets))
+		for at, dir := range targets {
+			plan.lateTargets[at] = !slices.Contains(splitTargets, dir)
+		}
+		if !slices.Contains(plan.lateTargets, true) {
+			plan.keyCalls, plan.lateTargets = nil, nil
 		}
 	}
 	plan.dirs, plan.targets, plan.known = dirs, targets, known
@@ -617,6 +638,23 @@ func (plan *guestPlacementPlan) placements(statementBudget bool) (placements []g
 		for at, dir := range plan.targets {
 			if fresh(targetsKnown[at]) {
 				callReadings = guestCollect(callReadings, callsListed, &callsPlain, &callsDropped, &arrivals, guestPending{call.text, dir, true, 0})
+			}
+		}
+	}
+	// A call the split read that may read a key is read in each cd target
+	// the split's walk never reached, as a candidate, where the target is
+	// known by the call's place: after f() { cd .ssh; }, a relative read of
+	// a key is the laptop's folder-candidate read in that folder, which
+	// blocks, and the copy-mode actor alerted with the evaluation limit
+	// alone (rel-1-0-10:GAP-2246). Only the placed children read it (the
+	// statement budget), where a candidate counts for the private-key read
+	// proof alone.
+	if statementBudget {
+		for _, call := range plan.keyCalls {
+			for at, dir := range plan.targets {
+				if plan.lateTargets[at] && targetsKnown[at] <= call.at {
+					callReadings = guestCollect(callReadings, callsListed, &callsPlain, &callsDropped, &arrivals, guestPending{call.text, dir, true, 0})
+				}
 			}
 		}
 	}

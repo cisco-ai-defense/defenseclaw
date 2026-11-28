@@ -492,10 +492,13 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 		// reaches a protected file is the write, and an extraction that
 		// names no member, or a pattern, writes members the archive
 		// chooses into the keys directory.
+		// A -C directory through the command's own working-directory link
+		// is the folder below the one it runs in, judged as that plain
+		// spelling (rel-1-0-10:GAP-2265).
 		if destination, members, extract, ok := tarScan(words[1:], makeStatic(len(words)-1), cwd); ok && extract &&
-			OperandPath(destination, cwd) != cwd &&
-			protectedReachPath(OperandPath(destination, cwd), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
-			destination = OperandPath(destination, cwd)
+			tarPlacedDestination(destination, cwd) != cwd &&
+			protectedReachPath(tarPlacedDestination(destination, cwd), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
+			destination = tarPlacedDestination(destination, cwd)
 			if len(members) == 0 {
 				return []string{destination}
 			}
@@ -511,6 +514,18 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 		}
 	}
 	return nil
+}
+
+// tarPlacedDestination is the folder a tar -C operand names for a command
+// that runs in cwd: the operand placed in cwd, and a folder through the
+// command's own working-directory link placed below cwd
+// (actionfacts.ProcessCWDLinkSpelling).
+func tarPlacedDestination(destination, cwd string) string {
+	destination = OperandPath(destination, cwd)
+	if placed, ok := actionfacts.ProcessCWDLinkSpelling(destination, cwd); ok {
+		return placed
+	}
+	return destination
 }
 
 // awkInlineProgramText keeps option data and input operands out of the source

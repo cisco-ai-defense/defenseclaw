@@ -1619,6 +1619,16 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				}
 			}
 		}
+		// A sandbox guest opens its own cwd link at the guest cwd attested
+		// for this call, never at the host-side one: the operand names the
+		// file below it, as its plain spelling does (rel-1-0-10:GAP-2265).
+		// The command's links name the operand as written.
+		written := target
+		if request.sandboxGuest && filepath.IsAbs(request.SandboxGuestCWD) {
+			if placed, ok := actionfacts.ProcessCWDLinkSpelling(target, request.SandboxGuestCWD); ok {
+				target = placed
+			}
+		}
 		// Only the event cwd can interpret the process-dependent alias.
 		if hookpaths.ProcCWDWriteOperand(target) {
 			if !strings.HasPrefix(target, "/proc/self/cwd/") {
@@ -1644,6 +1654,28 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		if guestRootProof && (guestProtected(target) || guestAliasProtected(target)) {
 			return confirmed()
+		}
+		// A guest write spelled through its own cwd link that the placed
+		// reading does not prove protected keeps the reading of the link as
+		// written: where this gateway cannot place the link itself the write
+		// stays unknown on every gateway OS, as before the placement
+		// (rel-1-0-10:GAP-2265 parity). The placement only adds a proof.
+		if written != target && hookpaths.ProcCWDWriteOperand(written) {
+			if !strings.HasPrefix(written, "/proc/self/cwd/") {
+				return unproven(hookpaths.UnprovenTargetUnresolved, written)
+			}
+			if resolved, present := request.ResolvedWriteTargets[written]; present {
+				if resolved == "" {
+					return unproven(hookpaths.UnprovenTargetUnresolved, written)
+				}
+				if isProtected(resolved) {
+					return confirmed()
+				}
+			} else if cannotResolveLocally {
+				return unproven(hookpaths.UnprovenTargetUnresolved, written)
+			} else if _, ok := hookpaths.ResolveProcSelfCWDTarget(written, clientCWD); !ok {
+				return unproven(hookpaths.UnprovenTargetUnresolved, written)
+			}
 		}
 		if runtime.GOOS == "linux" && guestAliasUnproved(target, cannotResolveLocally && request.sandboxGuest) {
 			return unproven(hookpaths.UnprovenTargetUnresolved, target)
@@ -1687,7 +1719,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// so the device is read without following links. A managed gateway
 		// cannot walk the user's home (ProtectHome); the hook client's walk of
 		// the same operand replaces only that missing view (GAP-0278).
-		if !safeRedirect && links.OpaqueTargetWithFacts(target, ownCopy, opaqueFacts) &&
+		if !safeRedirect && (links.OpaqueTargetWithFacts(target, ownCopy, opaqueFacts) ||
+			written != target && links.OpaqueTargetWithFacts(written, ownCopy, opaqueFacts)) &&
 			(!absoluteRedirect || !links.AbsoluteRedirectOutsideCDScopes(target, opaqueFacts)) {
 			if info, err := laneLstat(target); err != nil || info.Mode()&os.ModeCharDevice == 0 {
 				return unproven(hookpaths.UnprovenLinkUnread, target)
@@ -1983,6 +2016,18 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		for _, write := range writes {
 			if guestAliasProtected(write) {
+				return confirmed()
+			}
+		}
+	}
+	if request.sandboxGuest && filepath.IsAbs(request.SandboxGuestCWD) && request.SandboxGuestCWD != input.CWD &&
+		strings.Contains(input.Command, "/proc/") && strings.Contains(input.Command, "cwd") {
+		// A writer operand through the guest's own cwd link names the file
+		// below the guest cwd attested for this call, which the host-side
+		// readers below cannot place: read the writers once more in that
+		// cwd. Only a protected target counts (rel-1-0-10:GAP-2265).
+		for _, write := range hookpaths.LiteralWriteOperands(input.Command, request.SandboxGuestCWD, facts.ActiveHome) {
+			if guestProtected(write) {
 				return confirmed()
 			}
 		}

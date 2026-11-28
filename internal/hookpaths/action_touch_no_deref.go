@@ -70,7 +70,11 @@ func noDereferenceTouchStatusIn(command, cwd, home string, startup ShellStartup)
 	memo := NewTargetMemo()
 	unknown := false
 	for _, operand := range operands {
-		path := OperandPath(operand, cwd)
+		path, walkable := entryWalkPath(OperandPath(operand, cwd), cwd)
+		if !walkable {
+			unknown = true
+			continue
+		}
 		parent, known := memo.resolveWriteTarget(filepath.Dir(path))
 		if !known {
 			unknown = true
