@@ -2036,6 +2036,8 @@ const r105Rows: DocRow[] = [
   { gap: "rel-1-0-10 GAP-1535", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["On Windows, a Git Bash command that reaches a file through the shell's working folder ($(pwd)/, ~+/, or a HOME set from it at run time) is not judged as that file; name the file directly."] },
   // Documented limit the lead ruled (rel-1-0-10 GAP-1588): A command joined to other statements
   { gap: "rel-1-0-10 GAP-1588", page: "support-matrix.mdx", section: "Per-user self-protection", has: ["On Windows, a command joined to other statements in some list forms (a background &, a subshell, or a here-document on the same line) may be judged without the context of the other statements."] },
+  // Documented limit the lead ruled (substrate-1 GAP-0260): outbound requests after a credentials read
+  { gap: "substrate-1 GAP-0260", page: "substrate/threat-model.mdx", section: "Known limits", has: ["After a credentials read, the Substrate callout refuses outbound requests for the rest of the chain window, including hosts on the egress allowlist."] },
 ];
 
 function pageSection(name: string, heading?: string): string {
