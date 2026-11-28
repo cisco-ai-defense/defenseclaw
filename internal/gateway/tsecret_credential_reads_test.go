@@ -177,7 +177,9 @@ func TestGAP1652RgManyFoldersFromADeepFolderKeepsTheRead(t *testing.T) {
 			}
 			folders = append(folders, name)
 		}
-		named := strings.Join(folders, " ") + " " + cloud
+		// The shell word spells the folder with forward slashes: a POSIX
+		// shell reads the backslashes of a Windows temp path as escapes.
+		named := strings.Join(folders, " ") + " " + filepath.ToSlash(cloud)
 		rows = append(rows,
 			tsecretReadRow{fmt.Sprintf("rg-%d-folders", n), "rg KEY " + named, true},
 			tsecretReadRow{fmt.Sprintf("grep-r-%d-folders", n), "grep -r KEY " + named, true})
